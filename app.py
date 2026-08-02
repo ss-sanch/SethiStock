@@ -4,6 +4,35 @@ import plotly.graph_objects as go
 import pandas as pd
 
 st.set_page_config(page_title="SethiStock", layout="wide")
+
+# --- CUSTOM CSS FOR UI POLISH (The Qualtrim Effect) ---
+st.markdown("""
+<style>
+    /* 1. Eliminate the massive empty space at the top */
+    .block-container {
+        padding-top: 1rem;
+        margin-top: 0rem;
+    }
+    
+    /* Hide the default Streamlit top menu for a cleaner SaaS feel */
+    header {visibility: hidden;}
+    
+    /* 2. Make the main background slightly grayish */
+    [data-testid="stAppViewContainer"] {
+        background-color: #F4F5F7; 
+    }
+    
+    /* 3. Style the Sidebar output metrics to look like standalone white cards */
+    [data-testid="stMetric"] {
+        background-color: #FFFFFF;
+        padding: 15px;
+        border-radius: 8px;
+        box-shadow: 0px 2px 5px rgba(0,0,0,0.05);
+        border: 1px solid #E6E6E9;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 st.title("SethiStock Analysis Platform")
 
 # --- SIDEBAR: Inputs & Valuation Results ---
@@ -19,7 +48,7 @@ exit_multiple = st.sidebar.slider("Exit Multiple (Price/FCF)", 10.0, 100.0, 30.0
 if ticker_symbol:
     ticker = yf.Ticker(ticker_symbol)
     
-    # --- 1. CALCULATE DCF FIRST (To display in sidebar) ---
+    # --- 1. CALCULATE DCF FIRST ---
     info = ticker.info
     current_price = info.get('currentPrice', info.get('regularMarketPrice', 0))
     shares = info.get('sharesOutstanding', 0)
@@ -73,7 +102,16 @@ if ticker_symbol:
                     high=history['High'],
                     low=history['Low'],
                     close=history['Close'])])
-        fig_candle.update_layout(xaxis_rangeslider_visible=False, margin=dict(l=0, r=0, t=0, b=0), height=400)
+        
+        # Injecting the "White Card" look directly into the Plotly layout
+        fig_candle.update_layout(
+            xaxis_rangeslider_visible=False, 
+            margin=dict(l=15, r=15, t=40, b=15), 
+            height=400,
+            paper_bgcolor="#FFFFFF", 
+            plot_bgcolor="#FFFFFF",
+            title="Price Action"
+        )
         st.plotly_chart(fig_candle, use_container_width=True)
     else:
         st.warning("No price data found.")
@@ -89,18 +127,28 @@ if ticker_symbol:
         df_fin = pd.DataFrame({'Revenue': rev, 'Net Income': ni}).sort_index()
         df_fin.index = df_fin.index.astype(str).str[:4]
         
-        # Create a 2-column grid for the small "card" graphs
         col1, col2 = st.columns(2)
         
         with col1:
             fig_rev = go.Figure(data=[go.Bar(x=df_fin.index, y=df_fin['Revenue'], marker_color='#1f77b4')])
-            fig_rev.update_layout(title="Total Revenue", margin=dict(l=0, r=0, t=30, b=0), height=250, template="plotly_white")
+            fig_rev.update_layout(
+                title="Total Revenue", 
+                margin=dict(l=15, r=15, t=40, b=15), 
+                height=250, 
+                paper_bgcolor="#FFFFFF", 
+                plot_bgcolor="#FFFFFF"
+            )
             st.plotly_chart(fig_rev, use_container_width=True)
             
         with col2:
             fig_ni = go.Figure(data=[go.Bar(x=df_fin.index, y=df_fin['Net Income'], marker_color='#2ca02c')])
-            fig_ni.update_layout(title="Net Income", margin=dict(l=0, r=0, t=30, b=0), height=250, template="plotly_white")
+            fig_ni.update_layout(
+                title="Net Income", 
+                margin=dict(l=15, r=15, t=40, b=15), 
+                height=250, 
+                paper_bgcolor="#FFFFFF", 
+                plot_bgcolor="#FFFFFF"
+            )
             st.plotly_chart(fig_ni, use_container_width=True)
     else:
         st.warning("Historical financial data is not currently available for this ticker.")
-    
