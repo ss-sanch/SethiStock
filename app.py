@@ -1,108 +1,107 @@
 import streamlit as st
 import yfinance as yf
 import plotly.graph_objects as go
+import pandas as pd
 
-# Page Configuration
 st.set_page_config(page_title="SethiStock", layout="wide")
+st.title("SethiStock Analysis Platform")
 
-# Sidebar: Reverse DCF Calculator Engine (Exit Multiple Method)
-st.sidebar.header("Reverse DCF Calculator")
-st.sidebar.write("Adjust the parameters to calculate your required entry price.")
+# Sidebar for search
+st.sidebar.header("Search & Parameters")
+ticker_symbol = st.sidebar.text_input("Enter Stock Ticker (e.g., AAPL, MSFT)", "AAPL").upper()
 
-# User Input Sliders
-discount_rate = st.sidebar.slider("Desired Return (Discount Rate) %", min_value=5.0, max_value=20.0, value=10.0, step=0.5) / 100
-growth_rate = st.sidebar.slider("Expected Growth Rate %", min_value=0.0, max_value=30.0, value=15.0, step=0.5) / 100
-exit_multiple = st.sidebar.slider("Terminal Exit Multiple (x FCF)", min_value=10, max_value=80, value=35, step=1)
-years = st.sidebar.slider("Projection Years", min_value=1, max_value=15, value=5, step=1)
+# Sidebar for Exit Multiple Reverse DCF
+st.sidebar.subheader("Reverse DCF (Exit Multiple)")
+proj_years = st.sidebar.slider("Projection Years", 1, 10, 5)
+growth_rate = st.sidebar.slider("Expected Annual Growth Rate %", 1.0, 50.0, 15.0) / 100
+discount_rate = st.sidebar.slider("Desired Return (Discount Rate) %", 5.0, 20.0, 10.0) / 100
+exit_multiple = st.sidebar.slider("Exit Multiple (Price/FCF)", 10.0, 100.0, 30.0)
 
-# UI Headers
-st.title("SethiStock Analysis Hub")
-st.write("Welcome to your personal Stock Analysis platform.")
-
-# Search Bar
-ticker = st.text_input("Enter a Stock Ticker (e.g., AAPL, MSFT, TSLA):", "MSFT")
-
-# The Data Engine
-if ticker:
-    stock = yf.Ticker(ticker)
-    stock_data = stock.history(period="3mo")
+if ticker_symbol:
+    ticker = yf.Ticker(ticker_symbol)
     
-    if not stock_data.empty:
-        # Build the Plotly Candlestick Chart
-        fig = go.Figure(data=[go.Candlestick(x=stock_data.index,
-                        open=stock_data['Open'],
-                        high=stock_data['High'],
-                        low=stock_data['Low'],
-                        close=stock_data['Close'])])
-        
-        fig.update_layout(title=f"{ticker.upper()} - 3 Month Price Action", 
-                          xaxis_rangeslider_visible=False)
-        
-        # Render the Chart on the Web App
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # --- PHASE 4: DCF VALUATION ENGINE (EXIT MULTIPLE) ---
-        st.divider()
-        st.subheader(f"{ticker.upper()} - DCF Valuation Engine (Exit Multiple Method)")
-        current_price = stock_data['Close'].iloc[-1]
-        
-        try:
-            # 1. Fetch Live Financial Data
-            info = stock.info
-            shares_outstanding = info.get('sharesOutstanding', None)
-            
-            # Fetch Free Cash Flow from the cash flow statement
-            cf = stock.cashflow
-            
-            # yfinance indexing can sometimes vary, so we create a robust fallback
-            if 'Free Cash Flow' in cf.index:
-                fcf_0 = cf.loc['Free Cash Flow'].iloc[0] 
-            else:
-                operating_cf = cf.loc['Operating Cash Flow'].iloc[0]
-                capex = cf.loc['Capital Expenditure'].iloc[0] if 'Capital Expenditure' in cf.index else 0
-                fcf_0 = operating_cf + capex 
-                
-            if shares_outstanding and fcf_0:
-                # 2. DCF Mathematics (Exit Multiple Method)
-                projected_fcf = []
-                discounted_fcf = []
-                
-                # Project and discount future cash flows
-                for t in range(1, years + 1):
-                    fcf_t = fcf_0 * ((1 + growth_rate) ** t)
-                    disc_fcf_t = fcf_t / ((1 + discount_rate) ** t)
-                    projected_fcf.append(fcf_t)
-                    discounted_fcf.append(disc_fcf_t)
-                    
-                # Calculate Terminal Value using Exit Multiple
-                final_year_fcf = projected_fcf[-1]
-                terminal_value = final_year_fcf * exit_multiple
-                discounted_tv = terminal_value / ((1 + discount_rate) ** years)
-                
-                # Calculate Target Price per Share
-                total_intrinsic_value = sum(discounted_fcf) + discounted_tv
-                target_price = total_intrinsic_value / shares_outstanding
-                
-                # 3. Render the UI Metrics
-                col1, col2, col3 = st.columns(3)
-                col1.metric("Current Trading Price", f"${current_price:.2f}")
-                col2.metric("Target Entry Price", f"${target_price:.2f}")
-                
-                margin_of_safety = ((target_price - current_price) / current_price) * 100
-                col3.metric("Implied Margin of Safety", f"{margin_of_safety:.2f}%")
-                
-                # Display dynamic buy/sell badge based on calculation
-                if target_price > current_price:
-                    st.success(f"Based on your parameters, {ticker.upper()} is currently UNDERVALUED.")
-                else:
-                    st.warning(f"Based on your parameters, {ticker.upper()} is currently OVERVALUED.")
-                    
-            else:
-                st.error("Missing critical financial data (Shares Outstanding or Free Cash Flow) to complete the valuation.")
-                
-        except Exception as e:
-            st.error(f"Unable to retrieve sufficient financial data for {ticker.upper()} to run the DCF model.")
-            
+    st.header(f"{ticker_symbol} - Technical & Fundamental Analysis")
+    
+    # --- 1. Candlestick Chart (3-month) ---
+    st.subheader("3-Month Price Action")
+    history = ticker.history(period="3mo")
+    if not history.empty:
+        fig_candle = go.Figure(data=[go.Candlestick(x=history.index,
+                    open=history['Open'],
+                    high=history['High'],
+                    low=history['Low'],
+                    close=history['Close'])])
+        fig_candle.update_layout(xaxis_rangeslider_visible=False, margin=dict(l=0, r=0, t=0, b=0), height=400)
+        st.plotly_chart(fig_candle, use_container_width=True)
     else:
-        st.error("No data found for that ticker. Please check the spelling and try again.")
+        st.warning("No price data found.")
+
+    # --- 2. Financial Visuals (Upgrade B) ---
+    st.subheader("Financial Health: Revenue vs. Net Income")
+    financials = ticker.financials
+    
+    # Check if the required data exists in the API response
+    if not financials.empty and 'Total Revenue' in financials.index and 'Net Income' in financials.index:
+        # Fetch the last 4 years of data and drop missing values
+        rev = financials.loc['Total Revenue'].dropna().head(4)
+        ni = financials.loc['Net Income'].dropna().head(4)
+        
+        # Align dates and sort ascending (oldest to newest) for the chart
+        df_fin = pd.DataFrame({'Revenue': rev, 'Net Income': ni}).sort_index()
+        
+        # Format the dates to just show the Year
+        df_fin.index = df_fin.index.astype(str).str[:4]
+        
+        # Plotly Grouped Bar Chart
+        fig_fin = go.Figure()
+        fig_fin.add_trace(go.Bar(x=df_fin.index, y=df_fin['Revenue'], name='Revenue', marker_color='#1f77b4'))
+        fig_fin.add_trace(go.Bar(x=df_fin.index, y=df_fin['Net Income'], name='Net Income', marker_color='#2ca02c'))
+        
+        fig_fin.update_layout(barmode='group', margin=dict(l=0, r=0, t=30, b=0), height=400, template="plotly_white")
+        st.plotly_chart(fig_fin, use_container_width=True)
+    else:
+        st.warning("Historical financial data is not currently available for this ticker.")
+        
+    # --- 3. Reverse DCF Valuation Engine (Exit Multiple) ---
+    st.subheader("Intrinsic Valuation (Exit Multiple Method)")
+    
+    info = ticker.info
+    current_price = info.get('currentPrice', info.get('regularMarketPrice', 0))
+    shares = info.get('sharesOutstanding', 0)
+    
+    cash_flow = ticker.cashflow
+    if not cash_flow.empty and 'Operating Cash Flow' in cash_flow.index and current_price > 0 and shares > 0:
+        ocf = cash_flow.loc['Operating Cash Flow'].dropna().iloc[0]
+        
+        # Handle Capital Expenditures to get Free Cash Flow
+        capex = 0
+        if 'Capital Expenditure' in cash_flow.index:
+            capex = abs(cash_flow.loc['Capital Expenditure'].dropna().iloc[0])
+        
+        fcf_0 = ocf - capex
+        
+        if fcf_0 > 0:
+            target_price_sum = 0
+            fcf_n = fcf_0
+            
+            # Project Cash Flows
+            for t in range(1, proj_years + 1):
+                fcf_n = fcf_n * (1 + growth_rate)
+                target_price_sum += fcf_n / ((1 + discount_rate) ** t)
+            
+            # Calculate Terminal Value using Exit Multiple
+            tv = fcf_n * exit_multiple
+            target_price_sum += tv / ((1 + discount_rate) ** proj_years)
+            
+            target_price_per_share = target_price_sum / shares
+            margin_of_safety = ((target_price_per_share - current_price) / current_price) * 100
+            
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Current Price", f"${current_price:,.2f}")
+            col2.metric("Target Entry Price", f"${target_price_per_share:,.2f}")
+            col3.metric("Margin of Safety", f"{margin_of_safety:.2f}%", delta_color="normal" if margin_of_safety > 0 else "inverse")
+        else:
+            st.warning("Company has negative Free Cash Flow. DCF cannot be calculated.")
+    else:
+        st.warning("Sufficient cash flow or price data not available for valuation.")
     
