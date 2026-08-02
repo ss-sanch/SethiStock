@@ -11,7 +11,7 @@ st.set_page_config(page_title="SethiStock", layout="wide", initial_sidebar_state
 st.markdown("""
 <style>
     .block-container {
-        padding-top: 1rem;
+        padding-top: 2rem;
         margin-top: 0rem;
     }
     header {background-color: transparent !important;}
@@ -39,11 +39,12 @@ st.markdown("""
 PLOTLY_CONFIG = {'displayModeBar': False}
 
 # --- MAIN PAGE: Top Navigation Bar ---
-nav_col1, nav_col2, nav_col3 = st.columns([1, 2, 1])
+# Using native vertical alignment fixes the 'dodgy' click area on the search bar
+nav_col1, nav_col2, nav_col3 = st.columns([1, 2, 1], vertical_alignment="center")
 with nav_col1:
-    st.markdown("<h2 style='margin-top: -10px; padding-bottom: 0px;'>SethiStock</h2>", unsafe_allow_html=True)
+    st.markdown("### SethiStock")
 with nav_col2:
-    ticker_symbol = st.text_input("Search", value="AAPL", label_visibility="collapsed", placeholder="Enter Stock Ticker (e.g., AAPL, MSFT)").upper()
+    ticker_symbol = st.text_input("Search", value="GOOG", label_visibility="collapsed", placeholder="Enter Stock Ticker (e.g., AAPL, MSFT)").upper()
 
 st.divider()
 
@@ -59,7 +60,7 @@ if ticker_symbol:
     info = ticker.info
     
     # --- QUALTRIM-STYLE DYNAMIC HEADER ---
-    name = info.get('shortName', ticker_symbol)
+    name = info.get('shortName', info.get('longName', ticker_symbol))
     exchange = info.get('exchange', 'Exchange')
     current_price = info.get('currentPrice', info.get('regularMarketPrice', 0))
     prev_close = info.get('previousClose', 0)
@@ -83,15 +84,17 @@ if ticker_symbol:
         pill_color = "background-color: rgba(128, 128, 128, 0.2); color: #6b7280;"
         sign = ""
         
-    # Clearbit Logo API Logic
+    # Modern Logo API Logic (Hunter.io with Google Favicon Fallback)
     website = info.get('website', '')
     logo_html = ""
     if website:
         domain = urllib.parse.urlparse(website).netloc.replace('www.', '')
-        logo_url = f"https://logo.clearbit.com/{domain}"
-        logo_html = f'<img src="{logo_url}" onerror="this.style.display=\'none\'" style="width: 50px; height: 50px; border-radius: 50%; margin-right: 15px; object-fit: contain; background-color: white; padding: 2px;">'
+        logo_url = f"https://logos.hunter.io/{domain}"
+        fallback_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
+        # The onerror attribute instantly switches to the Google Favicon if Hunter is missing the logo
+        logo_html = f'<img src="{logo_url}" onerror="this.src=\'{fallback_url}\';" style="width: 50px; height: 50px; border-radius: 50%; margin-right: 15px; object-fit: contain; background-color: transparent; padding: 0px;">'
 
-    # Render the Header via HTML injection
+    # Render the Header via HTML injection (align-items: center fixes the box layout)
     st.markdown(f"""
     <div style="display: flex; align-items: center; margin-bottom: 10px;">
         {logo_html}
@@ -100,10 +103,10 @@ if ticker_symbol:
             <p style="margin: 0; padding: 0; color: #888; font-size: 14px; font-weight: 500;">{ticker_symbol} | {exchange}</p>
         </div>
     </div>
-    <div style="display: flex; align-items: baseline; margin-bottom: 30px;">
+    <div style="display: flex; align-items: center; margin-bottom: 30px;">
         <h1 style="margin: 0; padding: 0; font-size: 38px; font-weight: 700; margin-right: 15px;">${current_price:,.2f}</h1>
-        <div style="{pill_color} padding: 4px 10px; border-radius: 6px; font-weight: 700; font-size: 16px; display: inline-block;">
-            {sign}${change:,.2f} | {sign}{pct_change:,.2f}%
+        <div style="{pill_color} padding: 6px 12px; border-radius: 6px; font-weight: 600; font-size: 16px; display: flex; align-items: center;">
+            {sign}${change:,.2f} &nbsp;|&nbsp; {sign}{pct_change:,.2f}%
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -162,7 +165,6 @@ if ticker_symbol:
             paper_bgcolor="rgba(0,0,0,0)", 
             plot_bgcolor="rgba(0,0,0,0)"
         )
-        # Injected PLOTLY_CONFIG to remove modebar buttons
         st.plotly_chart(fig_candle, use_container_width=True, config=PLOTLY_CONFIG)
     else:
         st.warning("No price data found.")
@@ -170,10 +172,8 @@ if ticker_symbol:
     # --- 3. Financial Visuals (Master Toggle for Annual vs Quarterly) ---
     st.subheader("Financial Health")
     
-    # Master Toggle Switch
     show_quarterly = st.toggle("Switch to Quarterly (TTM) View", value=False)
     
-    # Logic to fetch the correct dataset based on the toggle
     if show_quarterly:
         fin_data = ticker.quarterly_financials
         cf_data = ticker.quarterly_cashflow
@@ -186,7 +186,6 @@ if ticker_symbol:
         limit = 10
     
     if not fin_data.empty and 'Total Revenue' in fin_data.index and 'Net Income' in fin_data.index:
-        # Pull the data based on the dynamic limit
         rev = fin_data.loc['Total Revenue'].dropna().head(limit)
         ni = fin_data.loc['Net Income'].dropna().head(limit)
         
@@ -198,15 +197,12 @@ if ticker_symbol:
 
         df_fin = pd.DataFrame({'Revenue': rev, 'Net Income': ni, 'FCF': fcf_series}).sort_index()
         
-        # Format the dates elegantly based on the view
         if show_quarterly:
             df_fin.index = pd.to_datetime(df_fin.index).strftime('%Y-%m')
         else:
             df_fin.index = df_fin.index.astype(str).str[:4]
         
         col1, col2, col3 = st.columns(3)
-        
-        # Increased bottom margin (b=40) and height (260) to prevent text cut-off
         plot_height = 260
         plot_margins = dict(l=15, r=15, t=40, b=40)
         
