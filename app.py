@@ -20,7 +20,7 @@ st.markdown("""
     
     [data-testid="stMetric"], [data-testid="stPlotlyChart"] {
         background-color: rgba(128, 128, 128, 0.05);
-        padding: 15px;
+        padding: 30px;
         border-radius: 12px;
         box-shadow: 0px 4px 6px rgba(0,0,0,0.05);
         border: 1px solid rgba(128, 128, 128, 0.1);
