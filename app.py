@@ -2,6 +2,7 @@ import streamlit as st
 import yfinance as yf
 import plotly.graph_objects as go
 import pandas as pd
+import urllib.parse
 
 # Start with the sidebar expanded by default
 st.set_page_config(page_title="SethiStock", layout="wide", initial_sidebar_state="expanded")
@@ -10,7 +11,7 @@ st.set_page_config(page_title="SethiStock", layout="wide", initial_sidebar_state
 st.markdown("""
 <style>
     .block-container {
-        padding-top: 2rem;
+        padding-top: 1rem;
         margin-top: 0rem;
     }
     header {background-color: transparent !important;}
@@ -20,7 +21,7 @@ st.markdown("""
     
     [data-testid="stMetric"], [data-testid="stPlotlyChart"] {
         background-color: rgba(128, 128, 128, 0.05);
-        padding: 5px;
+        padding: 15px;
         border-radius: 12px;
         box-shadow: 0px 4px 6px rgba(0,0,0,0.05);
         border: 1px solid rgba(128, 128, 128, 0.1);
@@ -37,10 +38,14 @@ st.markdown("""
 # Central Plotly Config to remove the cluttered Modebar buttons
 PLOTLY_CONFIG = {'displayModeBar': False}
 
-st.title("SethiStock Analysis Platform")
+# --- MAIN PAGE: Top Navigation Bar ---
+nav_col1, nav_col2, nav_col3 = st.columns([1, 2, 1])
+with nav_col1:
+    st.markdown("<h2 style='margin-top: -10px; padding-bottom: 0px;'>SethiStock</h2>", unsafe_allow_html=True)
+with nav_col2:
+    ticker_symbol = st.text_input("Search", value="AAPL", label_visibility="collapsed", placeholder="Enter Stock Ticker (e.g., AAPL, MSFT)").upper()
 
-# --- MAIN PAGE: Central Search Bar ---
-ticker_symbol = st.text_input("Enter Stock Ticker (e.g., AAPL, MSFT)", "AAPL").upper()
+st.divider()
 
 # --- SIDEBAR: Inputs & Valuation Results ---
 st.sidebar.subheader("Reverse DCF (Exit Multiple)")
@@ -51,10 +56,59 @@ exit_multiple = st.sidebar.slider("Exit Multiple (Price/FCF)", 10.0, 100.0, 30.0
 
 if ticker_symbol:
     ticker = yf.Ticker(ticker_symbol)
+    info = ticker.info
+    
+    # --- QUALTRIM-STYLE DYNAMIC HEADER ---
+    name = info.get('shortName', ticker_symbol)
+    exchange = info.get('exchange', 'Exchange')
+    current_price = info.get('currentPrice', info.get('regularMarketPrice', 0))
+    prev_close = info.get('previousClose', 0)
+    
+    # Calculate Daily Change
+    if current_price and prev_close:
+        change = current_price - prev_close
+        pct_change = (change / prev_close) * 100
+    else:
+        change = 0
+        pct_change = 0
+        
+    # Formatting the Change Pill
+    if change > 0:
+        pill_color = "background-color: rgba(34, 197, 94, 0.2); color: #16a34a;"
+        sign = "+"
+    elif change < 0:
+        pill_color = "background-color: rgba(239, 68, 68, 0.2); color: #dc2626;"
+        sign = ""
+    else:
+        pill_color = "background-color: rgba(128, 128, 128, 0.2); color: #6b7280;"
+        sign = ""
+        
+    # Clearbit Logo API Logic
+    website = info.get('website', '')
+    logo_html = ""
+    if website:
+        domain = urllib.parse.urlparse(website).netloc.replace('www.', '')
+        logo_url = f"https://logo.clearbit.com/{domain}"
+        logo_html = f'<img src="{logo_url}" onerror="this.style.display=\'none\'" style="width: 50px; height: 50px; border-radius: 50%; margin-right: 15px; object-fit: contain; background-color: white; padding: 2px;">'
+
+    # Render the Header via HTML injection
+    st.markdown(f"""
+    <div style="display: flex; align-items: center; margin-bottom: 10px;">
+        {logo_html}
+        <div>
+            <h2 style="margin: 0; padding: 0; font-size: 26px; font-weight: 600;">{name}</h2>
+            <p style="margin: 0; padding: 0; color: #888; font-size: 14px; font-weight: 500;">{ticker_symbol} | {exchange}</p>
+        </div>
+    </div>
+    <div style="display: flex; align-items: baseline; margin-bottom: 30px;">
+        <h1 style="margin: 0; padding: 0; font-size: 38px; font-weight: 700; margin-right: 15px;">${current_price:,.2f}</h1>
+        <div style="{pill_color} padding: 4px 10px; border-radius: 6px; font-weight: 700; font-size: 16px; display: inline-block;">
+            {sign}${change:,.2f} | {sign}{pct_change:,.2f}%
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
     
     # --- 1. CALCULATE DCF FIRST ---
-    info = ticker.info
-    current_price = info.get('currentPrice', info.get('regularMarketPrice', 0))
     shares = info.get('sharesOutstanding', 0)
     cash_flow = ticker.cashflow
     
@@ -90,7 +144,6 @@ if ticker_symbol:
         st.sidebar.warning("DCF cannot be calculated (Missing or Negative FCF).")
 
     # --- MAIN PAGE: Dashboards & Visuals ---
-    st.header(f"{ticker_symbol} - Technical & Fundamental Analysis")
     
     # --- 2. Candlestick Chart (1-Year Period) ---
     st.subheader("1-Year Price Action")
@@ -107,8 +160,7 @@ if ticker_symbol:
             margin=dict(l=15, r=15, t=40, b=20), 
             height=400,
             paper_bgcolor="rgba(0,0,0,0)", 
-            plot_bgcolor="rgba(0,0,0,0)",
-            title="Price Action"
+            plot_bgcolor="rgba(0,0,0,0)"
         )
         # Injected PLOTLY_CONFIG to remove modebar buttons
         st.plotly_chart(fig_candle, use_container_width=True, config=PLOTLY_CONFIG)
