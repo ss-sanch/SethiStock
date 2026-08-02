@@ -21,7 +21,7 @@ st.markdown("""
     
     [data-testid="stMetric"], [data-testid="stPlotlyChart"] {
         background-color: rgba(128, 128, 128, 0.05);
-        padding: 5px;
+        padding: 5px; /* Tightened padding based on executive feedback */
         border-radius: 12px;
         box-shadow: 0px 4px 6px rgba(0,0,0,0.05);
         border: 1px solid rgba(128, 128, 128, 0.1);
@@ -39,7 +39,6 @@ st.markdown("""
 PLOTLY_CONFIG = {'displayModeBar': False}
 
 # --- MAIN PAGE: Top Navigation Bar ---
-# Using native vertical alignment fixes the 'dodgy' click area on the search bar
 nav_col1, nav_col2, nav_col3 = st.columns([1, 2, 1], vertical_alignment="center")
 with nav_col1:
     st.markdown("### SethiStock")
@@ -91,10 +90,9 @@ if ticker_symbol:
         domain = urllib.parse.urlparse(website).netloc.replace('www.', '')
         logo_url = f"https://logos.hunter.io/{domain}"
         fallback_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
-        # The onerror attribute instantly switches to the Google Favicon if Hunter is missing the logo
         logo_html = f'<img src="{logo_url}" onerror="this.src=\'{fallback_url}\';" style="width: 50px; height: 50px; border-radius: 50%; margin-right: 15px; object-fit: contain; background-color: transparent; padding: 0px;">'
 
-    # Render the Header via HTML injection (align-items: center fixes the box layout)
+    # Render the Header via HTML injection 
     st.markdown(f"""
     <div style="display: flex; align-items: center; margin-bottom: 10px;">
         {logo_html}
@@ -148,26 +146,81 @@ if ticker_symbol:
 
     # --- MAIN PAGE: Dashboards & Visuals ---
     
-    # --- 2. Candlestick Chart (1-Year Period) ---
-    st.subheader("1-Year Price Action")
-    history = ticker.history(period="1y")
+    # --- 2. Dynamic Price Action Chart ---
+    st.subheader("Price Action")
+    
+    # Horizontal Layout for Controls
+    ctrl_col1, ctrl_col2 = st.columns([2, 1])
+    with ctrl_col1:
+        timeframe = st.radio(
+            "Timeframe", 
+            ["1 Day", "1 Week", "1 Month", "3 Months", "YTD", "1 Year", "MAX"], 
+            horizontal=True, 
+            label_visibility="collapsed",
+            index=5 # Defaults to 1 Year
+        )
+    with ctrl_col2:
+        chart_type = st.radio(
+            "Chart Type", 
+            ["Candlestick", "Line Graph"], 
+            horizontal=True, 
+            label_visibility="collapsed"
+        )
+
+    # Map selected timeframe to yfinance period/interval
+    tf_map = {
+        "1 Day": ("1d", "5m"),
+        "1 Week": ("5d", "15m"),
+        "1 Month": ("1mo", "1d"),
+        "3 Months": ("3mo", "1d"),
+        "YTD": ("ytd", "1d"),
+        "1 Year": ("1y", "1d"),
+        "MAX": ("max", "1wk")
+    }
+    
+    period, interval = tf_map[timeframe]
+    history = ticker.history(period=period, interval=interval)
+    
     if not history.empty:
-        fig_candle = go.Figure(data=[go.Candlestick(x=history.index,
-                    open=history['Open'],
-                    high=history['High'],
-                    low=history['Low'],
-                    close=history['Close'])])
+        fig_price = go.Figure()
+
+        if chart_type == "Candlestick":
+            fig_price.add_trace(go.Candlestick(
+                x=history.index,
+                open=history['Open'],
+                high=history['High'],
+                low=history['Low'],
+                close=history['Close'],
+                name="Candlestick"
+            ))
+        else:
+            fig_price.add_trace(go.Scatter(
+                x=history.index,
+                y=history['Close'],
+                mode='lines',
+                line=dict(color='#2563eb', width=2),
+                fill='tozeroy',
+                fillcolor='rgba(37, 99, 235, 0.1)',
+                name="Line"
+            ))
         
-        fig_candle.update_layout(
+        fig_price.update_layout(
             xaxis_rangeslider_visible=False, 
-            margin=dict(l=15, r=15, t=40, b=20), 
+            margin=dict(l=5, r=5, t=40, b=20), 
             height=400,
             paper_bgcolor="rgba(0,0,0,0)", 
             plot_bgcolor="rgba(0,0,0,0)"
         )
-        st.plotly_chart(fig_candle, use_container_width=True, config=PLOTLY_CONFIG)
+        
+        # Hide weekend gaps on the chart (only relevant for daily/intraday data)
+        if timeframe not in ["MAX"]: 
+            fig_price.update_xaxes(
+                rangebreaks=[dict(bounds=["sat", "mon"])]
+            )
+            
+        st.plotly_chart(fig_price, use_container_width=True, config=PLOTLY_CONFIG)
     else:
-        st.warning("No price data found.")
+        st.warning("No price data found for the selected timeframe.")
 
     # --- 3. Financial Visuals (Master Toggle for Annual vs Quarterly) ---
     st.subheader("Financial Health")
