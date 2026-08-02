@@ -18,20 +18,20 @@ st.markdown("""
     .stDeployButton {display: none;}
     [data-testid="stHeaderActionElements"] {display: none;}
     
-    [data-testid="stMetric"] {
+    /* SCROLLBAR & ALIGNMENT FIX: Added box-sizing and overflow hidden */
+    [data-testid="stMetric"], [data-testid="stPlotlyChart"] {
         background-color: rgba(128, 128, 128, 0.05);
         padding: 15px;
         border-radius: 12px;
         box-shadow: 0px 4px 6px rgba(0,0,0,0.05);
         border: 1px solid rgba(128, 128, 128, 0.1);
+        box-sizing: border-box !important;
+        overflow: hidden !important;
     }
     
-    [data-testid="stPlotlyChart"] {
-        background-color: rgba(128, 128, 128, 0.05);
-        border-radius: 12px;
-        padding: 15px;
-        box-shadow: 0px 4px 6px rgba(0,0,0,0.05);
-        border: 1px solid rgba(128, 128, 128, 0.1);
+    /* Force internal Plotly containers to clip rogue scrollbars */
+    [data-testid="stPlotlyChart"] > div, [data-testid="stPlotlyChart"] iframe {
+        overflow: hidden !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -113,45 +113,48 @@ if ticker_symbol:
     else:
         st.warning("No price data found.")
 
-    # --- 3. Financial Visuals (3-Column Grid System) ---
-    st.subheader("Financial Health")
-    financials = ticker.financials
+    # --- 3. Financial Visuals (Quarterly TTM Layout - Scrollbar Patched) ---
+    st.subheader("Financial Health (Trailing 4 Quarters)")
+    
+    financials = ticker.quarterly_financials
+    cash_flow_q = ticker.quarterly_cashflow
     
     if not financials.empty and 'Total Revenue' in financials.index and 'Net Income' in financials.index:
-        # Request up to 10 years of data (Note: Yahoo Finance free tier usually limits to 4)
-        rev = financials.loc['Total Revenue'].dropna().head(10)
-        ni = financials.loc['Net Income'].dropna().head(10)
+        # Pull the last 4 quarters
+        rev = financials.loc['Total Revenue'].dropna().head(4)
+        ni = financials.loc['Net Income'].dropna().head(4)
         
-        # Calculate historical FCF for the new 3rd column
         fcf_series = pd.Series(dtype=float)
-        if not cash_flow.empty and 'Operating Cash Flow' in cash_flow.index:
-            ocf_hist = cash_flow.loc['Operating Cash Flow'].head(10)
-            capex_hist = cash_flow.loc['Capital Expenditure'].head(10) if 'Capital Expenditure' in cash_flow.index else pd.Series(0, index=ocf_hist.index)
-            # CapEx is generally reported as negative by YF, so we subtract absolute value to be safe
+        if not cash_flow_q.empty and 'Operating Cash Flow' in cash_flow_q.index:
+            ocf_hist = cash_flow_q.loc['Operating Cash Flow'].head(4)
+            capex_hist = cash_flow_q.loc['Capital Expenditure'].head(4) if 'Capital Expenditure' in cash_flow_q.index else pd.Series(0, index=ocf_hist.index)
             fcf_series = (ocf_hist - capex_hist.abs()).dropna()
 
         df_fin = pd.DataFrame({'Revenue': rev, 'Net Income': ni, 'FCF': fcf_series}).sort_index()
-        df_fin.index = df_fin.index.astype(str).str[:4] # Format years
+        df_fin.index = pd.to_datetime(df_fin.index).strftime('%Y-%m') # Clean Date Format
         
-        # Create a 3-column grid
         col1, col2, col3 = st.columns(3)
+        
+        # Exact matching heights and margins ensure the grid aligns perfectly
+        plot_height = 240
+        plot_margins = dict(l=15, r=15, t=40, b=15)
         
         with col1:
             fig_rev = go.Figure(data=[go.Bar(x=df_fin.index, y=df_fin['Revenue'], marker_color='#1f77b4')])
-            fig_rev.update_layout(title="Total Revenue", margin=dict(l=15, r=15, t=40, b=15), height=220, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+            fig_rev.update_layout(title="Quarterly Revenue", margin=plot_margins, height=plot_height, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
             st.plotly_chart(fig_rev, use_container_width=True)
             
         with col2:
             fig_ni = go.Figure(data=[go.Bar(x=df_fin.index, y=df_fin['Net Income'], marker_color='#2ca02c')])
-            fig_ni.update_layout(title="Net Income", margin=dict(l=15, r=15, t=40, b=15), height=220, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+            fig_ni.update_layout(title="Quarterly Net Income", margin=plot_margins, height=plot_height, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
             st.plotly_chart(fig_ni, use_container_width=True)
             
         with col3:
             if not df_fin['FCF'].dropna().empty:
                 fig_fcf = go.Figure(data=[go.Bar(x=df_fin.index, y=df_fin['FCF'], marker_color='#9467bd')])
-                fig_fcf.update_layout(title="Free Cash Flow", margin=dict(l=15, r=15, t=40, b=15), height=220, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+                fig_fcf.update_layout(title="Quarterly Free Cash Flow", margin=plot_margins, height=plot_height, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
                 st.plotly_chart(fig_fcf, use_container_width=True)
             else:
-                st.warning("Historical FCF Data Unavailable")
+                st.warning("Historical FCF Unavailable")
     else:
-        st.warning("Historical financial data is not currently available for this ticker.")
+        st.warning("Historical financial data is not currently available.")
