@@ -9,19 +9,15 @@ st.set_page_config(page_title="SethiStock", layout="wide", initial_sidebar_state
 # --- CUSTOM CSS FOR DYNAMIC UI POLISH ---
 st.markdown("""
 <style>
-    /* 1. Eliminate the massive empty space at the top */
     .block-container {
         padding-top: 2rem;
         margin-top: 0rem;
     }
-    
-    /* 2. SURGICAL HEADER FIX: Keep header transparent, hide right-side clutter, keep sidebar toggle visible */
     header {background-color: transparent !important;}
     #MainMenu {visibility: hidden;}
     .stDeployButton {display: none;}
     [data-testid="stHeaderActionElements"] {display: none;}
     
-    /* 3. Style Metrics (Sidebar & Main) with subtle transparent backgrounds and chamfered edges */
     [data-testid="stMetric"] {
         background-color: rgba(128, 128, 128, 0.05);
         padding: 15px;
@@ -30,7 +26,6 @@ st.markdown("""
         border: 1px solid rgba(128, 128, 128, 0.1);
     }
     
-    /* 4. Style Plotly Charts to look like elevated, rounded cards */
     [data-testid="stPlotlyChart"] {
         background-color: rgba(128, 128, 128, 0.05);
         border-radius: 12px;
@@ -41,12 +36,12 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("SethiStock")
+st.title("SethiStock Analysis Platform")
+
+# --- MAIN PAGE: Central Search Bar ---
+ticker_symbol = st.text_input("Enter Stock Ticker (e.g., AAPL, MSFT)", "AAPL").upper()
 
 # --- SIDEBAR: Inputs & Valuation Results ---
-st.sidebar.header("Search & Parameters")
-ticker_symbol = st.sidebar.text_input("Enter Stock Ticker (e.g., AAPL, MSFT)", "AAPL").upper()
-
 st.sidebar.subheader("Reverse DCF (Exit Multiple)")
 proj_years = st.sidebar.slider("Projection Years", 1, 10, 5)
 growth_rate = st.sidebar.slider("Expected Annual Growth Rate %", 1.0, 50.0, 15.0) / 100
@@ -66,17 +61,12 @@ if ticker_symbol:
     
     if not cash_flow.empty and 'Operating Cash Flow' in cash_flow.index and current_price > 0 and shares > 0:
         ocf = cash_flow.loc['Operating Cash Flow'].dropna().iloc[0]
-        
-        capex = 0
-        if 'Capital Expenditure' in cash_flow.index:
-            capex = abs(cash_flow.loc['Capital Expenditure'].dropna().iloc[0])
-        
+        capex = abs(cash_flow.loc['Capital Expenditure'].dropna().iloc[0]) if 'Capital Expenditure' in cash_flow.index else 0
         fcf_0 = ocf - capex
         
         if fcf_0 > 0:
             target_price_sum = 0
             fcf_n = fcf_0
-            
             for t in range(1, proj_years + 1):
                 fcf_n = fcf_n * (1 + growth_rate)
                 target_price_sum += fcf_n / ((1 + discount_rate) ** t)
@@ -96,14 +86,14 @@ if ticker_symbol:
         st.sidebar.metric("Target Entry Price", f"${target_price_per_share:,.2f}")
         st.sidebar.metric("Margin of Safety", f"{margin_of_safety:.2f}%", delta_color="normal" if margin_of_safety > 0 else "inverse")
     else:
-        st.sidebar.warning("DCF cannot be calculated (Missing or Negative Free Cash Flow).")
+        st.sidebar.warning("DCF cannot be calculated (Missing or Negative FCF).")
 
     # --- MAIN PAGE: Dashboards & Visuals ---
-    st.header(f"{ticker_symbol}")
+    st.header(f"{ticker_symbol} - Technical & Fundamental Analysis")
     
-    # --- 2. Candlestick Chart (3-month) ---
-    st.subheader("3-Month Price Action")
-    history = ticker.history(period="3mo")
+    # --- 2. Candlestick Chart (1-Year Period) ---
+    st.subheader("1-Year Price Action")
+    history = ticker.history(period="1y")
     if not history.empty:
         fig_candle = go.Figure(data=[go.Candlestick(x=history.index,
                     open=history['Open'],
@@ -111,7 +101,6 @@ if ticker_symbol:
                     low=history['Low'],
                     close=history['Close'])])
         
-        # Transparent backgrounds let the CSS card style shine through
         fig_candle.update_layout(
             xaxis_rangeslider_visible=False, 
             margin=dict(l=15, r=15, t=40, b=15), 
@@ -124,39 +113,45 @@ if ticker_symbol:
     else:
         st.warning("No price data found.")
 
-    # --- 3. Financial Visuals (Modular Grid System) ---
+    # --- 3. Financial Visuals (3-Column Grid System) ---
     st.subheader("Financial Health")
     financials = ticker.financials
     
     if not financials.empty and 'Total Revenue' in financials.index and 'Net Income' in financials.index:
-        rev = financials.loc['Total Revenue'].dropna().head(4)
-        ni = financials.loc['Net Income'].dropna().head(4)
+        # Request up to 10 years of data (Note: Yahoo Finance free tier usually limits to 4)
+        rev = financials.loc['Total Revenue'].dropna().head(10)
+        ni = financials.loc['Net Income'].dropna().head(10)
         
-        df_fin = pd.DataFrame({'Revenue': rev, 'Net Income': ni}).sort_index()
-        df_fin.index = df_fin.index.astype(str).str[:4]
+        # Calculate historical FCF for the new 3rd column
+        fcf_series = pd.Series(dtype=float)
+        if not cash_flow.empty and 'Operating Cash Flow' in cash_flow.index:
+            ocf_hist = cash_flow.loc['Operating Cash Flow'].head(10)
+            capex_hist = cash_flow.loc['Capital Expenditure'].head(10) if 'Capital Expenditure' in cash_flow.index else pd.Series(0, index=ocf_hist.index)
+            # CapEx is generally reported as negative by YF, so we subtract absolute value to be safe
+            fcf_series = (ocf_hist - capex_hist.abs()).dropna()
+
+        df_fin = pd.DataFrame({'Revenue': rev, 'Net Income': ni, 'FCF': fcf_series}).sort_index()
+        df_fin.index = df_fin.index.astype(str).str[:4] # Format years
         
-        col1, col2 = st.columns(2)
+        # Create a 3-column grid
+        col1, col2, col3 = st.columns(3)
         
         with col1:
             fig_rev = go.Figure(data=[go.Bar(x=df_fin.index, y=df_fin['Revenue'], marker_color='#1f77b4')])
-            fig_rev.update_layout(
-                title="Total Revenue", 
-                margin=dict(l=15, r=15, t=40, b=15), 
-                height=250, 
-                paper_bgcolor="rgba(0,0,0,0)", 
-                plot_bgcolor="rgba(0,0,0,0)"
-            )
+            fig_rev.update_layout(title="Total Revenue", margin=dict(l=15, r=15, t=40, b=15), height=220, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
             st.plotly_chart(fig_rev, use_container_width=True)
             
         with col2:
             fig_ni = go.Figure(data=[go.Bar(x=df_fin.index, y=df_fin['Net Income'], marker_color='#2ca02c')])
-            fig_ni.update_layout(
-                title="Net Income", 
-                margin=dict(l=15, r=15, t=40, b=15), 
-                height=250, 
-                paper_bgcolor="rgba(0,0,0,0)", 
-                plot_bgcolor="rgba(0,0,0,0)"
-            )
+            fig_ni.update_layout(title="Net Income", margin=dict(l=15, r=15, t=40, b=15), height=220, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
             st.plotly_chart(fig_ni, use_container_width=True)
+            
+        with col3:
+            if not df_fin['FCF'].dropna().empty:
+                fig_fcf = go.Figure(data=[go.Bar(x=df_fin.index, y=df_fin['FCF'], marker_color='#9467bd')])
+                fig_fcf.update_layout(title="Free Cash Flow", margin=dict(l=15, r=15, t=40, b=15), height=220, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+                st.plotly_chart(fig_fcf, use_container_width=True)
+            else:
+                st.warning("Historical FCF Data Unavailable")
     else:
         st.warning("Historical financial data is not currently available for this ticker.")
