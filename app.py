@@ -18,7 +18,6 @@ st.markdown("""
     .stDeployButton {display: none;}
     [data-testid="stHeaderActionElements"] {display: none;}
     
-    /* SCROLLBAR & ALIGNMENT FIX: Added box-sizing and overflow hidden */
     [data-testid="stMetric"], [data-testid="stPlotlyChart"] {
         background-color: rgba(128, 128, 128, 0.05);
         padding: 15px;
@@ -29,12 +28,14 @@ st.markdown("""
         overflow: hidden !important;
     }
     
-    /* Force internal Plotly containers to clip rogue scrollbars */
     [data-testid="stPlotlyChart"] > div, [data-testid="stPlotlyChart"] iframe {
         overflow: hidden !important;
     }
 </style>
 """, unsafe_allow_html=True)
+
+# Central Plotly Config to remove the cluttered Modebar buttons
+PLOTLY_CONFIG = {'displayModeBar': False}
 
 st.title("SethiStock Analysis Platform")
 
@@ -103,58 +104,76 @@ if ticker_symbol:
         
         fig_candle.update_layout(
             xaxis_rangeslider_visible=False, 
-            margin=dict(l=15, r=15, t=40, b=15), 
+            margin=dict(l=15, r=15, t=40, b=20), 
             height=400,
             paper_bgcolor="rgba(0,0,0,0)", 
             plot_bgcolor="rgba(0,0,0,0)",
             title="Price Action"
         )
-        st.plotly_chart(fig_candle, use_container_width=True)
+        # Injected PLOTLY_CONFIG to remove modebar buttons
+        st.plotly_chart(fig_candle, use_container_width=True, config=PLOTLY_CONFIG)
     else:
         st.warning("No price data found.")
 
-    # --- 3. Financial Visuals (Quarterly TTM Layout - Scrollbar Patched) ---
-    st.subheader("Financial Health (Trailing 4 Quarters)")
+    # --- 3. Financial Visuals (Master Toggle for Annual vs Quarterly) ---
+    st.subheader("Financial Health")
     
-    financials = ticker.quarterly_financials
-    cash_flow_q = ticker.quarterly_cashflow
+    # Master Toggle Switch
+    show_quarterly = st.toggle("Switch to Quarterly (TTM) View", value=False)
     
-    if not financials.empty and 'Total Revenue' in financials.index and 'Net Income' in financials.index:
-        # Pull the last 4 quarters
-        rev = financials.loc['Total Revenue'].dropna().head(4)
-        ni = financials.loc['Net Income'].dropna().head(4)
+    # Logic to fetch the correct dataset based on the toggle
+    if show_quarterly:
+        fin_data = ticker.quarterly_financials
+        cf_data = ticker.quarterly_cashflow
+        period_title = "Quarterly"
+        limit = 4
+    else:
+        fin_data = ticker.financials
+        cf_data = ticker.cashflow
+        period_title = "Annual"
+        limit = 10
+    
+    if not fin_data.empty and 'Total Revenue' in fin_data.index and 'Net Income' in fin_data.index:
+        # Pull the data based on the dynamic limit
+        rev = fin_data.loc['Total Revenue'].dropna().head(limit)
+        ni = fin_data.loc['Net Income'].dropna().head(limit)
         
         fcf_series = pd.Series(dtype=float)
-        if not cash_flow_q.empty and 'Operating Cash Flow' in cash_flow_q.index:
-            ocf_hist = cash_flow_q.loc['Operating Cash Flow'].head(4)
-            capex_hist = cash_flow_q.loc['Capital Expenditure'].head(4) if 'Capital Expenditure' in cash_flow_q.index else pd.Series(0, index=ocf_hist.index)
+        if not cf_data.empty and 'Operating Cash Flow' in cf_data.index:
+            ocf_hist = cf_data.loc['Operating Cash Flow'].head(limit)
+            capex_hist = cf_data.loc['Capital Expenditure'].head(limit) if 'Capital Expenditure' in cf_data.index else pd.Series(0, index=ocf_hist.index)
             fcf_series = (ocf_hist - capex_hist.abs()).dropna()
 
         df_fin = pd.DataFrame({'Revenue': rev, 'Net Income': ni, 'FCF': fcf_series}).sort_index()
-        df_fin.index = pd.to_datetime(df_fin.index).strftime('%Y-%m') # Clean Date Format
+        
+        # Format the dates elegantly based on the view
+        if show_quarterly:
+            df_fin.index = pd.to_datetime(df_fin.index).strftime('%Y-%m')
+        else:
+            df_fin.index = df_fin.index.astype(str).str[:4]
         
         col1, col2, col3 = st.columns(3)
         
-        # Exact matching heights and margins ensure the grid aligns perfectly
-        plot_height = 240
-        plot_margins = dict(l=15, r=15, t=40, b=15)
+        # Increased bottom margin (b=40) and height (260) to prevent text cut-off
+        plot_height = 260
+        plot_margins = dict(l=15, r=15, t=40, b=40)
         
         with col1:
             fig_rev = go.Figure(data=[go.Bar(x=df_fin.index, y=df_fin['Revenue'], marker_color='#1f77b4')])
-            fig_rev.update_layout(title="Quarterly Revenue", margin=plot_margins, height=plot_height, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
-            st.plotly_chart(fig_rev, use_container_width=True)
+            fig_rev.update_layout(title=f"{period_title} Revenue", margin=plot_margins, height=plot_height, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+            st.plotly_chart(fig_rev, use_container_width=True, config=PLOTLY_CONFIG)
             
         with col2:
             fig_ni = go.Figure(data=[go.Bar(x=df_fin.index, y=df_fin['Net Income'], marker_color='#2ca02c')])
-            fig_ni.update_layout(title="Quarterly Net Income", margin=plot_margins, height=plot_height, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
-            st.plotly_chart(fig_ni, use_container_width=True)
+            fig_ni.update_layout(title=f"{period_title} Net Income", margin=plot_margins, height=plot_height, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+            st.plotly_chart(fig_ni, use_container_width=True, config=PLOTLY_CONFIG)
             
         with col3:
             if not df_fin['FCF'].dropna().empty:
                 fig_fcf = go.Figure(data=[go.Bar(x=df_fin.index, y=df_fin['FCF'], marker_color='#9467bd')])
-                fig_fcf.update_layout(title="Quarterly Free Cash Flow", margin=plot_margins, height=plot_height, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
-                st.plotly_chart(fig_fcf, use_container_width=True)
+                fig_fcf.update_layout(title=f"{period_title} Free Cash Flow", margin=plot_margins, height=plot_height, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+                st.plotly_chart(fig_fcf, use_container_width=True, config=PLOTLY_CONFIG)
             else:
-                st.warning("Historical FCF Unavailable")
+                st.warning(f"Historical FCF Unavailable")
     else:
         st.warning("Historical financial data is not currently available.")
