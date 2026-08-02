@@ -41,7 +41,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("SethiStock Analysis Platform")
+st.title("SethiStock")
 
 # --- SIDEBAR: Inputs & Valuation Results ---
 st.sidebar.header("Search & Parameters")
@@ -99,7 +99,7 @@ if ticker_symbol:
         st.sidebar.warning("DCF cannot be calculated (Missing or Negative Free Cash Flow).")
 
     # --- MAIN PAGE: Dashboards & Visuals ---
-    st.header(f"{ticker_symbol} - Technical & Fundamental Analysis")
+    st.header(f"{ticker_symbol}")
     
     # --- 2. Candlestick Chart (3-month) ---
     st.subheader("3-Month Price Action")
