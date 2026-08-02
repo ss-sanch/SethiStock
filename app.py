@@ -29,7 +29,7 @@ st.markdown("""
     /* 3. Style Plotly Charts to look like elevated, rounded cards */
     [data-testid="stPlotlyChart"] {
         background-color: rgba(128, 128, 128, 0.05);
-        border-radius: 12px;
+        border-radius: 20px;
         padding: 15px;
         box-shadow: 0px 4px 6px rgba(0,0,0,0.05);
         border: 1px solid rgba(128, 128, 128, 0.1);
