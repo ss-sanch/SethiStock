@@ -5,30 +5,34 @@ import pandas as pd
 
 st.set_page_config(page_title="SethiStock", layout="wide")
 
-# --- CUSTOM CSS FOR UI POLISH (The Qualtrim Effect) ---
+# --- CUSTOM CSS FOR DYNAMIC UI POLISH ---
 st.markdown("""
 <style>
     /* 1. Eliminate the massive empty space at the top */
     .block-container {
-        padding-top: 1rem;
+        padding-top: 2rem;
         margin-top: 0rem;
     }
     
-    /* Hide the default Streamlit top menu for a cleaner SaaS feel */
+    /* Hide the default Streamlit top menu */
     header {visibility: hidden;}
     
-    /* 2. Make the main background slightly grayish */
-    [data-testid="stAppViewContainer"] {
-        background-color: #F4F5F7; 
+    /* 2. Style Metrics (Sidebar & Main) with subtle transparent backgrounds and chamfered edges */
+    [data-testid="stMetric"] {
+        background-color: rgba(128, 128, 128, 0.05);
+        padding: 15px;
+        border-radius: 12px;
+        box-shadow: 0px 4px 6px rgba(0,0,0,0.05);
+        border: 1px solid rgba(128, 128, 128, 0.1);
     }
     
-    /* 3. Style the Sidebar output metrics to look like standalone white cards */
-    [data-testid="stMetric"] {
-        background-color: #FFFFFF;
+    /* 3. Style Plotly Charts to look like elevated, rounded cards */
+    [data-testid="stPlotlyChart"] {
+        background-color: rgba(128, 128, 128, 0.05);
+        border-radius: 12px;
         padding: 15px;
-        border-radius: 8px;
-        box-shadow: 0px 2px 5px rgba(0,0,0,0.05);
-        border: 1px solid #E6E6E9;
+        box-shadow: 0px 4px 6px rgba(0,0,0,0.05);
+        border: 1px solid rgba(128, 128, 128, 0.1);
     }
 </style>
 """, unsafe_allow_html=True)
@@ -103,13 +107,13 @@ if ticker_symbol:
                     low=history['Low'],
                     close=history['Close'])])
         
-        # Injecting the "White Card" look directly into the Plotly layout
+        # Transparent backgrounds let the CSS card style shine through
         fig_candle.update_layout(
             xaxis_rangeslider_visible=False, 
             margin=dict(l=15, r=15, t=40, b=15), 
             height=400,
-            paper_bgcolor="#FFFFFF", 
-            plot_bgcolor="#FFFFFF",
+            paper_bgcolor="rgba(0,0,0,0)", 
+            plot_bgcolor="rgba(0,0,0,0)",
             title="Price Action"
         )
         st.plotly_chart(fig_candle, use_container_width=True)
@@ -135,8 +139,8 @@ if ticker_symbol:
                 title="Total Revenue", 
                 margin=dict(l=15, r=15, t=40, b=15), 
                 height=250, 
-                paper_bgcolor="#FFFFFF", 
-                plot_bgcolor="#FFFFFF"
+                paper_bgcolor="rgba(0,0,0,0)", 
+                plot_bgcolor="rgba(0,0,0,0)"
             )
             st.plotly_chart(fig_rev, use_container_width=True)
             
@@ -146,8 +150,8 @@ if ticker_symbol:
                 title="Net Income", 
                 margin=dict(l=15, r=15, t=40, b=15), 
                 height=250, 
-                paper_bgcolor="#FFFFFF", 
-                plot_bgcolor="#FFFFFF"
+                paper_bgcolor="rgba(0,0,0,0)", 
+                plot_bgcolor="rgba(0,0,0,0)"
             )
             st.plotly_chart(fig_ni, use_container_width=True)
     else:
