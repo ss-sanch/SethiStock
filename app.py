@@ -3,7 +3,8 @@ import yfinance as yf
 import plotly.graph_objects as go
 import pandas as pd
 
-st.set_page_config(page_title="SethiStock", layout="wide")
+# Start with the sidebar expanded by default
+st.set_page_config(page_title="SethiStock", layout="wide", initial_sidebar_state="expanded")
 
 # --- CUSTOM CSS FOR DYNAMIC UI POLISH ---
 st.markdown("""
@@ -14,10 +15,13 @@ st.markdown("""
         margin-top: 0rem;
     }
     
-    /* Hide the default Streamlit top menu */
-    header {visibility: hidden;}
+    /* 2. SURGICAL HEADER FIX: Keep header transparent, hide right-side clutter, keep sidebar toggle visible */
+    header {background-color: transparent !important;}
+    #MainMenu {visibility: hidden;}
+    .stDeployButton {display: none;}
+    [data-testid="stHeaderActionElements"] {display: none;}
     
-    /* 2. Style Metrics (Sidebar & Main) with subtle transparent backgrounds and chamfered edges */
+    /* 3. Style Metrics (Sidebar & Main) with subtle transparent backgrounds and chamfered edges */
     [data-testid="stMetric"] {
         background-color: rgba(128, 128, 128, 0.05);
         padding: 15px;
@@ -26,10 +30,10 @@ st.markdown("""
         border: 1px solid rgba(128, 128, 128, 0.1);
     }
     
-    /* 3. Style Plotly Charts to look like elevated, rounded cards */
+    /* 4. Style Plotly Charts to look like elevated, rounded cards */
     [data-testid="stPlotlyChart"] {
         background-color: rgba(128, 128, 128, 0.05);
-        border-radius: 20px;
+        border-radius: 12px;
         padding: 15px;
         box-shadow: 0px 4px 6px rgba(0,0,0,0.05);
         border: 1px solid rgba(128, 128, 128, 0.1);
