@@ -21,7 +21,7 @@ st.markdown("""
     
     [data-testid="stMetric"], [data-testid="stPlotlyChart"] {
         background-color: rgba(128, 128, 128, 0.05);
-        padding: 5px; /* Tightened padding based on executive feedback */
+        padding: 5px; /* Executive requested tight padding */
         border-radius: 12px;
         box-shadow: 0px 4px 6px rgba(0,0,0,0.05);
         border: 1px solid rgba(128, 128, 128, 0.1);
@@ -149,12 +149,12 @@ if ticker_symbol:
     # --- 2. Dynamic Price Action Chart ---
     st.subheader("Price Action")
     
-    # Horizontal Layout for Controls
-    ctrl_col1, ctrl_col2 = st.columns([2, 1])
+    # Using a spacer column (the '1' in the middle) to force the chart toggle to the far right
+    ctrl_col1, ctrl_spacer, ctrl_col2 = st.columns([6, 1, 3], vertical_alignment="center")
     with ctrl_col1:
         timeframe = st.radio(
             "Timeframe", 
-            ["1 Day", "1 Week", "1 Month", "3 Months", "YTD", "1 Year", "MAX"], 
+            ["1 Day", "1 Week", "1 Month", "3 Months", "YTD", "1 Year", "5 Years", "MAX"], 
             horizontal=True, 
             label_visibility="collapsed",
             index=5 # Defaults to 1 Year
@@ -175,11 +175,16 @@ if ticker_symbol:
         "3 Months": ("3mo", "1d"),
         "YTD": ("ytd", "1d"),
         "1 Year": ("1y", "1d"),
+        "5 Years": ("5y", "1d"),
         "MAX": ("max", "1wk")
     }
     
     period, interval = tf_map[timeframe]
     history = ticker.history(period=period, interval=interval)
+    
+    # Slice the dataframe to cutoff anything before the year 2000
+    if timeframe == "MAX" and not history.empty:
+        history = history.loc['2000':]
     
     if not history.empty:
         fig_price = go.Figure()
