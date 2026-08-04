@@ -93,16 +93,15 @@ if ticker_symbol:
         sign = ""
 
     # Render the Minimalist Header via HTML injection 
-    # (CRITICAL: Do not indent the HTML tags below this line)
     st.markdown(f"""
-<div style="display: flex; flex-direction: column; gap: 5px;">
-<h2 style="margin: 0; padding: 0; font-size: 26px; font-weight: 600;">{ticker_symbol}</h2>
-<div style="display: flex; align-items: center; gap: 15px; margin-top: 10px;">
-    <h1 style="margin: 0; padding: 0; font-size: 36px; font-weight: 700;">${current_price:,.2f}</h1>
-    <div style="padding: 5px 10px; border-radius: 8px; font-weight: 600; {pill_color}">
-        {sign}${change:,.2f} &nbsp;|&nbsp; {sign}{pct_change:,.2f}%
+<div style="background-color: #1E1E1E; padding: 20px; border-radius: 10px; border: 1px solid #333; display: flex; flex-direction: column; gap: 5px;">
+    <h2 style="margin: 0; padding: 0; font-size: 26px; font-weight: 600;">{ticker_symbol}</h2>
+    <div style="display: flex; align-items: center; gap: 15px; margin-top: 10px;">
+        <h1 style="margin: 0; padding: 0; font-size: 36px; font-weight: 700;">${current_price:,.2f}</h1>
+        <div style="padding: 5px 10px; border-radius: 8px; font-weight: 600; {pill_color}">
+            {sign}${change:,.2f} &nbsp;|&nbsp; {sign}{pct_change:,.2f}%
+        </div>
     </div>
-</div>
 </div>
     """, unsafe_allow_html=True)
     
