@@ -56,32 +56,29 @@ discount_rate = st.sidebar.slider("Desired Return (Discount Rate) %", 5.0, 20.0,
 exit_multiple = st.sidebar.slider("Exit Multiple (Price/FCF)", 10.0, 100.0, 30.0)
 
 if ticker_symbol:
-    ticker = yf.Ticker(ticker_symbol)
-    
-    # --- QUALTRIM-STYLE DYNAMIC HEADER (FAST_INFO PIVOT) ---
-    name = ticker_symbol# .info is blocked, so we default the UI name to the ticker
-    info = {}
-    
-    try:
-        # Bypassing the restricted .info endpoint using the lightweight fast_info object
-        f_info = ticker.fast_info
-        current_price = float(f_info['lastPrice'])
-        prev_close = float(f_info['previousClose'])
-        exchange = str(f_info['exchange'])
-        shares = float(f_info['shares'])
-    except Exception:
-        # Ultimate fallback if Yahoo fully severs the connection
-        current_price, prev_close, shares = 0, 0, 0
-        exchange = "Exchange"
-        st.error("Yahoo Finance data is currently delayed. Pricing and DCF may be unavailable.")
+        ticker = yf.Ticker(ticker_symbol)
+        info = {} # THE PATCH: Empty dummy dict to bypass the blocked .info vault
+        
+        # --- QUALTRIM-STYLE DYNAMIC HEADER (FAST_INFO PIVOT) ---
+        try:
+            f_info = ticker.fast_info
+            current_price = float(f_info['lastPrice'])
+            prev_close = float(f_info['previousClose'])
+            shares = float(f_info['shares']) # Pulling the shares directly from the unblocked ticker tape
+            exchange = str(f_info['exchange'])
+            name = ticker_symbol
+        except Exception:
+            current_price, prev_close, shares = 0, 0, 0
+            exchange, name = "Exchange", ticker_symbol
+            st.error("Yahoo Finance data is delayed. Pricing and DCF may be unavailable.")
 
-    # Calculate Daily Change
-    if current_price and prev_close:
-        change = current_price - prev_close
-        pct_change = (change / prev_close) * 100
-    else:
-        change = 0
-        pct_change = 0
+        # Calculate Daily Change
+        if current_price and prev_close:
+            change = current_price - prev_close
+            pct_change = (change / prev_close) * 100
+        else:
+            change = 0
+            pct_change = 0
         
     # Formatting the Change Pill
     if change > 0:
@@ -121,8 +118,7 @@ if ticker_symbol:
     """, unsafe_allow_html=True)
     
     # --- 1. CALCULATE DCF FIRST ---
-    shares = info.get('sharesOutstanding', 0)
-    dcf_valid = False # THE PATCH: Give Python a default state so it never crashes
+    dcf_valid = False 
     fcf = 0
     # --- REVERSE DCF: REROUTED FCF PIPELINE ---
     try:
