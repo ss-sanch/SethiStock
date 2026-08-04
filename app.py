@@ -5,8 +5,6 @@ import pandas as pd
 import urllib.parse
 import requests
 
-st.logo("sethistock_logo.png")
-
 # Start with the sidebar expanded by default
 st.set_page_config(page_title="SethiStock", layout="wide", initial_sidebar_state="expanded")
 
@@ -44,10 +42,10 @@ PLOTLY_CONFIG = {'displayModeBar': False}
 # --- MAIN PAGE: Top Navigation Bar ---
 nav_col1, nav_col2, nav_col3 = st.columns([1, 2, 1], vertical_alignment="center")
 with nav_col1:
-    st.markdown("### SethiStock")
+    # This injects your transparent logo perfectly into the top left column
+    st.image("sethistock_logo.png", width=180) 
 with nav_col2:
     ticker_symbol = st.text_input("Search", value="GOOG", label_visibility="collapsed", placeholder="Enter Stock Ticker (e.g., AAPL, MSFT)").upper()
-
 st.divider()
 
 # --- SIDEBAR: Inputs & Valuation Results ---
