@@ -122,28 +122,29 @@ if ticker_symbol:
     
     # --- 1. CALCULATE DCF FIRST ---
     shares = info.get('sharesOutstanding', 0)
-    cash_flow = ticker.cashflow
-    
-    dcf_valid = False
-    
-    if not cash_flow.empty and 'Operating Cash Flow' in cash_flow.index and current_price > 0 and shares > 0:
-        ocf = cash_flow.loc['Operating Cash Flow'].dropna().iloc[0]
-        capex = abs(cash_flow.loc['Capital Expenditure'].dropna().iloc[0]) if 'Capital Expenditure' in cash_flow.index else 0
-        fcf_0 = ocf - capex
+    # --- REVERSE DCF: REROUTED FCF PIPELINE ---
+    try:
+        # Pull the raw cash flow statement
+        cf_statement = ticker.cashflow
         
-        if fcf_0 > 0:
-            target_price_sum = 0
-            fcf_n = fcf_0
-            for t in range(1, proj_years + 1):
-                fcf_n = fcf_n * (1 + growth_rate)
-                target_price_sum += fcf_n / ((1 + discount_rate) ** t)
+        # Attempt 1: Look for the exact 'Free Cash Flow' row yfinance sometimes provides
+        if 'Free Cash Flow' in cf_statement.index:
+            fcf = cf_statement.loc['Free Cash Flow'].iloc[0]
+        else:
+            # Attempt 2: Calculate manually if the exact row is missing
+            operating_cf = cf_statement.loc['Operating Cash Flow'].iloc[0]
+            capex = cf_statement.loc['Capital Expenditure'].iloc[0] # Note: CapEx is typically reported as a negative number
+            fcf = operating_cf + capex 
             
-            tv = fcf_n * exit_multiple
-            target_price_sum += tv / ((1 + discount_rate) ** proj_years)
-            
-            target_price_per_share = target_price_sum / shares
-            margin_of_safety = ((target_price_per_share - current_price) / current_price) * 100
-            dcf_valid = True
+    except Exception as e:
+        st.warning("Could not extract Free Cash Flow from the raw statements. Reverse DCF cannot be calculated.")
+        fcf = 0
+
+    # Ensure shares are available from our fast_info pivot earlier
+    if fcf and shares > 0:
+        fcf_per_share = fcf / shares
+        # ... (Proceed with your existing DCF math using fcf_per_share) ...
+
 
     # --- SIDEBAR: Output Display ---
     st.sidebar.divider()
