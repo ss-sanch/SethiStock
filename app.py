@@ -54,13 +54,6 @@ with nav_col2:
         placeholder="Search Ticker..."
     ).upper()
 
-# --- SIDEBAR: Inputs & Valuation Results ---
-st.sidebar.subheader("Reverse DCF (Exit Multiple)")
-proj_years = st.sidebar.slider("Projection Years", 1, 10, 5)
-growth_rate = st.sidebar.slider("Expected Annual Growth Rate %", 1.0, 50.0, 15.0) / 100
-discount_rate = st.sidebar.slider("Desired Return (Discount Rate) %", 5.0, 20.0, 10.0) / 100
-exit_multiple = st.sidebar.slider("Exit Multiple (Price/FCF)", 10.0, 100.0, 30.0)
-
 if ticker_symbol:
     ticker = yf.Ticker(ticker_symbol)
     info = {} # THE PATCH: Empty dummy dict to bypass the blocked .info vault
@@ -107,51 +100,6 @@ if ticker_symbol:
 </div>
     """, unsafe_allow_html=True)
     
-   # --- 1. CALCULATE DCF FIRST ---
-    try:
-        shares = f_info.shares
-    except Exception:
-        shares = 0
-        
-    cash_flow = ticker.cashflow
-    dcf_valid = False
-    fcf = 0  # <--- THE CRITICAL SAFETY NET
-
-    # Attempt to calculate Free Cash Flow dynamically
-    if not cash_flow.empty and 'Operating Cash Flow' in cash_flow.index:
-        try:
-            ocf = cash_flow.loc['Operating Cash Flow'].dropna().iloc[0]
-            capex = abs(cash_flow.loc['Capital Expenditure'].dropna().iloc[0]) if 'Capital Expenditure' in cash_flow.index else 0
-            fcf = ocf - capex
-        except Exception:
-            fcf = 0
-
-    # Execute DCF Math only if all inputs are valid and positive
-    if fcf > 0 and shares > 0 and current_price > 0:
-        target_price_sum = 0
-        fcf_n = fcf
-        
-        for t in range(1, proj_years + 1):
-            fcf_n = fcf_n * (1 + growth_rate)
-            target_price_sum += fcf_n / ((1 + discount_rate) ** t)
-            
-        tv = fcf_n * exit_multiple
-        target_price_sum += tv / ((1 + discount_rate) ** proj_years)
-        
-        target_price_per_share = target_price_sum / shares
-        margin_of_safety = ((target_price_per_share - current_price) / current_price) * 100
-        dcf_valid = True
-
-    # --- SIDEBAR: Output Display ---
-    st.sidebar.divider()
-    st.sidebar.subheader("Valuation Output")
-    if dcf_valid:
-        st.sidebar.metric("Current Price", f"${current_price:,.2f}")
-        st.sidebar.metric("Target Entry Price", f"${target_price_per_share:,.2f}")
-        st.sidebar.metric("Margin of Safety", f"{margin_of_safety:.2f}%", delta_color="normal" if margin_of_safety > 0 else "inverse")
-    else:
-        st.sidebar.warning("DCF cannot be calculated (Missing or Negative FCF).")
-
     # --- MAIN PAGE: Dashboards & Visuals ---
     # --- 2. Dynamic Price Action Chart ---
     st.subheader("Price Action")
@@ -286,3 +234,75 @@ if ticker_symbol:
                 st.warning(f"Historical FCF Unavailable")
     else:
         st.warning("Historical financial data is not currently available.")
+
+    # ==========================================
+    # --- BOTTOM SECTION: VALUATION ENGINE ---
+    # ==========================================
+    st.markdown("<br><hr><br>", unsafe_allow_html=True)
+    st.markdown("### 📊 Valuation Engine: Reverse DCF")
+    st.markdown("<p style='color: #A3A8B8; margin-bottom: 20px;'>Adjust the parameters below to reverse-engineer Wall Street expectations and calculate intrinsic value.</p>", unsafe_allow_html=True)
+
+    # 1. The Sliders in a clean row
+    dcf_col1, dcf_col2, dcf_col3, dcf_col4 = st.columns(4)
+    with dcf_col1:
+        proj_years = st.slider("Projection Years", 1, 10, 5)
+    with dcf_col2:
+        growth_rate = st.slider("Growth Rate %", 1.0, 50.0, 15.0) / 100
+    with dcf_col3:
+        discount_rate = st.slider("Discount Rate %", 5.0, 20.0, 10.0) / 100
+    with dcf_col4:
+        exit_multiple = st.slider("Exit Multiple", 10.0, 100.0, 15.0)
+
+    # 2. Execute DCF Math
+    dcf_valid = False
+    fcf = 0
+    try:
+        shares = f_info.shares
+    except Exception:
+        shares = 0
+            
+    cash_flow = ticker.cashflow
+    if not cash_flow.empty and 'Operating Cash Flow' in cash_flow.index:
+        try:
+            ocf = cash_flow.loc['Operating Cash Flow'].dropna().iloc[0]
+            capex = abs(cash_flow.loc['Capital Expenditure'].dropna().iloc[0]) if 'Capital Expenditure' in cash_flow.index else 0
+            fcf = ocf - capex
+        except Exception:
+            fcf = 0
+
+    if fcf > 0 and shares > 0 and current_price > 0:
+        target_price_sum = 0
+        fcf_n = fcf
+            
+        for t in range(1, proj_years + 1):
+            fcf_n = fcf_n * (1 + growth_rate)
+            target_price_sum += fcf_n / ((1 + discount_rate) ** t)
+                
+        tv = fcf_n * exit_multiple
+        target_price_sum += tv / ((1 + discount_rate) ** proj_years)
+            
+        target_price_per_share = target_price_sum / shares
+        margin_of_safety = ((target_price_per_share - current_price) / current_price) * 100
+        dcf_valid = True
+
+    # 3. Render Output Card
+    if dcf_valid:
+        if margin_of_safety > 0:
+            mos_color = "#16a34a"  # Green
+        else:
+            mos_color = "#dc2626"  # Red
+                
+        st.markdown(f"""
+        <div style="background-color: #1E1E1E; padding: 25px; border-radius: 10px; border: 1px solid #333; margin-top: 20px; display: flex; justify-content: space-around; text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.3);">
+            <div>
+                <p style="color: #A3A8B8; margin: 0; font-size: 14px; font-weight: 600; letter-spacing: 1px;">TARGET ENTRY PRICE</p>
+                <h1 style="margin: 0; color: #E2E8F0; font-size: 36px;">${target_price_per_share:,.2f}</h1>
+            </div>
+            <div>
+                <p style="color: #A3A8B8; margin: 0; font-size: 14px; font-weight: 600; letter-spacing: 1px;">MARGIN OF SAFETY</p>
+                <h1 style="margin: 0; color: {mos_color}; font-size: 36px;">{margin_of_safety:,.2f}%</h1>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.warning("Insufficient cash flow data to run DCF Valuation for this ticker.")
