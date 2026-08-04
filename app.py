@@ -316,7 +316,7 @@ if ticker_symbol:
             st.info("Debt Data Unavailable")
 
     # --- GRAPH 4: Shares Outstanding ---
-        with adv_col4:
+    with adv_col4:
         st.markdown("<p style='color: #A3A8B8; font-weight: 600;'>Shares Outstanding</p>", unsafe_allow_html=True)
         share_key = next((k for k in ['Diluted Average Shares', 'Basic Average Shares', 'Ordinary Shares Number'] if not inc.empty and k in inc.index), None)
             
