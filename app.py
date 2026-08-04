@@ -164,8 +164,8 @@ if ticker_symbol:
             
         fig_price.update_layout(
             xaxis_rangeslider_visible=False,
-            margin=dict(l=5, r=5, t=40, b=20),
-            height=500,
+            margin=dict(l=5, r=5, t=40, b=30),
+            height=400,
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)"
         )
