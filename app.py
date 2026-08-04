@@ -59,48 +59,48 @@ if ticker_symbol:
     ticker = yf.Ticker(ticker_symbol)
     info = {} # THE PATCH: Empty dummy dict to bypass the blocked .info vault
     
-# --- QUALTRIM-STYLE DYNAMIC HEADER ---
-        # Fetching live tape data via fast_info to bypass rate limits
-        try:
-            f_info = ticker.fast_info
-            current_price = f_info.last_price
-            prev_close = f_info.previous_close
-        except Exception:
-            current_price = 0
-            prev_close = 0
+    # --- QUALTRIM-STYLE DYNAMIC HEADER ---
+    # Fetching live tape data via fast_info to bypass rate limits
+    try:
+        f_info = ticker.fast_info
+        current_price = f_info.last_price
+        prev_close = f_info.previous_close
+    except Exception:
+        current_price = 0
+        prev_close = 0
             
-        # Calculate Daily Change
-        if current_price and prev_close:
-            change = current_price - prev_close
-            pct_change = (change / prev_close) * 100
-        else:
-            change = 0
-            pct_change = 0
+    # Calculate Daily Change
+    if current_price and prev_close:
+        change = current_price - prev_close
+        pct_change = (change / prev_close) * 100
+    else:
+        change = 0
+        pct_change = 0
 
-        # Formatting the Change Pill
-        if change > 0:
-            pill_color = "background-color: rgba(34, 197, 94, 0.2); color: #16a34a;"
-            sign = "+"
-        elif change < 0:
-            pill_color = "background-color: rgba(239, 68, 68, 0.2); color: #dc2626;"
-            sign = ""
-        else:
-            pill_color = "background-color: rgba(128, 128, 128, 0.2); color: #6b7280;"
-            sign = ""
+    # Formatting the Change Pill
+    if change > 0:
+        pill_color = "background-color: rgba(34, 197, 94, 0.2); color: #16a34a;"
+        sign = "+"
+    elif change < 0:
+        pill_color = "background-color: rgba(239, 68, 68, 0.2); color: #dc2626;"
+        sign = ""
+    else:
+        pill_color = "background-color: rgba(128, 128, 128, 0.2); color: #6b7280;"
+        sign = ""
 
-        # Render the Minimalist Header via HTML injection 
-        # (CRITICAL: Do not indent the HTML tags below this line)
-        st.markdown(f"""
+    # Render the Minimalist Header via HTML injection 
+    # (CRITICAL: Do not indent the HTML tags below this line)
+    st.markdown(f"""
 <div style="display: flex; flex-direction: column; gap: 5px;">
-    <h2 style="margin: 0; padding: 0; font-size: 26px; font-weight: 600;">{ticker_symbol}</h2>
-    <div style="display: flex; align-items: center; gap: 15px; margin-top: 10px;">
-        <h1 style="margin: 0; padding: 0; font-size: 36px; font-weight: 700;">${current_price:,.2f}</h1>
-        <div style="padding: 5px 10px; border-radius: 8px; font-weight: 600; {pill_color}">
-            {sign}${change:,.2f} &nbsp;|&nbsp; {sign}{pct_change:,.2f}%
-        </div>
+<h2 style="margin: 0; padding: 0; font-size: 26px; font-weight: 600;">{ticker_symbol}</h2>
+<div style="display: flex; align-items: center; gap: 15px; margin-top: 10px;">
+    <h1 style="margin: 0; padding: 0; font-size: 36px; font-weight: 700;">${current_price:,.2f}</h1>
+    <div style="padding: 5px 10px; border-radius: 8px; font-weight: 600; {pill_color}">
+        {sign}${change:,.2f} &nbsp;|&nbsp; {sign}{pct_change:,.2f}%
     </div>
 </div>
-        """, unsafe_allow_html=True)
+</div>
+    """, unsafe_allow_html=True)
     
     # --- 1. CALCULATE DCF FIRST ---
     dcf_valid = False
