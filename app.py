@@ -45,8 +45,12 @@ with nav_col1:
     # This injects your transparent logo perfectly into the top left column
     st.image("sethistock_logo.png", width=360) 
 with nav_col2:
-    ticker_symbol = st.text_input("Search", value="GOOG", label_visibility="collapsed", placeholder="Enter Stock Ticker (e.g., AAPL, MSFT)").upper()
-st.divider()
+    # Creating a tight nested grid to force the text inline with the search bar
+    search_lbl, search_inp = st.columns([1, 4], vertical_alignment="center")
+    with search_lbl:
+        st.markdown("<p style='text-align: right; margin: 0; font-weight: 600; font-size: 16px; color: #A3A8B8;'>Search Ticker:</p>", unsafe_allow_html=True)
+    with search_inp:
+        ticker_symbol = st.text_input("Search", value="GOOG", label_visibility="collapsed").upper()
 
 # --- SIDEBAR: Inputs & Valuation Results ---
 st.sidebar.subheader("Reverse DCF (Exit Multiple)")
