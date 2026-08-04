@@ -45,15 +45,29 @@ with nav_col1:
     # This injects your transparent logo perfectly into the top left column
     st.image("sethistock_logo.png", width=360) 
 with nav_col2:
-    # Creating a tighter nested grid with a reduced gap to pull them flush
-    search_lbl, search_inp = st.columns([1.5, 4], gap="small", vertical_alignment="center")
+    # Injecting a CSS hijack to force the native label inline and flush with the input box
+    st.markdown("""
+    <style>
+    /* Force the Streamlit text input container to align side-by-side */
+    div[data-testid="stTextInput"] {
+        display: flex;
+        flex-direction: row;
+        align-items: center;
+        gap: 12px; /* Controls the exact pixel distance between text and box */
+    }
+    /* Restyle the label text to match the modern gray Qualtrim aesthetic */
+    div[data-testid="stTextInput"] label p {
+        margin-bottom: 0px !important;
+        color: #A3A8B8 !important;
+        font-size: 16px !important;
+        font-weight: 600 !important;
+        white-space: nowrap;
+    }
+    </style>
+    """, unsafe_allow_html=True)
     
-    with search_lbl:
-        # Injected margin-top: 6px to vertically align the label with the input text
-        st.markdown("<div style='text-align: right; margin-top: 6px; font-weight: 600; font-size: 16px; color: #A3A8B8;'>Search Ticker:</div>", unsafe_allow_html=True)
-        
-    with search_inp:
-        ticker_symbol = st.text_input("Search", value="GOOG", label_visibility="collapsed", placeholder="Enter Stock Ticker (e.g., AAPL)").upper()
+    # Notice we removed label_visibility="collapsed" so our CSS can hijack it!
+    ticker_symbol = st.text_input("Search Ticker:", value="GOOG", placeholder="Enter Stock Ticker (e.g., AAPL)").upper()
 
 # --- SIDEBAR: Inputs & Valuation Results ---
 st.sidebar.subheader("Reverse DCF (Exit Multiple)")
