@@ -43,7 +43,7 @@ PLOTLY_CONFIG = {'displayModeBar': False}
 nav_col1, nav_col2, nav_col3 = st.columns([1, 2, 1], vertical_alignment="center")
 with nav_col1:
     # This injects your transparent logo perfectly into the top left column
-    st.image("sethistock_logo.png", width=180) 
+    st.image("sethistock_logo.png", width=360) 
 with nav_col2:
     ticker_symbol = st.text_input("Search", value="GOOG", label_visibility="collapsed", placeholder="Enter Stock Ticker (e.g., AAPL, MSFT)").upper()
 st.divider()
