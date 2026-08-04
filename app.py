@@ -42,32 +42,17 @@ PLOTLY_CONFIG = {'displayModeBar': False}
 # --- MAIN PAGE: Top Navigation Bar ---
 nav_col1, nav_col2, nav_col3 = st.columns([1, 2, 1], vertical_alignment="center")
 with nav_col1:
-    # This injects your transparent logo perfectly into the top left column
-    st.image("sethistock_logo.png", width=360) 
+    # Your perfectly flush transparent logo
+    st.image("sethistock_logo.png", width=180) 
+
 with nav_col2:
-    # Injecting a CSS hijack to force the native label inline and flush with the input box
-    st.markdown("""
-    <style>
-    /* Force the Streamlit text input container to align side-by-side */
-    div[data-testid="stTextInput"] {
-        display: flex;
-        flex-direction: row;
-        align-items: center;
-        gap: 12px; /* Controls the exact pixel distance between text and box */
-    }
-    /* Restyle the label text to match the modern gray Qualtrim aesthetic */
-    div[data-testid="stTextInput"] label p {
-        margin-bottom: 0px !important;
-        color: #A3A8B8 !important;
-        font-size: 16px !important;
-        font-weight: 600 !important;
-        white-space: nowrap;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-    
-    # Notice we removed label_visibility="collapsed" so our CSS can hijack it!
-    ticker_symbol = st.text_input("Search Ticker:", value="GOOG", placeholder="Enter Stock Ticker (e.g., AAPL)").upper()
+    # Native placeholder implementation (clean, centered, zero CSS hacks)
+    ticker_symbol = st.text_input(
+        "Search", 
+        value="", # Left blank so the placeholder is visible immediately!
+        label_visibility="collapsed", 
+        placeholder="Search Ticker..."
+    ).upper()
 
 # --- SIDEBAR: Inputs & Valuation Results ---
 st.sidebar.subheader("Reverse DCF (Exit Multiple)")
