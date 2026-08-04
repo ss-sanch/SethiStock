@@ -59,7 +59,8 @@ if ticker_symbol:
     ticker = yf.Ticker(ticker_symbol)
     
     # --- QUALTRIM-STYLE DYNAMIC HEADER (FAST_INFO PIVOT) ---
-    name = ticker_symbol # .info is blocked, so we default the UI name to the ticker
+    name = ticker_symbol# .info is blocked, so we default the UI name to the ticker
+    info = {}
     
     try:
         # Bypassing the restricted .info endpoint using the lightweight fast_info object
