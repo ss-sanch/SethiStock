@@ -43,7 +43,7 @@ PLOTLY_CONFIG = {'displayModeBar': False}
 nav_col1, nav_col2, nav_col3 = st.columns([1, 2, 1], vertical_alignment="center")
 with nav_col1:
     # Your perfectly flush transparent logo
-    st.image("sethistock_logo.png", width=180) 
+    st.image("sethistock_logo.png", width=360) 
 
 with nav_col2:
     # Native placeholder implementation (clean, centered, zero CSS hacks)
