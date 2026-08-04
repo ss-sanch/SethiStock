@@ -5,6 +5,8 @@ import pandas as pd
 import urllib.parse
 import requests
 
+st.logo("sethistock_logo.png")
+
 # Start with the sidebar expanded by default
 st.set_page_config(page_title="SethiStock", layout="wide", initial_sidebar_state="expanded")
 
