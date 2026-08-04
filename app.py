@@ -122,6 +122,8 @@ if ticker_symbol:
     
     # --- 1. CALCULATE DCF FIRST ---
     shares = info.get('sharesOutstanding', 0)
+    dcf_valid = False # THE PATCH: Give Python a default state so it never crashes
+    fcf = 0
     # --- REVERSE DCF: REROUTED FCF PIPELINE ---
     try:
         # Pull the raw cash flow statement
