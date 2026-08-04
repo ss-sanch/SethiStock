@@ -235,12 +235,12 @@ if ticker_symbol:
     else:
         st.warning("Historical financial data is not currently available.")
 
-# ==========================================
-# --- ADVANCED FINANCIAL HEALTH MATRIX ---
-# ==========================================
+    # ==========================================
+    # --- ADVANCED FINANCIAL HEALTH MATRIX ---
+    # ==========================================
     st.markdown("<br><h3 style='color: #E2E8F0;'>🔬 Advanced Financial Metrics</h3>", unsafe_allow_html=True)
 
-    # 1. Obey the existing Master Toggle Switch (is_quarterly)
+    # 1. Obey the master toggle switch (is_quarterly) with safe fallbacks
     try:
         if is_quarterly: 
             inc = ticker.quarterly_income_stmt
@@ -252,7 +252,6 @@ if ticker_symbol:
             cf = ticker.cashflow
     except Exception:
         inc, bs, cf = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-
     # 2. Build the 2x2 UI Grid
     adv_col1, adv_col2 = st.columns(2)
     adv_col3, adv_col4 = st.columns(2)
@@ -260,31 +259,43 @@ if ticker_symbol:
     # --- GRAPH 1: Free Cash Flow ---
     with adv_col1:
         st.markdown("<p style='color: #A3A8B8; font-weight: 600;'>Free Cash Flow</p>", unsafe_allow_html=True)
-        if not cf.empty and 'Operating Cash Flow' in cf.index and 'Capital Expenditure' in cf.index:
-            # CapEx is usually negative, so we subtract its absolute value to be perfectly safe
-            fcf_chart = cf.loc['Operating Cash Flow'] - cf.loc['Capital Expenditure'].abs()
+        ocf_key = next((k for k in ['Operating Cash Flow', 'Total Cash From Operating Activities', 'OperatingCashFlow'] if not cf.empty and k in cf.index), None)
+        capex_key = next((k for k in ['Capital Expenditure', 'Capital Expenditures', 'CapEx'] if not cf.empty and k in cf.index), None)
+            
+        if cf is not None and not cf.empty and ocf_key:
+            ocf_series = cf.loc[ocf_key]
+            capex_series = cf.loc[capex_key].abs() if capex_key else pd.Series(0, index=ocf_series.index)
+            fcf_chart = ocf_series - capex_series
+                
             fig_fcf = go.Figure(go.Bar(x=fcf_chart.index, y=fcf_chart.values, marker_color='#16a34a'))
             fig_fcf.update_layout(height=250, margin=dict(l=0, r=0, t=10, b=30), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'))
             st.plotly_chart(fig_fcf, use_container_width=True, config={'displayModeBar': False})
         else:
             st.info("FCF Data Unavailable")
-
+    
     # --- GRAPH 2: Profit Margins ---
     with adv_col2:
         st.markdown("<p style='color: #A3A8B8; font-weight: 600;'>Profit Margins (%)</p>", unsafe_allow_html=True)
-        if not inc.empty and 'Total Revenue' in inc.index:
-            rev = inc.loc['Total Revenue']
+        rev_key = next((k for k in ['Total Revenue', 'Revenue', 'Operating Revenue'] if not inc.empty and k in inc.index), None)
+            
+        if inc is not None and not inc.empty and rev_key:
+            rev = inc.loc[rev_key]
             fig_margin = go.Figure()
                 
-            if 'Gross Profit' in inc.index:
-                gm = (inc.loc['Gross Profit'] / rev) * 100
+            gp_key = next((k for k in ['Gross Profit'] if k in inc.index), None)
+            if gp_key:
+                gm = (inc.loc[gp_key] / rev) * 100
                 fig_margin.add_trace(go.Scatter(x=gm.index, y=gm.values, mode='lines+markers', name='Gross', line=dict(color='#3b82f6')))
-            if 'Operating Income' in inc.index:
-                om = (inc.loc['Operating Income'] / rev) * 100
+                    
+            op_key = next((k for k in ['Operating Income', 'EBIT'] if k in inc.index), None)
+            if op_key:
+                om = (inc.loc[op_key] / rev) * 100
                 fig_margin.add_trace(go.Scatter(x=om.index, y=om.values, mode='lines+markers', name='Operating', line=dict(color='#f59e0b')))
-            if 'Net Income' in inc.index:
-                nm = (inc.loc['Net Income'] / rev) * 100
-                fig_margin.add_trace(go.Scatter(x=nm.index, y=nm.values, mode='lines+markers', name='Net', line=dict(color='#16a34a')))
+                    
+            net_key = next((k for k in ['Net Income', 'Net Income Common Stockholders'] if k in inc.index), None)
+            if net_key:
+                nm = (inc.loc[net_key] / rev) * 100
+                fig_margin.add_trace(go.Scatter(x=net_key.index if hasattr(net_key, 'index') else nm.index, y=nm.values, mode='lines+markers', name='Net', line=dict(color='#16a34a')))
                     
             fig_margin.update_layout(height=250, margin=dict(l=0, r=0, t=10, b=30), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
             st.plotly_chart(fig_margin, use_container_width=True, config={'displayModeBar': False})
@@ -294,27 +305,29 @@ if ticker_symbol:
     # --- GRAPH 3: Total Debt ---
     with adv_col3:
         st.markdown("<p style='color: #A3A8B8; font-weight: 600;'>Total Debt</p>", unsafe_allow_html=True)
-        if not bs.empty and 'Total Debt' in bs.index:
-            debt = bs.loc['Total Debt']
-            fig_debt = go.Figure(go.Bar(x=debt.index, y=debt.values, marker_color='#dc2626')) # Red for debt
+        debt_key = next((k for k in ['Total Debt', 'Long Term Debt And Capital Lease Obligation', 'Long Term Debt'] if not bs.empty and k in bs.index), None)
+            
+        if bs is not None and not bs.empty and debt_key:
+            debt = bs.loc[debt_key]
+            fig_debt = go.Figure(go.Bar(x=debt.index, y=debt.values, marker_color='#dc2626'))
             fig_debt.update_layout(height=250, margin=dict(l=0, r=0, t=10, b=30), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'))
             st.plotly_chart(fig_debt, use_container_width=True, config={'displayModeBar': False})
         else:
             st.info("Debt Data Unavailable")
 
     # --- GRAPH 4: Shares Outstanding ---
-    with adv_col4:
+        with adv_col4:
         st.markdown("<p style='color: #A3A8B8; font-weight: 600;'>Shares Outstanding</p>", unsafe_allow_html=True)
-        # YF safely stores this in the income statement
-        share_key = 'Diluted Average Shares' if 'Diluted Average Shares' in inc.index else 'Basic Average Shares'
-        if not inc.empty and share_key in inc.index:
+        share_key = next((k for k in ['Diluted Average Shares', 'Basic Average Shares', 'Ordinary Shares Number'] if not inc.empty and k in inc.index), None)
+            
+        if inc is not None and not inc.empty and share_key:
             shares_out = inc.loc[share_key]
-            fig_shares = go.Figure(go.Bar(x=shares_out.index, y=shares_out.values, marker_color='#8b5cf6')) # Soft purple
+            fig_shares = go.Figure(go.Bar(x=shares_out.index, y=shares_out.values, marker_color='#8b5cf6'))
             fig_shares.update_layout(height=250, margin=dict(l=0, r=0, t=10, b=30), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'))
             st.plotly_chart(fig_shares, use_container_width=True, config={'displayModeBar': False})
         else:
             st.info("Share Data Unavailable")
-
+    
     # ==========================================
     # --- BOTTOM SECTION: VALUATION ENGINE ---
     # ==========================================
