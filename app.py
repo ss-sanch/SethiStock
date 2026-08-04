@@ -102,37 +102,34 @@ if ticker_symbol:
 </div>
     """, unsafe_allow_html=True)
     
-    # --- 1. CALCULATE DCF FIRST ---
-    dcf_valid = False
-    fcf = 0
-    
-    # --- REVERSE DCF: REROUTED FCF PIPELINE ---
+   # --- 1. CALCULATE DCF FIRST ---
     try:
-        # Pull the raw cash flow statement
-        cf_statement = ticker.cashflow
+        shares = f_info.shares
+    except Exception:
+        shares = 0
         
-        # Attempt 1: Look for the exact 'Free Cash Flow' row yfinance sometimes provides
-        if 'Free Cash Flow' in cf_statement.index:
-            fcf = cf_statement.loc['Free Cash Flow'].iloc[0]
-        else:
-            # Attempt 2: Calculate manually if the exact row is missing
-            operating_cf = cf_statement.loc['Operating Cash Flow'].iloc[0]
-            capex = cf_statement.loc['Capital Expenditure'].iloc[0]
-            fcf = operating_cf - abs(capex) # Safely subtract Capital Expenditures
-            
-    except Exception as e:
-        st.warning("Could not extract Free Cash Flow from the raw statements. Reverse DCF cannot be calculated.")
+    cash_flow = ticker.cashflow
+    dcf_valid = False
+    fcf = 0  # <--- THE CRITICAL SAFETY NET
 
-    # Only execute DCF math if we successfully fetched positive FCF, Shares, and Price
+    # Attempt to calculate Free Cash Flow dynamically
+    if not cash_flow.empty and 'Operating Cash Flow' in cash_flow.index:
+        try:
+            ocf = cash_flow.loc['Operating Cash Flow'].dropna().iloc[0]
+            capex = abs(cash_flow.loc['Capital Expenditure'].dropna().iloc[0]) if 'Capital Expenditure' in cash_flow.index else 0
+            fcf = ocf - capex
+        except Exception:
+            fcf = 0
+
+    # Execute DCF Math only if all inputs are valid and positive
     if fcf > 0 and shares > 0 and current_price > 0:
-        fcf_0 = fcf
         target_price_sum = 0
-        fcf_n = fcf_0
+        fcf_n = fcf
         
         for t in range(1, proj_years + 1):
             fcf_n = fcf_n * (1 + growth_rate)
             target_price_sum += fcf_n / ((1 + discount_rate) ** t)
-        
+            
         tv = fcf_n * exit_multiple
         target_price_sum += tv / ((1 + discount_rate) ** proj_years)
         
