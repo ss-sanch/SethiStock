@@ -156,7 +156,7 @@ if ticker_symbol:
     st.subheader("Price Action")
     
     # Using a spacer column (the '1' in the middle) to force the chart toggle to the far right
-    ctrl_col1, ctrl_spacer, ctrl_col2 = st.columns([1, 6, 1], vertical_alignment="center")
+    ctrl_col1, ctrl_spacer, ctrl_col2 = st.columns([6, 6, 1], vertical_alignment="center")
     with ctrl_col1:
         timeframe = st.radio(
             "Timeframe",
