@@ -81,15 +81,15 @@ if ticker_symbol:
             pct_change = 0
         
     # Formatting the Change Pill
-    if change > 0:
-        pill_color = "background-color: rgba(34, 197, 94, 0.2); color: #16a34a;"
-        sign = "+"
-    elif change < 0:
-        pill_color = "background-color: rgba(239, 68, 68, 0.2); color: #dc2626;"
-        sign = ""
-    else:
-        pill_color = "background-color: rgba(128, 128, 128, 0.2); color: #6b7280;"
-        sign = ""
+if change > 0:
+    pill_color = "background-color: rgba(34, 197, 94, 0.2); color: #16a34a;"
+    sign = "+"
+elif change < 0:
+    pill_color = "background-color: rgba(239, 68, 68, 0.2); color: #dc2626;"
+    sign = ""
+else:
+    pill_color = "background-color: rgba(128, 128, 128, 0.2); color: #6b7280;"
+    sign = ""
         
     # Modern Logo API Logic (Hunter.io with Google Favicon Fallback)
     website = info.get('website', '')
