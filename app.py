@@ -3,6 +3,7 @@ import yfinance as yf
 import plotly.graph_objects as go
 import pandas as pd
 import urllib.parse
+import requests
 
 # Start with the sidebar expanded by default
 st.set_page_config(page_title="SethiStock", layout="wide", initial_sidebar_state="expanded")
@@ -55,8 +56,23 @@ discount_rate = st.sidebar.slider("Desired Return (Discount Rate) %", 5.0, 20.0,
 exit_multiple = st.sidebar.slider("Exit Multiple (Price/FCF)", 10.0, 100.0, 30.0)
 
 if ticker_symbol:
-    ticker = yf.Ticker(ticker_symbol)
-    info = ticker.info
+    # --- THE BYPASS: Inject Custom Browser Headers ---
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5"
+    })
+    
+    # Pass the disguised session to yfinance
+    ticker = yf.Ticker(ticker_symbol, session=session)
+    
+    # Wrap the info call in a basic try/except to prevent total app crashes
+    try:
+        info = ticker.info
+    except Exception:
+        st.error("Yahoo Finance is temporarily rate-limiting this cloud server. Please try again in a few minutes or test locally.")
+        info = {}
     
     # --- QUALTRIM-STYLE DYNAMIC HEADER ---
     name = info.get('shortName', info.get('longName', ticker_symbol))
