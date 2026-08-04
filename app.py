@@ -59,63 +59,48 @@ if ticker_symbol:
     ticker = yf.Ticker(ticker_symbol)
     info = {} # THE PATCH: Empty dummy dict to bypass the blocked .info vault
     
-    # --- QUALTRIM-STYLE DYNAMIC HEADER (FAST_INFO PIVOT) ---
-    try:
-        f_info = ticker.fast_info
-        current_price = float(f_info['lastPrice'])
-        prev_close = float(f_info['previousClose'])
-        shares = float(f_info['shares']) # Pulling the shares directly from the unblocked ticker tape
-        exchange = str(f_info['exchange'])
-        name = ticker_symbol
-    except Exception:
-        current_price, prev_close, shares = 0, 0, 0
-        exchange, name = "Exchange", ticker_symbol
-        st.error("Yahoo Finance data is delayed. Pricing and DCF may be unavailable.")
+    # --- QUALTRIM-STYLE DYNAMIC HEADER ---
+        # Fetching live tape data via fast_info to bypass rate limits
+        try:
+            f_info = ticker.fast_info
+            current_price = f_info.last_price
+            prev_close = f_info.previous_close
+        except Exception:
+            current_price = 0
+            prev_close = 0
+            
+        # Calculate Daily Change
+        if current_price and prev_close:
+            change = current_price - prev_close
+            pct_change = (change / prev_close) * 100
+        else:
+            change = 0
+            pct_change = 0
 
-    # Calculate Daily Change
-    if current_price and prev_close:
-        change = current_price - prev_close
-        pct_change = (change / prev_close) * 100
-    else:
-        change = 0
-        pct_change = 0
-        
-    # Formatting the Change Pill
-    if change > 0:
-        pill_color = "background-color: rgba(34, 197, 94, 0.2); color: #16a34a;"
-        sign = "+"
-    elif change < 0:
-        pill_color = "background-color: rgba(239, 68, 68, 0.2); color: #dc2626;"
-        sign = ""
-    else:
-        pill_color = "background-color: rgba(128, 128, 128, 0.2); color: #6b7280;"
-        sign = ""
-        
-    # Modern Logo API Logic (Hunter.io with Google Favicon Fallback)
-    website = info.get('website', '')
-    logo_html = ""
-    if website:
-        domain = urllib.parse.urlparse(website).netloc.replace('www.', '')
-        logo_url = f"https://logos.hunter.io/{domain}"
-        fallback_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
-        logo_html = f'<img src="{logo_url}" onerror="this.src=\'{fallback_url}\';" style="width: 50px; height: 50px; border-radius: 50%; margin-right: 15px; object-fit: contain; background-color: transparent; padding: 0px;">'
+        # Formatting the Change Pill
+        if change > 0:
+            pill_color = "background-color: rgba(34, 197, 94, 0.2); color: #16a34a;"
+            sign = "+"
+        elif change < 0:
+            pill_color = "background-color: rgba(239, 68, 68, 0.2); color: #dc2626;"
+            sign = ""
+        else:
+            pill_color = "background-color: rgba(128, 128, 128, 0.2); color: #6b7280;"
+            sign = ""
 
-    # Render the Header via HTML injection
-    st.markdown(f"""
-    <div style="display: flex; align-items: center; margin-bottom: 10px;">
-        {logo_html}
-        <div>
-            <h2 style="margin: 0; padding: 0; font-size: 26px; font-weight: 600;">{name}</h2>
-            <p style="margin: 0; padding: 0; color: #888; font-size: 14px; font-weight: 500;">{ticker_symbol} | {exchange}</p>
-        </div>
-    </div>
-    <div style="display: flex; align-items: center; margin-bottom: 30px;">
-        <h1 style="margin: 0; padding: 0; font-size: 38px; font-weight: 700; margin-right: 15px;">${current_price:,.2f}</h1>
-        <div style="{pill_color} padding: 6px 12px; border-radius: 6px; font-weight: 600; font-size: 16px; display: flex; align-items: center;">
+        # Render the Minimalist Header via HTML injection 
+        # (CRITICAL: Do not indent the HTML tags below this line)
+        st.markdown(f"""
+<div style="display: flex; flex-direction: column; gap: 5px;">
+    <h2 style="margin: 0; padding: 0; font-size: 26px; font-weight: 600;">{ticker_symbol}</h2>
+    <div style="display: flex; align-items: center; gap: 15px; margin-top: 10px;">
+        <h1 style="margin: 0; padding: 0; font-size: 36px; font-weight: 700;">${current_price:,.2f}</h1>
+        <div style="padding: 5px 10px; border-radius: 8px; font-weight: 600; {pill_color}">
             {sign}${change:,.2f} &nbsp;|&nbsp; {sign}{pct_change:,.2f}%
         </div>
     </div>
-    """, unsafe_allow_html=True)
+</div>
+        """, unsafe_allow_html=True)
     
     # --- 1. CALCULATE DCF FIRST ---
     dcf_valid = False
