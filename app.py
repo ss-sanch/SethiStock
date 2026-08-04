@@ -56,40 +56,40 @@ discount_rate = st.sidebar.slider("Desired Return (Discount Rate) %", 5.0, 20.0,
 exit_multiple = st.sidebar.slider("Exit Multiple (Price/FCF)", 10.0, 100.0, 30.0)
 
 if ticker_symbol:
-        ticker = yf.Ticker(ticker_symbol)
-        info = {} # THE PATCH: Empty dummy dict to bypass the blocked .info vault
-        
-        # --- QUALTRIM-STYLE DYNAMIC HEADER (FAST_INFO PIVOT) ---
-        try:
-            f_info = ticker.fast_info
-            current_price = float(f_info['lastPrice'])
-            prev_close = float(f_info['previousClose'])
-            shares = float(f_info['shares']) # Pulling the shares directly from the unblocked ticker tape
-            exchange = str(f_info['exchange'])
-            name = ticker_symbol
-        except Exception:
-            current_price, prev_close, shares = 0, 0, 0
-            exchange, name = "Exchange", ticker_symbol
-            st.error("Yahoo Finance data is delayed. Pricing and DCF may be unavailable.")
+    ticker = yf.Ticker(ticker_symbol)
+    info = {} # THE PATCH: Empty dummy dict to bypass the blocked .info vault
+    
+    # --- QUALTRIM-STYLE DYNAMIC HEADER (FAST_INFO PIVOT) ---
+    try:
+        f_info = ticker.fast_info
+        current_price = float(f_info['lastPrice'])
+        prev_close = float(f_info['previousClose'])
+        shares = float(f_info['shares']) # Pulling the shares directly from the unblocked ticker tape
+        exchange = str(f_info['exchange'])
+        name = ticker_symbol
+    except Exception:
+        current_price, prev_close, shares = 0, 0, 0
+        exchange, name = "Exchange", ticker_symbol
+        st.error("Yahoo Finance data is delayed. Pricing and DCF may be unavailable.")
 
-        # Calculate Daily Change
-        if current_price and prev_close:
-            change = current_price - prev_close
-            pct_change = (change / prev_close) * 100
-        else:
-            change = 0
-            pct_change = 0
+    # Calculate Daily Change
+    if current_price and prev_close:
+        change = current_price - prev_close
+        pct_change = (change / prev_close) * 100
+    else:
+        change = 0
+        pct_change = 0
         
     # Formatting the Change Pill
-if change > 0:
-    pill_color = "background-color: rgba(34, 197, 94, 0.2); color: #16a34a;"
-    sign = "+"
-elif change < 0:
-    pill_color = "background-color: rgba(239, 68, 68, 0.2); color: #dc2626;"
-    sign = ""
-else:
-    pill_color = "background-color: rgba(128, 128, 128, 0.2); color: #6b7280;"
-    sign = ""
+    if change > 0:
+        pill_color = "background-color: rgba(34, 197, 94, 0.2); color: #16a34a;"
+        sign = "+"
+    elif change < 0:
+        pill_color = "background-color: rgba(239, 68, 68, 0.2); color: #dc2626;"
+        sign = ""
+    else:
+        pill_color = "background-color: rgba(128, 128, 128, 0.2); color: #6b7280;"
+        sign = ""
         
     # Modern Logo API Logic (Hunter.io with Google Favicon Fallback)
     website = info.get('website', '')
@@ -100,7 +100,7 @@ else:
         fallback_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
         logo_html = f'<img src="{logo_url}" onerror="this.src=\'{fallback_url}\';" style="width: 50px; height: 50px; border-radius: 50%; margin-right: 15px; object-fit: contain; background-color: transparent; padding: 0px;">'
 
-    # Render the Header via HTML injection 
+    # Render the Header via HTML injection
     st.markdown(f"""
     <div style="display: flex; align-items: center; margin-bottom: 10px;">
         {logo_html}
@@ -118,8 +118,9 @@ else:
     """, unsafe_allow_html=True)
     
     # --- 1. CALCULATE DCF FIRST ---
-    dcf_valid = False 
+    dcf_valid = False
     fcf = 0
+    
     # --- REVERSE DCF: REROUTED FCF PIPELINE ---
     try:
         # Pull the raw cash flow statement
@@ -131,18 +132,28 @@ else:
         else:
             # Attempt 2: Calculate manually if the exact row is missing
             operating_cf = cf_statement.loc['Operating Cash Flow'].iloc[0]
-            capex = cf_statement.loc['Capital Expenditure'].iloc[0] # Note: CapEx is typically reported as a negative number
-            fcf = operating_cf + capex 
+            capex = cf_statement.loc['Capital Expenditure'].iloc[0]
+            fcf = operating_cf - abs(capex) # Safely subtract Capital Expenditures
             
     except Exception as e:
         st.warning("Could not extract Free Cash Flow from the raw statements. Reverse DCF cannot be calculated.")
-        fcf = 0
 
-    # Ensure shares are available from our fast_info pivot earlier
-    if fcf and shares > 0:
-        fcf_per_share = fcf / shares
-        # ... (Proceed with your existing DCF math using fcf_per_share) ...
-
+    # Only execute DCF math if we successfully fetched positive FCF, Shares, and Price
+    if fcf > 0 and shares > 0 and current_price > 0:
+        fcf_0 = fcf
+        target_price_sum = 0
+        fcf_n = fcf_0
+        
+        for t in range(1, proj_years + 1):
+            fcf_n = fcf_n * (1 + growth_rate)
+            target_price_sum += fcf_n / ((1 + discount_rate) ** t)
+        
+        tv = fcf_n * exit_multiple
+        target_price_sum += tv / ((1 + discount_rate) ** proj_years)
+        
+        target_price_per_share = target_price_sum / shares
+        margin_of_safety = ((target_price_per_share - current_price) / current_price) * 100
+        dcf_valid = True
 
     # --- SIDEBAR: Output Display ---
     st.sidebar.divider()
@@ -155,7 +166,6 @@ else:
         st.sidebar.warning("DCF cannot be calculated (Missing or Negative FCF).")
 
     # --- MAIN PAGE: Dashboards & Visuals ---
-    
     # --- 2. Dynamic Price Action Chart ---
     st.subheader("Price Action")
     
@@ -163,20 +173,20 @@ else:
     ctrl_col1, ctrl_spacer, ctrl_col2 = st.columns([6, 1, 3], vertical_alignment="center")
     with ctrl_col1:
         timeframe = st.radio(
-            "Timeframe", 
-            ["1 Day", "1 Week", "1 Month", "3 Months", "YTD", "1 Year", "5 Years", "MAX"], 
-            horizontal=True, 
+            "Timeframe",
+            ["1 Day", "1 Week", "1 Month", "3 Months", "YTD", "1 Year", "5 Years", "MAX"],
+            horizontal=True,
             label_visibility="collapsed",
             index=5 # Defaults to 1 Year
         )
     with ctrl_col2:
         chart_type = st.radio(
-            "Chart Type", 
-            ["Candlestick", "Line Graph"], 
-            horizontal=True, 
+            "Chart Type",
+            ["Candlestick", "Line Graph"],
+            horizontal=True,
             label_visibility="collapsed"
         )
-
+        
     # Map selected timeframe to yfinance period/interval
     tf_map = {
         "1 Day": ("1d", "5m"),
@@ -188,17 +198,15 @@ else:
         "5 Years": ("5y", "1d"),
         "MAX": ("max", "1wk")
     }
-    
     period, interval = tf_map[timeframe]
     history = ticker.history(period=period, interval=interval)
     
     # Slice the dataframe to cutoff anything before the year 2000
     if timeframe == "MAX" and not history.empty:
         history = history.loc['2000':]
-    
+        
     if not history.empty:
         fig_price = go.Figure()
-
         if chart_type == "Candlestick":
             fig_price.add_trace(go.Candlestick(
                 x=history.index,
@@ -218,17 +226,16 @@ else:
                 fillcolor='rgba(37, 99, 235, 0.1)',
                 name="Line"
             ))
-        
+            
         fig_price.update_layout(
-            xaxis_rangeslider_visible=False, 
-            margin=dict(l=5, r=5, t=40, b=20), 
+            xaxis_rangeslider_visible=False,
+            margin=dict(l=5, r=5, t=40, b=20),
             height=400,
-            paper_bgcolor="rgba(0,0,0,0)", 
+            paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)"
         )
-        
         # Hide weekend gaps on the chart (only relevant for daily/intraday data)
-        if timeframe not in ["MAX"]: 
+        if timeframe not in ["MAX"]:
             fig_price.update_xaxes(
                 rangebreaks=[dict(bounds=["sat", "mon"])]
             )
@@ -236,10 +243,9 @@ else:
         st.plotly_chart(fig_price, use_container_width=True, config=PLOTLY_CONFIG)
     else:
         st.warning("No price data found for the selected timeframe.")
-
+        
     # --- 3. Financial Visuals (Master Toggle for Annual vs Quarterly) ---
     st.subheader("Financial Health")
-    
     show_quarterly = st.toggle("Switch to Quarterly (TTM) View", value=False)
     
     if show_quarterly:
@@ -252,7 +258,7 @@ else:
         cf_data = ticker.cashflow
         period_title = "Annual"
         limit = 10
-    
+        
     if not fin_data.empty and 'Total Revenue' in fin_data.index and 'Net Income' in fin_data.index:
         rev = fin_data.loc['Total Revenue'].dropna().head(limit)
         ni = fin_data.loc['Net Income'].dropna().head(limit)
@@ -262,14 +268,14 @@ else:
             ocf_hist = cf_data.loc['Operating Cash Flow'].head(limit)
             capex_hist = cf_data.loc['Capital Expenditure'].head(limit) if 'Capital Expenditure' in cf_data.index else pd.Series(0, index=ocf_hist.index)
             fcf_series = (ocf_hist - capex_hist.abs()).dropna()
-
+            
         df_fin = pd.DataFrame({'Revenue': rev, 'Net Income': ni, 'FCF': fcf_series}).sort_index()
         
         if show_quarterly:
             df_fin.index = pd.to_datetime(df_fin.index).strftime('%Y-%m')
         else:
             df_fin.index = df_fin.index.astype(str).str[:4]
-        
+            
         col1, col2, col3 = st.columns(3)
         plot_height = 260
         plot_margins = dict(l=15, r=15, t=40, b=40)
