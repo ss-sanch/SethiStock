@@ -56,30 +56,24 @@ discount_rate = st.sidebar.slider("Desired Return (Discount Rate) %", 5.0, 20.0,
 exit_multiple = st.sidebar.slider("Exit Multiple (Price/FCF)", 10.0, 100.0, 30.0)
 
 if ticker_symbol:
-    # --- THE BYPASS: Inject Custom Browser Headers ---
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5"
-    })
+    ticker = yf.Ticker(ticker_symbol)
     
-    # Pass the disguised session to yfinance
-    ticker = yf.Ticker(ticker_symbol, session=session)
+    # --- QUALTRIM-STYLE DYNAMIC HEADER (FAST_INFO PIVOT) ---
+    name = ticker_symbol # .info is blocked, so we default the UI name to the ticker
     
-    # Wrap the info call in a basic try/except to prevent total app crashes
     try:
-        info = ticker.info
+        # Bypassing the restricted .info endpoint using the lightweight fast_info object
+        f_info = ticker.fast_info
+        current_price = float(f_info['lastPrice'])
+        prev_close = float(f_info['previousClose'])
+        exchange = str(f_info['exchange'])
+        shares = float(f_info['shares'])
     except Exception:
-        st.error("Yahoo Finance is temporarily rate-limiting this cloud server. Please try again in a few minutes or test locally.")
-        info = {}
-    
-    # --- QUALTRIM-STYLE DYNAMIC HEADER ---
-    name = info.get('shortName', info.get('longName', ticker_symbol))
-    exchange = info.get('exchange', 'Exchange')
-    current_price = info.get('currentPrice', info.get('regularMarketPrice', 0))
-    prev_close = info.get('previousClose', 0)
-    
+        # Ultimate fallback if Yahoo fully severs the connection
+        current_price, prev_close, shares = 0, 0, 0
+        exchange = "Exchange"
+        st.error("Yahoo Finance data is currently delayed. Pricing and DCF may be unavailable.")
+
     # Calculate Daily Change
     if current_price and prev_close:
         change = current_price - prev_close
