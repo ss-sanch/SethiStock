@@ -235,98 +235,83 @@ if ticker_symbol:
     else:
         st.warning("Historical financial data is not currently available.")
 
-    # ==========================================
-    # --- ADVANCED FINANCIAL HEALTH MATRIX ---
-    # ==========================================
-    st.markdown("<br><h3 style='color: #E2E8F0;'>🔬 Advanced Financial Metrics</h3>", unsafe_allow_html=True)
+ # ==========================================
+        # --- ADVANCED FINANCIAL HEALTH MATRIX (FMP API) ---
+        # ==========================================
+        st.markdown("<br><h3 style='color: #E2E8F0;'>🔬 Advanced Financial Metrics</h3>", unsafe_allow_html=True)
+        
+        # 1. Fetch Reliable Data via FMP API
+        fmp_key = st.secrets["FMP_API_KEY"]
+        period = "quarter" if is_quarterly else "annual"
+        
+        @st.cache_data(ttl=3600) # Caches data so you don't burn your free API limits
+        def fetch_fmp_data(ticker, statement_type, period, key):
+            url = f"https://financialmodelingprep.com/api/v3/{statement_type}/{ticker}?period={period}&limit=5&apikey={key}"
+            try:
+                res = requests.get(url)
+                return pd.DataFrame(res.json())
+            except Exception:
+                return pd.DataFrame()
 
-    # 1. Obey the master toggle switch (is_quarterly) with safe fallbacks
-    try:
-        if is_quarterly: 
-            inc = ticker.quarterly_income_stmt
-            bs = ticker.quarterly_balance_sheet
-            cf = ticker.quarterly_cashflow
-        else:
-            inc = ticker.income_stmt
-            bs = ticker.balance_sheet
-            cf = ticker.cashflow
-    except Exception:
-        inc, bs, cf = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-    # 2. Build the 2x2 UI Grid
-    adv_col1, adv_col2 = st.columns(2)
-    adv_col3, adv_col4 = st.columns(2)
+        # Pull Income Statement and Cash Flow (Reliable & Instant)
+        inc_df = fetch_fmp_data(ticker_symbol, "income-statement", period, fmp_key)
+        cf_df = fetch_fmp_data(ticker_symbol, "cash-flow-statement", period, fmp_key)
+        bs_df = fetch_fmp_data(ticker_symbol, "balance-sheet-statement", period, fmp_key)
 
-    # --- GRAPH 1: Free Cash Flow ---
-    with adv_col1:
-        st.markdown("<p style='color: #A3A8B8; font-weight: 600;'>Free Cash Flow</p>", unsafe_allow_html=True)
-        ocf_key = next((k for k in ['Operating Cash Flow', 'Total Cash From Operating Activities', 'OperatingCashFlow'] if not cf.empty and k in cf.index), None)
-        capex_key = next((k for k in ['Capital Expenditure', 'Capital Expenditures', 'CapEx'] if not cf.empty and k in cf.index), None)
-            
-        if cf is not None and not cf.empty and ocf_key:
-            ocf_series = cf.loc[ocf_key]
-            capex_series = cf.loc[capex_key].abs() if capex_key else pd.Series(0, index=ocf_series.index)
-            fcf_chart = ocf_series - capex_series
+        # 2. Build the 2x2 UI Grid
+        adv_col1, adv_col2 = st.columns(2)
+        adv_col3, adv_col4 = st.columns(2)
+
+        # --- GRAPH 1: Free Cash Flow ---
+        with adv_col1:
+            st.markdown("<p style='color: #A3A8B8; font-weight: 600;'>Free Cash Flow</p>", unsafe_allow_html=True)
+            if not cf_df.empty and 'freeCashFlow' in cf_df.columns:
+                # Reverse the dataframe to plot chronological order (oldest to newest)
+                plot_df = cf_df.iloc[::-1]
+                fig_fcf = go.Figure(go.Bar(x=plot_df['date'], y=plot_df['freeCashFlow'], marker_color='#16a34a'))
+                fig_fcf.update_layout(height=250, margin=dict(l=0, r=0, t=10, b=30), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'))
+                st.plotly_chart(fig_fcf, use_container_width=True, config={'displayModeBar': False})
+            else:
+                st.info("FCF Data Unavailable")
+
+        # --- GRAPH 2: Profit Margins ---
+        with adv_col2:
+            st.markdown("<p style='color: #A3A8B8; font-weight: 600;'>Profit Margins (%)</p>", unsafe_allow_html=True)
+            if not inc_df.empty:
+                plot_df = inc_df.iloc[::-1]
+                fig_margin = go.Figure()
                 
-            fig_fcf = go.Figure(go.Bar(x=fcf_chart.index, y=fcf_chart.values, marker_color='#16a34a'))
-            fig_fcf.update_layout(height=250, margin=dict(l=0, r=0, t=10, b=30), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'))
-            st.plotly_chart(fig_fcf, use_container_width=True, config={'displayModeBar': False})
-        else:
-            st.info("FCF Data Unavailable")
-    
-    # --- GRAPH 2: Profit Margins ---
-    with adv_col2:
-        st.markdown("<p style='color: #A3A8B8; font-weight: 600;'>Profit Margins (%)</p>", unsafe_allow_html=True)
-        rev_key = next((k for k in ['Total Revenue', 'Revenue', 'Operating Revenue'] if not inc.empty and k in inc.index), None)
-            
-        if inc is not None and not inc.empty and rev_key:
-            rev = inc.loc[rev_key]
-            fig_margin = go.Figure()
+                # FMP provides these margins natively!
+                fig_margin.add_trace(go.Scatter(x=plot_df['date'], y=plot_df['grossProfitRatio']*100, mode='lines+markers', name='Gross', line=dict(color='#3b82f6')))
+                fig_margin.add_trace(go.Scatter(x=plot_df['date'], y=plot_df['operatingIncomeRatio']*100, mode='lines+markers', name='Operating', line=dict(color='#f59e0b')))
+                fig_margin.add_trace(go.Scatter(x=plot_df['date'], y=plot_df['netIncomeRatio']*100, mode='lines+markers', name='Net', line=dict(color='#16a34a')))
                 
-            gp_key = next((k for k in ['Gross Profit'] if k in inc.index), None)
-            if gp_key:
-                gm = (inc.loc[gp_key] / rev) * 100
-                fig_margin.add_trace(go.Scatter(x=gm.index, y=gm.values, mode='lines+markers', name='Gross', line=dict(color='#3b82f6')))
-                    
-            op_key = next((k for k in ['Operating Income', 'EBIT'] if k in inc.index), None)
-            if op_key:
-                om = (inc.loc[op_key] / rev) * 100
-                fig_margin.add_trace(go.Scatter(x=om.index, y=om.values, mode='lines+markers', name='Operating', line=dict(color='#f59e0b')))
-                    
-            net_key = next((k for k in ['Net Income', 'Net Income Common Stockholders'] if k in inc.index), None)
-            if net_key:
-                nm = (inc.loc[net_key] / rev) * 100
-                fig_margin.add_trace(go.Scatter(x=net_key.index if hasattr(net_key, 'index') else nm.index, y=nm.values, mode='lines+markers', name='Net', line=dict(color='#16a34a')))
-                    
-            fig_margin.update_layout(height=250, margin=dict(l=0, r=0, t=10, b=30), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-            st.plotly_chart(fig_margin, use_container_width=True, config={'displayModeBar': False})
-        else:
-            st.info("Margin Data Unavailable")
+                fig_margin.update_layout(height=250, margin=dict(l=0, r=0, t=10, b=30), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+                st.plotly_chart(fig_margin, use_container_width=True, config={'displayModeBar': False})
+            else:
+                st.info("Margin Data Unavailable")
 
-    # --- GRAPH 3: Total Debt ---
-    with adv_col3:
-        st.markdown("<p style='color: #A3A8B8; font-weight: 600;'>Total Debt</p>", unsafe_allow_html=True)
-        debt_key = next((k for k in ['Total Debt', 'Long Term Debt And Capital Lease Obligation', 'Long Term Debt'] if not bs.empty and k in bs.index), None)
-            
-        if bs is not None and not bs.empty and debt_key:
-            debt = bs.loc[debt_key]
-            fig_debt = go.Figure(go.Bar(x=debt.index, y=debt.values, marker_color='#dc2626'))
-            fig_debt.update_layout(height=250, margin=dict(l=0, r=0, t=10, b=30), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'))
-            st.plotly_chart(fig_debt, use_container_width=True, config={'displayModeBar': False})
-        else:
-            st.info("Debt Data Unavailable")
+        # --- GRAPH 3: Total Debt ---
+        with adv_col3:
+            st.markdown("<p style='color: #A3A8B8; font-weight: 600;'>Total Debt</p>", unsafe_allow_html=True)
+            if not bs_df.empty and 'totalDebt' in bs_df.columns:
+                plot_df = bs_df.iloc[::-1]
+                fig_debt = go.Figure(go.Bar(x=plot_df['date'], y=plot_df['totalDebt'], marker_color='#dc2626'))
+                fig_debt.update_layout(height=250, margin=dict(l=0, r=0, t=10, b=30), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'))
+                st.plotly_chart(fig_debt, use_container_width=True, config={'displayModeBar': False})
+            else:
+                st.info("Debt Data Unavailable")
 
-    # --- GRAPH 4: Shares Outstanding ---
-    with adv_col4:
-        st.markdown("<p style='color: #A3A8B8; font-weight: 600;'>Shares Outstanding</p>", unsafe_allow_html=True)
-        share_key = next((k for k in ['Diluted Average Shares', 'Basic Average Shares', 'Ordinary Shares Number'] if not inc.empty and k in inc.index), None)
-            
-        if inc is not None and not inc.empty and share_key:
-            shares_out = inc.loc[share_key]
-            fig_shares = go.Figure(go.Bar(x=shares_out.index, y=shares_out.values, marker_color='#8b5cf6'))
-            fig_shares.update_layout(height=250, margin=dict(l=0, r=0, t=10, b=30), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'))
-            st.plotly_chart(fig_shares, use_container_width=True, config={'displayModeBar': False})
-        else:
-            st.info("Share Data Unavailable")
+        # --- GRAPH 4: Shares Outstanding ---
+        with adv_col4:
+            st.markdown("<p style='color: #A3A8B8; font-weight: 600;'>Shares Outstanding</p>", unsafe_allow_html=True)
+            if not inc_df.empty and 'weightedAverageShsOutDil' in inc_df.columns:
+                plot_df = inc_df.iloc[::-1]
+                fig_shares = go.Figure(go.Bar(x=plot_df['date'], y=plot_df['weightedAverageShsOutDil'], marker_color='#8b5cf6'))
+                fig_shares.update_layout(height=250, margin=dict(l=0, r=0, t=10, b=30), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'))
+                st.plotly_chart(fig_shares, use_container_width=True, config={'displayModeBar': False})
+            else:
+                st.info("Share Data Unavailable")
     
     # ==========================================
     # --- BOTTOM SECTION: VALUATION ENGINE ---
