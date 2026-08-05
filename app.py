@@ -240,8 +240,16 @@ if ticker_symbol:
     # ==========================================
     st.markdown("<br><h3 style='color: #E2E8F0;'>🔬 Advanced Financial Metrics</h3>", unsafe_allow_html=True)
         
-    # 1. Fetch Reliable Data via FMP API
-    fmp_key = st.secrets["FMP_API_KEY"]
+    # THE FIX: Explicitly defining the toggle so Python doesn't throw a NameError
+    is_quarterly = st.toggle("Show Quarterly Data", value=False, key="advanced_matrix_toggle")
+
+    # 1. Safely Fetch Reliable Data via FMP API
+    try:
+        fmp_key = st.secrets["FMP_API_KEY"]
+    except Exception:
+        fmp_key = "demo" # Fallback to prevent instant app crashes if secret is missing
+        st.warning("⚠️ FMP API Key missing from Streamlit Secrets.")
+
     period = "quarter" if is_quarterly else "annual"
         
     @st.cache_data(ttl=3600) # Caches data so you don't burn your free API limits
@@ -249,7 +257,11 @@ if ticker_symbol:
         url = f"https://financialmodelingprep.com/api/v3/{statement_type}/{ticker}?period={period}&limit=5&apikey={key}"
         try:
             res = requests.get(url)
-            return pd.DataFrame(res.json())
+            data = res.json()
+            # Bulletproof check: If FMP returns an error dict instead of a list, abort.
+            if isinstance(data, dict) and "Error Message" in data:
+                return pd.DataFrame()
+            return pd.DataFrame(data)
         except Exception:
             return pd.DataFrame()
 
