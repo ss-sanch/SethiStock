@@ -3,7 +3,9 @@ import yfinance as yf
 import plotly.graph_objects as go
 import pandas as pd
 import urllib.parse
-import requests
+from curl_cffi import requests 
+
+yf_session = requests.Session(impersonate="chrome")
 
 # Start with the sidebar expanded by default
 st.set_page_config(page_title="SethiStock", layout="wide", initial_sidebar_state="expanded")
@@ -55,7 +57,7 @@ with nav_col2:
     ).upper()
 
 if ticker_symbol:
-    ticker = yf.Ticker(ticker_symbol)
+    ticker = yf.Ticker(ticker_symbol, session=yf_session)
     info = {} # THE PATCH: Empty dummy dict to bypass the blocked .info vault
     
     # --- QUALTRIM-STYLE DYNAMIC HEADER ---
