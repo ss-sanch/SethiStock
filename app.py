@@ -296,7 +296,7 @@ if ticker_symbol:
             st.info("FCF Data Unavailable")
 
     # --- GRAPH 2: Profit Margins ---
-        with adv_col2:
+    with adv_col2:
         st.markdown("<p style='color: #A3A8B8; font-weight: 600;'>Profit Margins (%)</p>", unsafe_allow_html=True)
         if not inc_df.empty and 'date' in inc_df.columns and 'TotalRevenue' in inc_df.columns and 'GrossProfit' in inc_df.columns:
             fig_margin = go.Figure()
