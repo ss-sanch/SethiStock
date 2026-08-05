@@ -320,7 +320,7 @@ if ticker_symbol:
 
     # --- GRAPH 3: Total Debt ---
     with adv_col3:
-    st.markdown("<p style='color: #A3A8B8; font-weight: 600;'>Total Debt</p>", unsafe_allow_html=True)
+        st.markdown("<p style='color: #A3A8B8; font-weight: 600;'>Total Debt</p>", unsafe_allow_html=True)
         if not bs_df.empty and 'date' in bs_df.columns and 'totalDebt' in bs_df.columns:
             plot_df = bs_df.iloc[::-1]
             fig_debt = go.Figure(go.Bar(x=plot_df['date'], y=plot_df['totalDebt'], marker_color='#dc2626'))
