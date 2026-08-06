@@ -180,7 +180,7 @@ if ticker_symbol:
         st.warning("No price data found for the selected timeframe.")
         
     # --- 3. Financial Visuals (Master Toggle for Annual vs Quarterly) ---
-    st.subheader("Financial Health")
+    st.markdown("<h2 style='text-align: center; color: #E2E8F0; margin-bottom: 20px;'>Insights & Stats</h2>", unsafe_allow_html=True)
     show_quarterly = st.toggle("Switch to Quarterly (TTM) View", value=False)
     
     if show_quarterly:
@@ -236,13 +236,12 @@ if ticker_symbol:
         st.warning("Historical financial data is not currently available.")
 
 # ==========================================
-    # --- ADVANCED FINANCIAL HEALTH MATRIX (YAHOOQUERY ENGINE) ---
+    # --- INSIGHTS & STATS: SECONDARY METRICS ---
     # ==========================================
-    st.markdown("<br><h3 style='color: #E2E8F0;'>🔬 Advanced Financial Metrics</h3>", unsafe_allow_html=True)
+    # (Notice the 'Advanced Financial Metrics' header has been completely removed to unify the section)
     
     is_quarterly = st.toggle("Show Quarterly Data", value=False, key="advanced_matrix_toggle")
     period = "q" if is_quarterly else "a"
-    
     expected_period_type = "3M" if is_quarterly else "12M"
     
     @st.cache_data(ttl=3600)
@@ -259,18 +258,15 @@ if ticker_symbol:
 
     inc_raw, cf_raw, bs_raw = fetch_yq_data(ticker_symbol, period)
 
-    # Helper function: Cleans duplicates and permanently formats dates to look beautiful!
     def clean_yq_df(df, expected_ptype):
         if isinstance(df, pd.DataFrame) and not df.empty:
             df = df.reset_index()
             if 'periodType' in df.columns:
                 df = df[df['periodType'] == expected_ptype]
-            
             if 'asOfDate' in df.columns:
                 df['date_obj'] = pd.to_datetime(df['asOfDate'])
                 df = df.drop_duplicates(subset=['date_obj'])
                 df = df.sort_values('date_obj')
-                # Create a pristine YYYY-MM string for the charts to read
                 df['date_str'] = df['date_obj'].dt.strftime('%Y-%m')
                 return df
         return pd.DataFrame()
@@ -279,20 +275,19 @@ if ticker_symbol:
     cf_df = clean_yq_df(cf_raw, expected_period_type)
     bs_df = clean_yq_df(bs_raw, expected_period_type)
 
-    # 2. Build the 2x2 UI Grid
-    adv_col1, adv_col2 = st.columns(2)
-    adv_col3, adv_col4 = st.columns(2)
+    # 2. Build the 3-Column UI Grid to perfectly match the charts above
+    adv_col1, adv_col2, adv_col3 = st.columns(3)
 
     # --- GRAPH 1: Operating Cash Flow ---
     with adv_col1:
-        st.markdown("<p style='color: #A3A8B8; font-weight: 600;'>Operating Cash Flow</p>", unsafe_allow_html=True)
+        st.markdown("<p style='color: #A3A8B8; font-weight: 600; text-align: center;'>Operating Cash Flow</p>", unsafe_allow_html=True)
         if not cf_df.empty and 'date_str' in cf_df.columns and 'OperatingCashFlow' in cf_df.columns:
-            # The Guillotine: Drops any rows with missing data so we get NO empty bars
             plot_cf = cf_df.dropna(subset=['OperatingCashFlow'])
             if not plot_cf.empty:
                 fig_ocf = go.Figure(go.Bar(x=plot_cf['date_str'], y=plot_cf['OperatingCashFlow'], marker_color='#0ea5e9', name='Operating CF'))
-                # Increased bottom margin (b=60) for text breathing room
-                fig_ocf.update_layout(xaxis_type='category', height=250, margin=dict(l=0, r=0, t=10, b=60), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'))
+                fig_ocf.update_layout(xaxis_type='category', height=250, margin=dict(l=20, r=20, t=10, b=60), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'))
+                fig_ocf.update_xaxes(showline=True, linewidth=1, linecolor='#333333') # Forces a clear X-axis line
+                fig_ocf.update_yaxes(showgrid=True, gridcolor='#1F212E')
                 st.plotly_chart(fig_ocf, use_container_width=True, config={'displayModeBar': False})
             else:
                 st.info("Operating Cash Flow Data Unavailable")
@@ -301,7 +296,7 @@ if ticker_symbol:
 
     # --- GRAPH 2: Profit Margins ---
     with adv_col2:
-        st.markdown("<p style='color: #A3A8B8; font-weight: 600;'>Profit Margins (%)</p>", unsafe_allow_html=True)
+        st.markdown("<p style='color: #A3A8B8; font-weight: 600; text-align: center;'>Profit Margins (%)</p>", unsafe_allow_html=True)
         if not inc_df.empty and 'date_str' in inc_df.columns and 'TotalRevenue' in inc_df.columns and 'GrossProfit' in inc_df.columns:
             plot_inc = inc_df.dropna(subset=['TotalRevenue', 'GrossProfit'])
             plot_inc = plot_inc[plot_inc['TotalRevenue'] > 0]
@@ -320,7 +315,14 @@ if ticker_symbol:
                     nm = (plot_inc['NetIncome'] / rev) * 100
                     fig_margin.add_trace(go.Scatter(x=plot_inc['date_str'], y=nm, mode='lines+markers', name='Net', line=dict(color='#16a34a')))
                 
-                fig_margin.update_layout(xaxis_type='category', height=250, margin=dict(l=0, r=0, t=10, b=60), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+                # THE FIX: Legend is now perfectly centered above the chart so no text gets cut off
+                fig_margin.update_layout(
+                    xaxis_type='category', height=250, margin=dict(l=30, r=20, t=40, b=60), 
+                    paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'), 
+                    legend=dict(orientation="h", yanchor="bottom", y=1.05, xanchor="center", x=0.5)
+                )
+                fig_margin.update_xaxes(showline=True, linewidth=1, linecolor='#333333') # Forces a clear X-axis line
+                fig_margin.update_yaxes(zeroline=True, zerolinecolor='#333333', showgrid=True, gridcolor='#1F212E') # Anchors the Y-axis properly
                 st.plotly_chart(fig_margin, use_container_width=True, config={'displayModeBar': False})
             else:
                 st.info("Margin Data Unavailable")
@@ -329,28 +331,35 @@ if ticker_symbol:
 
     # --- GRAPH 3: Total Debt ---
     with adv_col3:
-        st.markdown("<p style='color: #A3A8B8; font-weight: 600;'>Total Debt</p>", unsafe_allow_html=True)
+        st.markdown("<p style='color: #A3A8B8; font-weight: 600; text-align: center;'>Total Debt</p>", unsafe_allow_html=True)
         if not bs_df.empty and 'date_str' in bs_df.columns and 'TotalDebt' in bs_df.columns:
             plot_bs = bs_df.dropna(subset=['TotalDebt'])
             if not plot_bs.empty:
                 fig_debt = go.Figure(go.Bar(x=plot_bs['date_str'], y=plot_bs['TotalDebt'], marker_color='#dc2626', name='Total Debt'))
-                fig_debt.update_layout(xaxis_type='category', height=250, margin=dict(l=0, r=0, t=10, b=60), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'))
+                fig_debt.update_layout(xaxis_type='category', height=250, margin=dict(l=20, r=20, t=10, b=60), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'))
+                fig_debt.update_xaxes(showline=True, linewidth=1, linecolor='#333333')
+                fig_debt.update_yaxes(showgrid=True, gridcolor='#1F212E')
                 st.plotly_chart(fig_debt, use_container_width=True, config={'displayModeBar': False})
             else:
                 st.info("Debt Data Unavailable")
         else:
             st.info("Debt Data Unavailable")
 
+    # --- ROW 2 ---
+    adv_col4, adv_col5, adv_col6 = st.columns(3)
+    
     # --- GRAPH 4: Shares Outstanding ---
     with adv_col4:
-        st.markdown("<p style='color: #A3A8B8; font-weight: 600;'>Shares Outstanding</p>", unsafe_allow_html=True)
+        st.markdown("<p style='color: #A3A8B8; font-weight: 600; text-align: center;'>Shares Outstanding</p>", unsafe_allow_html=True)
         share_col = 'DilutedAverageShares' if 'DilutedAverageShares' in inc_df.columns else ('BasicAverageShares' if 'BasicAverageShares' in inc_df.columns else None)
         
         if not inc_df.empty and 'date_str' in inc_df.columns and share_col:
             plot_shares = inc_df.dropna(subset=[share_col])
             if not plot_shares.empty:
                 fig_shares = go.Figure(go.Bar(x=plot_shares['date_str'], y=plot_shares[share_col], marker_color='#8b5cf6', name='Shares Out'))
-                fig_shares.update_layout(xaxis_type='category', height=250, margin=dict(l=0, r=0, t=10, b=60), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'))
+                fig_shares.update_layout(xaxis_type='category', height=250, margin=dict(l=20, r=20, t=10, b=60), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'))
+                fig_shares.update_xaxes(showline=True, linewidth=1, linecolor='#333333')
+                fig_shares.update_yaxes(showgrid=True, gridcolor='#1F212E')
                 st.plotly_chart(fig_shares, use_container_width=True, config={'displayModeBar': False})
             else:
                 st.info("Share Data Unavailable")
