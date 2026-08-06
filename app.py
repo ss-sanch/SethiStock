@@ -234,7 +234,10 @@ if ticker_symbol:
     # --- 3. Financial Visuals (Master Toggle for Annual vs Quarterly) ---
     st.divider()
     
-    st.markdown("<h2 id='insights-stats' style='text-align: center; color: #E2E8F0; margin-bottom: 20px;'>Insights & Stats</h2>", unsafe_allow_html=True)
+    st.markdown("""
+    <div id="insights-stats"></div>
+    <h2 style='text-align: center; color: #E2E8F0; margin-bottom: 20px;'>Insights & Stats</h2>
+    """, unsafe_allow_html=True)
     show_quarterly = st.toggle("Switch to Quarterly (TTM) View", value=False)
     
     if show_quarterly:
