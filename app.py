@@ -240,35 +240,41 @@ if ticker_symbol:
     """, unsafe_allow_html=True)
     show_quarterly = st.toggle("Switch to Quarterly (TTM) View", value=False)
 
+    # ==========================================
+    # --- INSIGHTS & STATS: KEY METRICS BAR ---
+    # ==========================================
     @st.cache_data(ttl=3600)
     def fetch_key_metrics(tsymbol):
         from yahooquery import Ticker
         try:
             yq_t = Ticker(tsymbol)
-            # yahooquery returns a nested dictionary: {'AAPL': {'marketCap': ...}}
             summary = yq_t.summary_detail.get(tsymbol, {})
             financials = yq_t.financial_data.get(tsymbol, {})
             
-            # Failsafe in case the API returns an error string instead of a dict
             if isinstance(summary, str): summary = {}
             if isinstance(financials, str): financials = {}
             
+            # Standard Metrics
             mcap = summary.get('marketCap', 0)
             pe = summary.get('trailingPE', 0)
             dyield = summary.get('dividendYield', 0)
             dyield = dyield * 100 if dyield else 0
             
-            roa = financials.get('returnOnAssets', 0)
-            roa = roa * 100 if roa else 0
+            # ELITE METRICS (User Suggested)
+            fcf = financials.get('freeCashflow', 0)
+            fcf_yield = (fcf / mcap) * 100 if mcap and fcf else 0
             
-            roe = financials.get('returnOnEquity', 0)
-            roe = roe * 100 if roe else 0
+            rev_growth = financials.get('revenueGrowth', 0)
+            rev_growth = rev_growth * 100 if rev_growth else 0
             
-            return mcap, pe, dyield, roa, roe
+            profit_growth = financials.get('earningsGrowth', 0)
+            profit_growth = profit_growth * 100 if profit_growth else 0
+            
+            return mcap, pe, dyield, fcf_yield, rev_growth, profit_growth
         except Exception:
-            return 0, 0, 0, 0, 0
+            return 0, 0, 0, 0, 0, 0
 
-    mcap, pe, dyield, roa, roe = fetch_key_metrics(ticker_symbol)
+    mcap, pe, dyield, fcf_yield, rev_growth, profit_growth = fetch_key_metrics(ticker_symbol)
 
     def format_mcap(val):
         if not val: return "N/A"
@@ -277,20 +283,24 @@ if ticker_symbol:
         if val >= 1e6: return f"${val/1e6:.2f}M"
         return f"${val:,.0f}"
 
-    # Render the 5-Column Grid
-    m_col1, m_col2, m_col3, m_col4, m_col5 = st.columns(5)
+    # Render the Upgraded 6-Column Grid
+    m_col1, m_col2, m_col3, m_col4, m_col5, m_col6 = st.columns(6)
+    
     with m_col1:
         st.metric("Market Cap", format_mcap(mcap))
     with m_col2:
         st.metric("P/E Ratio", f"{pe:.2f}" if pe else "N/A")
     with m_col3:
-        st.metric("Div Yield", f"{dyield:.2f}%" if dyield else "N/A")
+        st.metric("FCF Yield", f"{fcf_yield:.2f}%" if fcf_yield else "N/A")
     with m_col4:
-        st.metric("ROA", f"{roa:.2f}%" if roa else "N/A")
+        st.metric("Div Yield", f"{dyield:.2f}%" if dyield else "N/A")
     with m_col5:
-        st.metric("ROE", f"{roe:.2f}%" if roe else "N/A")
+        st.metric("Rev Growth (YoY)", f"{rev_growth:.2f}%" if rev_growth else "N/A")
+    with m_col6:
+        st.metric("Profit Growth (YoY)", f"{profit_growth:.2f}%" if profit_growth else "N/A")
         
-    st.markdown("<br>", unsafe_allow_html=True) # Adds a little breathing room below the bar
+    st.markdown("<br>", unsafe_allow_html=True) 
+    # ==========================================
 
     
     if show_quarterly:
@@ -354,67 +364,32 @@ if ticker_symbol:
     period = "q" if is_quarterly else "a"
     expected_period_type = "3M" if is_quarterly else "12M"
     
-    # ==========================================
-    # --- INSIGHTS & STATS: KEY METRICS BAR ---
-    # ==========================================
     @st.cache_data(ttl=3600)
-    def fetch_key_metrics(tsymbol):
+    def fetch_yq_data(ticker_symbol, period):
         from yahooquery import Ticker
         try:
-            yq_t = Ticker(tsymbol)
-            summary = yq_t.summary_detail.get(tsymbol, {})
-            financials = yq_t.financial_data.get(tsymbol, {})
-            
-            if isinstance(summary, str): summary = {}
-            if isinstance(financials, str): financials = {}
-            
-            # Standard Metrics
-            mcap = summary.get('marketCap', 0)
-            pe = summary.get('trailingPE', 0)
-            dyield = summary.get('dividendYield', 0)
-            dyield = dyield * 100 if dyield else 0
-            
-            # ELITE METRICS (User Suggested)
-            fcf = financials.get('freeCashflow', 0)
-            fcf_yield = (fcf / mcap) * 100 if mcap and fcf else 0
-            
-            rev_growth = financials.get('revenueGrowth', 0)
-            rev_growth = rev_growth * 100 if rev_growth else 0
-            
-            profit_growth = financials.get('earningsGrowth', 0)
-            profit_growth = profit_growth * 100 if profit_growth else 0
-            
-            return mcap, pe, dyield, fcf_yield, rev_growth, profit_growth
+            yq_ticker = Ticker(ticker_symbol)
+            inc = yq_ticker.income_statement(frequency=period)
+            cf = yq_ticker.cash_flow(frequency=period)
+            bs = yq_ticker.balance_sheet(frequency=period)
+            return inc, cf, bs
         except Exception:
-            return 0, 0, 0, 0, 0, 0
+            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-    mcap, pe, dyield, fcf_yield, rev_growth, profit_growth = fetch_key_metrics(ticker_symbol)
+    inc_raw, cf_raw, bs_raw = fetch_yq_data(ticker_symbol, period)
 
-    def format_mcap(val):
-        if not val: return "N/A"
-        if val >= 1e12: return f"${val/1e12:.2f}T"
-        if val >= 1e9: return f"${val/1e9:.2f}B"
-        if val >= 1e6: return f"${val/1e6:.2f}M"
-        return f"${val:,.0f}"
-
-    # Render the Upgraded 6-Column Grid
-    m_col1, m_col2, m_col3, m_col4, m_col5, m_col6 = st.columns(6)
-    
-    with m_col1:
-        st.metric("Market Cap", format_mcap(mcap))
-    with m_col2:
-        st.metric("P/E Ratio", f"{pe:.2f}" if pe else "N/A")
-    with m_col3:
-        st.metric("FCF Yield", f"{fcf_yield:.2f}%" if fcf_yield else "N/A")
-    with m_col4:
-        st.metric("Div Yield", f"{dyield:.2f}%" if dyield else "N/A")
-    with m_col5:
-        st.metric("Rev Growth (YoY)", f"{rev_growth:.2f}%" if rev_growth else "N/A")
-    with m_col6:
-        st.metric("Profit Growth (YoY)", f"{profit_growth:.2f}%" if profit_growth else "N/A")
-        
-    st.markdown("<br>", unsafe_allow_html=True) 
-    # ==========================================
+    def clean_yq_df(df, expected_ptype):
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            df = df.reset_index()
+            if 'periodType' in df.columns:
+                df = df[df['periodType'] == expected_ptype]
+            if 'asOfDate' in df.columns:
+                df['date_obj'] = pd.to_datetime(df['asOfDate'])
+                df = df.drop_duplicates(subset=['date_obj'])
+                df = df.sort_values('date_obj')
+                df['date_str'] = df['date_obj'].dt.strftime('%Y-%m')
+                return df
+        return pd.DataFrame()
 
     inc_df = clean_yq_df(inc_raw, expected_period_type)
     cf_df = clean_yq_df(cf_raw, expected_period_type)
