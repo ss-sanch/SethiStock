@@ -575,12 +575,16 @@ if ticker_symbol:
     dcf_col1, dcf_col2, dcf_col3, dcf_col4 = st.columns(4)
     with dcf_col1:
         proj_years = st.slider("Projection Years", 1, 10, 5)
+        proj_years = st.number_input("Projection Years", min_value=1, max_value=20, value=5, step=1)
     with dcf_col2:
         growth_rate = st.slider("Growth Rate %", 1.0, 50.0, 15.0) / 100
+        growth_rate = st.number_input("Growth Rate %", min_value=1.0, max_value=100.0, value=15.0, step=0.5) / 100
     with dcf_col3:
         discount_rate = st.slider("Discount Rate %", 5.0, 20.0, 10.0) / 100
+        discount_rate = st.number_input("Discount Rate %", min_value=1.0, max_value=50.0, value=10.0, step=0.5) / 100
     with dcf_col4:
         exit_multiple = st.slider("Exit Multiple", 10.0, 100.0, 15.0)
+        exit_multiple = st.number_input("Exit Multiple", min_value=1.0, max_value=100.0, value=15.0, step=1.0)
 
     # 2. Execute DCF Math
     dcf_valid = False
