@@ -104,7 +104,8 @@ if ticker_symbol:
     # --- 2. Dynamic Price Action Chart ---
 
     st.divider()
-    st.subheader("Price Action")
+        st.markdown("<h2 style='text-align: center; color: #E2E8F0; margin-bottom: 20px;'>Price Action</h2>", unsafe_allow_html=True)
+
     
     # Using a spacer column (the '1' in the middle) to force the chart toggle to the far right
     ctrl_col1, ctrl_spacer, ctrl_col2 = st.columns([6, 6, 1.7], vertical_alignment="center")
