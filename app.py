@@ -238,7 +238,6 @@ if ticker_symbol:
     <div id="insights-stats"></div>
     <h2 style='text-align: center; color: #E2E8F0; margin-bottom: 20px;'>Insights & Stats</h2>
     """, unsafe_allow_html=True)
-    show_quarterly = st.toggle("Switch to Quarterly (TTM) View", value=False)
 
     # ==========================================
     # --- INSIGHTS & STATS: KEY METRICS BAR ---
@@ -301,7 +300,7 @@ if ticker_symbol:
         
     st.markdown("<br>", unsafe_allow_html=True) 
     # ==========================================
-
+    show_quarterly = st.toggle("Switch to Quarterly (TTM) View", value=False)
     
     if show_quarterly:
         fin_data = ticker.quarterly_financials
