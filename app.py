@@ -302,11 +302,68 @@ if ticker_symbol:
     # ==========================================
     show_quarterly = st.toggle("Switch to Quarterly (TTM) View", value=False)
     
+    # ==========================================
+    # --- NEW: MATH ENGINE FOR CAGR PILLS ---
+    # ==========================================
+    def calculate_cagr(series, lookback_periods, years):
+        # Requires enough historical data to make the calculation
+        if len(series) <= lookback_periods or lookback_periods == 0 or years == 0: 
+            return None
+            
+        ev = series.iloc[-1] # Ending Value (Newest)
+        bv = series.iloc[-(lookback_periods + 1)] # Beginning Value (Oldest)
+        
+        if pd.isna(ev) or pd.isna(bv) or bv == 0: 
+            return None
+            
+        # Standard CAGR if base is positive, safe annualized growth if base was negative
+        if bv > 0 and ev > 0: 
+            return (ev / bv) ** (1 / years) - 1
+        else:
+            return ((ev - bv) / abs(bv)) / years
+
+    def render_cagr_pills(series, is_quarterly=False):
+        if not isinstance(series, pd.Series) or series.empty or len(series) < 2: 
+            return ""
+            
+        # If quarterly, 1 Year = 4 periods back. If annual, 1 Year = 1 period back.
+        step = 4 if is_quarterly else 1
+        max_lookback = len(series) - 1
+        max_years = max_lookback / step
+        
+        cagrs = {
+            "1Y": calculate_cagr(series, step * 1, 1),
+            "2Y": calculate_cagr(series, step * 2, 2),
+            "3Y": calculate_cagr(series, step * 3, 3),
+            "MAX": calculate_cagr(series, max_lookback, max_years)
+        }
+        
+        html = '<div style="display: flex; justify-content: center; flex-wrap: wrap; gap: 6px; margin-top: 5px; margin-bottom: 15px;">'
+        has_data = False
+        
+        for label, val in cagrs.items():
+            if val is not None:
+                has_data = True
+                pct = val * 100
+                if pct > 0:
+                    bg, text_c, sign = "rgba(34, 197, 94, 0.2)", "#16a34a", "+"
+                elif pct < 0:
+                    bg, text_c, sign = "rgba(239, 68, 68, 0.2)", "#dc2626", ""
+                else:
+                    bg, text_c, sign = "rgba(128, 128, 128, 0.2)", "#A3A8B8", ""
+                    
+                html += f'<div style="background-color: {bg}; color: {text_c}; padding: 3px 8px; border-radius: 6px; font-size: 11px; font-weight: 700; border: 1px solid {text_c}40;">{label}: {sign}{pct:.1f}%</div>'
+        html += '</div>'
+        
+        return html if has_data else ""
+
+
+    # --- 1. Top Row Financials (YFinance Data) ---
     if show_quarterly:
         fin_data = ticker.quarterly_financials
         cf_data = ticker.quarterly_cashflow
         period_title = "Quarterly"
-        limit = 4
+        limit = 16 # Increased limit to try and fetch enough data for 3Y pills
     else:
         fin_data = ticker.financials
         cf_data = ticker.cashflow
@@ -331,35 +388,38 @@ if ticker_symbol:
             df_fin.index = df_fin.index.astype(str).str[:4]
             
         col1, col2, col3 = st.columns(3)
-        plot_height = 260
-        plot_margins = dict(l=15, r=15, t=40, b=40)
+        plot_height = 250
+        plot_margins = dict(l=15, r=15, t=10, b=40) # t=10 removes old internal title margin
         
         with col1:
+            st.markdown(f"<p style='color: #A3A8B8; font-weight: 600; text-align: center; margin-bottom: 5px;'>{period_title} Revenue</p>", unsafe_allow_html=True)
             fig_rev = go.Figure(data=[go.Bar(x=df_fin.index, y=df_fin['Revenue'], marker_color='#1f77b4')])
-            fig_rev.update_layout(title=f"{period_title} Revenue", margin=plot_margins, height=plot_height, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+            fig_rev.update_layout(margin=plot_margins, height=plot_height, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
             st.plotly_chart(fig_rev, use_container_width=True, config=PLOTLY_CONFIG)
+            st.markdown(render_cagr_pills(df_fin['Revenue'], show_quarterly), unsafe_allow_html=True)
             
         with col2:
+            st.markdown(f"<p style='color: #A3A8B8; font-weight: 600; text-align: center; margin-bottom: 5px;'>{period_title} Net Income</p>", unsafe_allow_html=True)
             fig_ni = go.Figure(data=[go.Bar(x=df_fin.index, y=df_fin['Net Income'], marker_color='#2ca02c')])
-            fig_ni.update_layout(title=f"{period_title} Net Income", margin=plot_margins, height=plot_height, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+            fig_ni.update_layout(margin=plot_margins, height=plot_height, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
             st.plotly_chart(fig_ni, use_container_width=True, config=PLOTLY_CONFIG)
+            st.markdown(render_cagr_pills(df_fin['Net Income'], show_quarterly), unsafe_allow_html=True)
             
         with col3:
+            st.markdown(f"<p style='color: #A3A8B8; font-weight: 600; text-align: center; margin-bottom: 5px;'>{period_title} Free Cash Flow</p>", unsafe_allow_html=True)
             if not df_fin['FCF'].dropna().empty:
                 fig_fcf = go.Figure(data=[go.Bar(x=df_fin.index, y=df_fin['FCF'], marker_color='#9467bd')])
-                fig_fcf.update_layout(title=f"{period_title} Free Cash Flow", margin=plot_margins, height=plot_height, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+                fig_fcf.update_layout(margin=plot_margins, height=plot_height, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
                 st.plotly_chart(fig_fcf, use_container_width=True, config=PLOTLY_CONFIG)
+                st.markdown(render_cagr_pills(df_fin['FCF'], show_quarterly), unsafe_allow_html=True)
             else:
                 st.warning(f"Historical FCF Unavailable")
     else:
         st.warning("Historical financial data is not currently available.")
 
-# ==========================================
-    # --- INSIGHTS & STATS: SECONDARY METRICS ---
-    # ==========================================
-    # (Notice the 'Advanced Financial Metrics' header has been completely removed to unify the section)
-    
-    is_quarterly = st.toggle("Show Quarterly Data", value=False, key="advanced_matrix_toggle")
+
+    # --- 2. Advanced Charts (YahooQuery Data) ---
+    is_quarterly = show_quarterly # Master toggle logic
     period = "q" if is_quarterly else "a"
     expected_period_type = "3M" if is_quarterly else "12M"
     
@@ -394,28 +454,26 @@ if ticker_symbol:
     cf_df = clean_yq_df(cf_raw, expected_period_type)
     bs_df = clean_yq_df(bs_raw, expected_period_type)
 
-    # 2. Build the 3-Column UI Grid to perfectly match the charts above
     adv_col1, adv_col2, adv_col3 = st.columns(3)
 
-    # --- GRAPH 1: Operating Cash Flow ---
     with adv_col1:
-        st.markdown("<p style='color: #A3A8B8; font-weight: 600; text-align: center;'>Operating Cash Flow</p>", unsafe_allow_html=True)
+        st.markdown("<p style='color: #A3A8B8; font-weight: 600; text-align: center; margin-bottom: 5px;'>Operating Cash Flow</p>", unsafe_allow_html=True)
         if not cf_df.empty and 'date_str' in cf_df.columns and 'OperatingCashFlow' in cf_df.columns:
             plot_cf = cf_df.dropna(subset=['OperatingCashFlow'])
             if not plot_cf.empty:
                 fig_ocf = go.Figure(go.Bar(x=plot_cf['date_str'], y=plot_cf['OperatingCashFlow'], marker_color='#0ea5e9', name='Operating CF'))
-                fig_ocf.update_layout(xaxis_type='category', height=250, margin=dict(l=20, r=20, t=10, b=60), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'))
-                fig_ocf.update_xaxes(showline=True, linewidth=1, linecolor='#333333') # Forces a clear X-axis line
+                fig_ocf.update_layout(xaxis_type='category', height=250, margin=dict(l=20, r=20, t=10, b=40), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'))
+                fig_ocf.update_xaxes(showline=True, linewidth=1, linecolor='#333333') 
                 fig_ocf.update_yaxes(showgrid=True, gridcolor='#1F212E')
                 st.plotly_chart(fig_ocf, use_container_width=True, config={'displayModeBar': False})
+                st.markdown(render_cagr_pills(plot_cf['OperatingCashFlow'], is_quarterly), unsafe_allow_html=True)
             else:
                 st.info("Operating Cash Flow Data Unavailable")
         else:
             st.info("Operating Cash Flow Data Unavailable")
 
-    # --- GRAPH 2: Profit Margins ---
     with adv_col2:
-        st.markdown("<p style='color: #A3A8B8; font-weight: 600; text-align: center;'>Profit Margins (%)</p>", unsafe_allow_html=True)
+        st.markdown("<p style='color: #A3A8B8; font-weight: 600; text-align: center; margin-bottom: 5px;'>Profit Margins (%)</p>", unsafe_allow_html=True)
         if not inc_df.empty and 'date_str' in inc_df.columns and 'TotalRevenue' in inc_df.columns and 'GrossProfit' in inc_df.columns:
             plot_inc = inc_df.dropna(subset=['TotalRevenue', 'GrossProfit'])
             plot_inc = plot_inc[plot_inc['TotalRevenue'] > 0]
@@ -423,7 +481,6 @@ if ticker_symbol:
             if not plot_inc.empty:
                 fig_margin = go.Figure()
                 rev = plot_inc['TotalRevenue']
-                
                 gm = (plot_inc['GrossProfit'] / rev) * 100
                 fig_margin.add_trace(go.Scatter(x=plot_inc['date_str'], y=gm, mode='lines+markers', name='Gross', line=dict(color='#3b82f6')))
                 
@@ -434,52 +491,51 @@ if ticker_symbol:
                     nm = (plot_inc['NetIncome'] / rev) * 100
                     fig_margin.add_trace(go.Scatter(x=plot_inc['date_str'], y=nm, mode='lines+markers', name='Net', line=dict(color='#16a34a')))
                 
-                # THE FIX: Legend is now perfectly centered above the chart so no text gets cut off
                 fig_margin.update_layout(
-                    xaxis_type='category', height=250, margin=dict(l=30, r=20, t=40, b=60), 
+                    xaxis_type='category', height=250, margin=dict(l=30, r=20, t=40, b=40), 
                     paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'), 
                     legend=dict(orientation="h", yanchor="bottom", y=1.05, xanchor="center", x=0.5)
                 )
-                fig_margin.update_xaxes(showline=True, linewidth=1, linecolor='#333333') # Forces a clear X-axis line
-                fig_margin.update_yaxes(zeroline=True, zerolinecolor='#333333', showgrid=True, gridcolor='#1F212E') # Anchors the Y-axis properly
+                fig_margin.update_xaxes(showline=True, linewidth=1, linecolor='#333333') 
+                fig_margin.update_yaxes(zeroline=True, zerolinecolor='#333333', showgrid=True, gridcolor='#1F212E') 
                 st.plotly_chart(fig_margin, use_container_width=True, config={'displayModeBar': False})
+                st.markdown(render_cagr_pills(gm, is_quarterly), unsafe_allow_html=True)
             else:
                 st.info("Margin Data Unavailable")
         else:
             st.info("Margin Data Unavailable")
 
-    # --- GRAPH 3: Total Debt ---
     with adv_col3:
-        st.markdown("<p style='color: #A3A8B8; font-weight: 600; text-align: center;'>Total Debt</p>", unsafe_allow_html=True)
+        st.markdown("<p style='color: #A3A8B8; font-weight: 600; text-align: center; margin-bottom: 5px;'>Total Debt</p>", unsafe_allow_html=True)
         if not bs_df.empty and 'date_str' in bs_df.columns and 'TotalDebt' in bs_df.columns:
             plot_bs = bs_df.dropna(subset=['TotalDebt'])
             if not plot_bs.empty:
                 fig_debt = go.Figure(go.Bar(x=plot_bs['date_str'], y=plot_bs['TotalDebt'], marker_color='#dc2626', name='Total Debt'))
-                fig_debt.update_layout(xaxis_type='category', height=250, margin=dict(l=20, r=20, t=10, b=60), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'))
+                fig_debt.update_layout(xaxis_type='category', height=250, margin=dict(l=20, r=20, t=10, b=40), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'))
                 fig_debt.update_xaxes(showline=True, linewidth=1, linecolor='#333333')
                 fig_debt.update_yaxes(showgrid=True, gridcolor='#1F212E')
                 st.plotly_chart(fig_debt, use_container_width=True, config={'displayModeBar': False})
+                st.markdown(render_cagr_pills(plot_bs['TotalDebt'], is_quarterly), unsafe_allow_html=True)
             else:
                 st.info("Debt Data Unavailable")
         else:
             st.info("Debt Data Unavailable")
 
-    # --- ROW 2 ---
     adv_col4, adv_col5, adv_col6 = st.columns(3)
     
-    # --- GRAPH 4: Shares Outstanding ---
     with adv_col4:
-        st.markdown("<p style='color: #A3A8B8; font-weight: 600; text-align: center;'>Shares Outstanding</p>", unsafe_allow_html=True)
+        st.markdown("<p style='color: #A3A8B8; font-weight: 600; text-align: center; margin-bottom: 5px;'>Shares Outstanding</p>", unsafe_allow_html=True)
         share_col = 'DilutedAverageShares' if 'DilutedAverageShares' in inc_df.columns else ('BasicAverageShares' if 'BasicAverageShares' in inc_df.columns else None)
         
         if not inc_df.empty and 'date_str' in inc_df.columns and share_col:
             plot_shares = inc_df.dropna(subset=[share_col])
             if not plot_shares.empty:
                 fig_shares = go.Figure(go.Bar(x=plot_shares['date_str'], y=plot_shares[share_col], marker_color='#8b5cf6', name='Shares Out'))
-                fig_shares.update_layout(xaxis_type='category', height=250, margin=dict(l=20, r=20, t=10, b=60), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'))
+                fig_shares.update_layout(xaxis_type='category', height=250, margin=dict(l=20, r=20, t=10, b=40), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'))
                 fig_shares.update_xaxes(showline=True, linewidth=1, linecolor='#333333')
                 fig_shares.update_yaxes(showgrid=True, gridcolor='#1F212E')
                 st.plotly_chart(fig_shares, use_container_width=True, config={'displayModeBar': False})
+                st.markdown(render_cagr_pills(plot_shares[share_col], is_quarterly), unsafe_allow_html=True)
             else:
                 st.info("Share Data Unavailable")
         else:
