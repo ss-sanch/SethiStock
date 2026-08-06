@@ -287,7 +287,6 @@ if ticker_symbol:
     
     with m_col1:
         st.metric("Market Cap", format_mcap(mcap))
-        st.markdown(f"<p style='color: #A3A8B8; font-weight: 600; text-align: center; margin-bottom: 15px; margin-top: 5px;'>{period_title} Revenue</p>", unsafe_allow_html=True)
     with m_col2:
         st.metric("P/E Ratio (TTM)", f"{pe:.2f}" if pe else "N/A")
     with m_col3:
@@ -412,7 +411,7 @@ if ticker_symbol:
         
         with col1:
             with st.container(border=True):
-                st.markdown(f"<p style='color: #A3A8B8; font-weight: 600; text-align: center; margin-bottom: 0px; margin-top: 5px;'>{period_title} Revenue</p>", unsafe_allow_html=True)
+                st.markdown(f"<p style='color: #A3A8B8; font-weight: 600; text-align: center; margin-bottom: 15px; margin-top: 5px;'>{period_title} Revenue</p>", unsafe_allow_html=True)
                 fig_rev = go.Figure(data=[go.Bar(x=df_fin.index, y=df_fin['Revenue'], marker_color='#1f77b4')])
                 fig_rev.update_layout(margin=plot_margins, height=plot_height, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
                 st.plotly_chart(fig_rev, use_container_width=True, config=PLOTLY_CONFIG)
@@ -420,7 +419,7 @@ if ticker_symbol:
             
         with col2:
             with st.container(border=True):
-                st.markdown(f"<p style='color: #A3A8B8; font-weight: 600; text-align: center; margin-bottom: 0px; margin-top: 5px;'>{period_title} Net Income</p>", unsafe_allow_html=True)
+                st.markdown(f"<p style='color: #A3A8B8; font-weight: 600; text-align: center; margin-bottom: 15px; margin-top: 5px;'>{period_title} Net Income</p>", unsafe_allow_html=True)
                 fig_ni = go.Figure(data=[go.Bar(x=df_fin.index, y=df_fin['Net Income'], marker_color='#2ca02c')])
                 fig_ni.update_layout(margin=plot_margins, height=plot_height, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
                 st.plotly_chart(fig_ni, use_container_width=True, config=PLOTLY_CONFIG)
@@ -428,7 +427,7 @@ if ticker_symbol:
             
         with col3:
             with st.container(border=True):
-                st.markdown(f"<p style='color: #A3A8B8; font-weight: 600; text-align: center; margin-bottom: 0px; margin-top: 5px;'>{period_title} Free Cash Flow</p>", unsafe_allow_html=True)
+                st.markdown(f"<p style='color: #A3A8B8; font-weight: 600; text-align: center; margin-bottom: 15px; margin-top: 5px;'>{period_title} Free Cash Flow</p>", unsafe_allow_html=True)
                 if not df_fin['FCF'].dropna().empty:
                     fig_fcf = go.Figure(data=[go.Bar(x=df_fin.index, y=df_fin['FCF'], marker_color='#9467bd')])
                     fig_fcf.update_layout(margin=plot_margins, height=plot_height, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
@@ -480,7 +479,7 @@ if ticker_symbol:
 
     with adv_col1:
         with st.container(border=True):
-            st.markdown("<p style='color: #A3A8B8; font-weight: 600; text-align: center; margin-bottom: 0px; margin-top: 5px;'>Operating Cash Flow</p>", unsafe_allow_html=True)
+            st.markdown("<p style='color: #A3A8B8; font-weight: 600; text-align: center; margin-bottom: 15px; margin-top: 5px;'>Operating Cash Flow</p>", unsafe_allow_html=True)
             if not cf_df.empty and 'date_str' in cf_df.columns and 'OperatingCashFlow' in cf_df.columns:
                 plot_cf = cf_df.dropna(subset=['OperatingCashFlow'])
                 if not plot_cf.empty:
@@ -497,7 +496,7 @@ if ticker_symbol:
 
     with adv_col2:
         with st.container(border=True):
-            st.markdown("<p style='color: #A3A8B8; font-weight: 600; text-align: center; margin-bottom: 0px; margin-top: 5px;'>Profit Margins (%)</p>", unsafe_allow_html=True)
+            st.markdown("<p style='color: #A3A8B8; font-weight: 600; text-align: center; margin-bottom: 15px; margin-top: 5px;'>Profit Margins (%)</p>", unsafe_allow_html=True)
             if not inc_df.empty and 'date_str' in inc_df.columns and 'TotalRevenue' in inc_df.columns and 'GrossProfit' in inc_df.columns:
                 plot_inc = inc_df.dropna(subset=['TotalRevenue', 'GrossProfit'])
                 plot_inc = plot_inc[plot_inc['TotalRevenue'] > 0]
@@ -531,7 +530,7 @@ if ticker_symbol:
 
     with adv_col3:
         with st.container(border=True):
-            st.markdown("<p style='color: #A3A8B8; font-weight: 600; text-align: center; margin-bottom: 0px; margin-top: 5px;'>Total Debt</p>", unsafe_allow_html=True)
+            st.markdown("<p style='color: #A3A8B8; font-weight: 600; text-align: center; margin-bottom: 15px; margin-top: 5px;'>Total Debt</p>", unsafe_allow_html=True)
             if not bs_df.empty and 'date_str' in bs_df.columns and 'TotalDebt' in bs_df.columns:
                 plot_bs = bs_df.dropna(subset=['TotalDebt'])
                 if not plot_bs.empty:
@@ -550,7 +549,7 @@ if ticker_symbol:
     
     with adv_col4:
         with st.container(border=True):
-            st.markdown("<p style='color: #A3A8B8; font-weight: 600; text-align: center; margin-bottom: 0px; margin-top: 5px;'>Shares Outstanding</p>", unsafe_allow_html=True)
+            st.markdown("<p style='color: #A3A8B8; font-weight: 600; text-align: center; margin-bottom: 15px; margin-top: 5px;'>Shares Outstanding</p>", unsafe_allow_html=True)
             share_col = 'DilutedAverageShares' if 'DilutedAverageShares' in inc_df.columns else ('BasicAverageShares' if 'BasicAverageShares' in inc_df.columns else None)
             
             if not inc_df.empty and 'date_str' in inc_df.columns and share_col:
@@ -572,71 +571,40 @@ if ticker_symbol:
     st.divider()
     st.markdown("<h2 id='reverse-dcf' style='text-align: center; color: #E2E8F0; margin-bottom: 20px;'>Reverse DCF</h2>", unsafe_allow_html=True)
 
-    # 1. The Sliders in a clean row
+    # 1. State Management for Two-Way Binding (Slider + Input Sync)
+    if 'proj_years' not in st.session_state: st.session_state.proj_years = 5
+    if 'growth_rate' not in st.session_state: st.session_state.growth_rate = 15.0
+    if 'discount_rate' not in st.session_state: st.session_state.discount_rate = 10.0
+    if 'exit_mult' not in st.session_state: st.session_state.exit_mult = 15.0
+
+    def sync_inputs(key_to_update, key_to_read):
+        st.session_state[key_to_update] = st.session_state[key_to_read]
+
+    # 2. The Hybrid Inputs (Type-in + Slider)
     dcf_col1, dcf_col2, dcf_col3, dcf_col4 = st.columns(4)
+
     with dcf_col1:
-        proj_years = st.slider("Projection Years", 1, 10, 5)
-        proj_years = st.number_input("Projection Years", min_value=1, max_value=20, value=5, step=1)
+        st.markdown("<p style='color: #A3A8B8; font-weight: 600; text-align: center; margin-bottom: 5px;'>Projection Years</p>", unsafe_allow_html=True)
+        st.number_input("Proj Years Input", min_value=1, max_value=10, key='proj_num', value=st.session_state.proj_years, on_change=sync_inputs, args=('proj_years', 'proj_num'), label_visibility="collapsed")
+        st.slider("Proj Years Slider", 1, 10, key='proj_sld', value=st.session_state.proj_years, on_change=sync_inputs, args=('proj_years', 'proj_sld'), label_visibility="collapsed")
+        proj_years = st.session_state.proj_years
+
     with dcf_col2:
-        growth_rate = st.slider("Growth Rate %", 1.0, 50.0, 15.0) / 100
-        growth_rate = st.number_input("Growth Rate %", min_value=1.0, max_value=100.0, value=15.0, step=0.5) / 100
+        st.markdown("<p style='color: #A3A8B8; font-weight: 600; text-align: center; margin-bottom: 5px;'>Growth Rate %</p>", unsafe_allow_html=True)
+        st.number_input("Growth Rate Input", min_value=1.0, max_value=50.0, step=0.5, key='grow_num', value=st.session_state.growth_rate, on_change=sync_inputs, args=('growth_rate', 'grow_num'), label_visibility="collapsed")
+        st.slider("Growth Rate Slider", 1.0, 50.0, key='grow_sld', value=st.session_state.growth_rate, on_change=sync_inputs, args=('growth_rate', 'grow_sld'), label_visibility="collapsed")
+        growth_rate = st.session_state.growth_rate / 100
+
     with dcf_col3:
-        discount_rate = st.slider("Discount Rate %", 5.0, 20.0, 10.0) / 100
-        discount_rate = st.number_input("Discount Rate %", min_value=1.0, max_value=50.0, value=10.0, step=0.5) / 100
+        st.markdown("<p style='color: #A3A8B8; font-weight: 600; text-align: center; margin-bottom: 5px;'>Discount Rate %</p>", unsafe_allow_html=True)
+        st.number_input("Discount Rate Input", min_value=5.0, max_value=20.0, step=0.5, key='disc_num', value=st.session_state.discount_rate, on_change=sync_inputs, args=('discount_rate', 'disc_num'), label_visibility="collapsed")
+        st.slider("Discount Rate Slider", 5.0, 20.0, key='disc_sld', value=st.session_state.discount_rate, on_change=sync_inputs, args=('discount_rate', 'disc_sld'), label_visibility="collapsed")
+        discount_rate = st.session_state.discount_rate / 100
+
     with dcf_col4:
-        exit_multiple = st.slider("Exit Multiple", 10.0, 100.0, 15.0)
-        exit_multiple = st.number_input("Exit Multiple", min_value=1.0, max_value=100.0, value=15.0, step=1.0)
+        st.markdown("<p style='color: #A3A8B8; font-weight: 600; text-align: center; margin-bottom: 5px;'>Exit Multiple</p>", unsafe_allow_html=True)
+        st.number_input("Exit Mult Input", min_value=10.0, max_value=100.0, step=1.0, key='exit_num', value=st.session_state.exit_mult, on_change=sync_inputs, args=('exit_mult', 'exit_num'), label_visibility="collapsed")
+        st.slider("Exit Mult Slider", 10.0, 100.0, key='exit_sld', value=st.session_state.exit_mult, on_change=sync_inputs, args=('exit_mult', 'exit_sld'), label_visibility="collapsed")
+        exit_multiple = st.session_state.exit_mult
 
-    # 2. Execute DCF Math
-    dcf_valid = False
-    fcf = 0
-    try:
-        shares = f_info.shares
-    except Exception:
-        shares = 0
-            
-    cash_flow = ticker.cashflow
-    if not cash_flow.empty and 'Operating Cash Flow' in cash_flow.index:
-        try:
-            ocf = cash_flow.loc['Operating Cash Flow'].dropna().iloc[0]
-            capex = abs(cash_flow.loc['Capital Expenditure'].dropna().iloc[0]) if 'Capital Expenditure' in cash_flow.index else 0
-            fcf = ocf - capex
-        except Exception:
-            fcf = 0
-
-    if fcf > 0 and shares > 0 and current_price > 0:
-        target_price_sum = 0
-        fcf_n = fcf
-            
-        for t in range(1, proj_years + 1):
-            fcf_n = fcf_n * (1 + growth_rate)
-            target_price_sum += fcf_n / ((1 + discount_rate) ** t)
-                
-        tv = fcf_n * exit_multiple
-        target_price_sum += tv / ((1 + discount_rate) ** proj_years)
-            
-        target_price_per_share = target_price_sum / shares
-        margin_of_safety = ((target_price_per_share - current_price) / current_price) * 100
-        dcf_valid = True
-
-    # 3. Render Output Card
-    if dcf_valid:
-        if margin_of_safety > 0:
-            mos_color = "#16a34a"  # Green
-        else:
-            mos_color = "#dc2626"  # Red
-                
-        st.markdown(f"""
-        <div style="background-color: #1E1E1E; padding: 25px; border-radius: 10px; border: 1px solid #333; margin-top: 20px; display: flex; justify-content: space-around; text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.3);">
-            <div>
-                <p style="color: #A3A8B8; margin: 0; font-size: 14px; font-weight: 600; letter-spacing: 1px;">TARGET ENTRY PRICE</p>
-                <h1 style="margin: 0; color: #E2E8F0; font-size: 36px;">${target_price_per_share:,.2f}</h1>
-            </div>
-            <div>
-                <p style="color: #A3A8B8; margin: 0; font-size: 14px; font-weight: 600; letter-spacing: 1px;">MARGIN OF SAFETY</p>
-                <h1 style="margin: 0; color: {mos_color}; font-size: 36px;">{margin_of_safety:,.2f}%</h1>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-    else:
-        st.warning("Insufficient cash flow data to run DCF Valuation for this ticker.")
+    # 3. Execute DCF Math
