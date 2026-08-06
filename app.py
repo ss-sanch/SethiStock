@@ -239,6 +239,59 @@ if ticker_symbol:
     <h2 style='text-align: center; color: #E2E8F0; margin-bottom: 20px;'>Insights & Stats</h2>
     """, unsafe_allow_html=True)
     show_quarterly = st.toggle("Switch to Quarterly (TTM) View", value=False)
+
+    @st.cache_data(ttl=3600)
+    def fetch_key_metrics(tsymbol):
+        from yahooquery import Ticker
+        try:
+            yq_t = Ticker(tsymbol)
+            # yahooquery returns a nested dictionary: {'AAPL': {'marketCap': ...}}
+            summary = yq_t.summary_detail.get(tsymbol, {})
+            financials = yq_t.financial_data.get(tsymbol, {})
+            
+            # Failsafe in case the API returns an error string instead of a dict
+            if isinstance(summary, str): summary = {}
+            if isinstance(financials, str): financials = {}
+            
+            mcap = summary.get('marketCap', 0)
+            pe = summary.get('trailingPE', 0)
+            dyield = summary.get('dividendYield', 0)
+            dyield = dyield * 100 if dyield else 0
+            
+            roa = financials.get('returnOnAssets', 0)
+            roa = roa * 100 if roa else 0
+            
+            roe = financials.get('returnOnEquity', 0)
+            roe = roe * 100 if roe else 0
+            
+            return mcap, pe, dyield, roa, roe
+        except Exception:
+            return 0, 0, 0, 0, 0
+
+    mcap, pe, dyield, roa, roe = fetch_key_metrics(ticker_symbol)
+
+    def format_mcap(val):
+        if not val: return "N/A"
+        if val >= 1e12: return f"${val/1e12:.2f}T"
+        if val >= 1e9: return f"${val/1e9:.2f}B"
+        if val >= 1e6: return f"${val/1e6:.2f}M"
+        return f"${val:,.0f}"
+
+    # Render the 5-Column Grid
+    m_col1, m_col2, m_col3, m_col4, m_col5 = st.columns(5)
+    with m_col1:
+        st.metric("Market Cap", format_mcap(mcap))
+    with m_col2:
+        st.metric("P/E Ratio", f"{pe:.2f}" if pe else "N/A")
+    with m_col3:
+        st.metric("Div Yield", f"{dyield:.2f}%" if dyield else "N/A")
+    with m_col4:
+        st.metric("ROA", f"{roa:.2f}%" if roa else "N/A")
+    with m_col5:
+        st.metric("ROE", f"{roe:.2f}%" if roe else "N/A")
+        
+    st.markdown("<br>", unsafe_allow_html=True) # Adds a little breathing room below the bar
+
     
     if show_quarterly:
         fin_data = ticker.quarterly_financials
