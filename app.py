@@ -370,6 +370,7 @@ if ticker_symbol:
     # ==========================================
     # --- BOTTOM SECTION: VALUATION ENGINE ---
     # ==========================================
+    st.divider()
     st.markdown("<h2 style='text-align: center; color: #E2E8F0; margin-bottom: 20px;'>Reverse DCF</h2>", unsafe_allow_html=True)
 
     # 1. The Sliders in a clean row
