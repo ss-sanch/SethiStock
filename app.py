@@ -289,7 +289,7 @@ if ticker_symbol:
     with m_col1:
         st.metric("Market Cap", format_mcap(mcap))
     with m_col2:
-        st.metric("P/E Ratio", f"{pe:.2f}" if pe else "N/A")
+        st.metric("P/E Ratio (TTM)", f"{pe:.2f}" if pe else "N/A")
     with m_col3:
         st.metric("FCF Yield", f"{fcf_yield:.2f}%" if fcf_yield else "N/A")
     with m_col4:
