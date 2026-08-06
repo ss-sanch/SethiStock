@@ -287,6 +287,7 @@ if ticker_symbol:
     
     with m_col1:
         st.metric("Market Cap", format_mcap(mcap))
+        st.markdown(f"<p style='color: #A3A8B8; font-weight: 600; text-align: center; margin-bottom: 15px; margin-top: 5px;'>{period_title} Revenue</p>", unsafe_allow_html=True)
     with m_col2:
         st.metric("P/E Ratio (TTM)", f"{pe:.2f}" if pe else "N/A")
     with m_col3:
