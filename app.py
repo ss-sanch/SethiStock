@@ -53,6 +53,27 @@ st.markdown("""
     [data-testid="stPlotlyChart"] > div, [data-testid="stPlotlyChart"] iframe {
         overflow: hidden !important;
     }
+    a.nav-pill {
+        text-decoration: none;
+        padding: 8px 18px;
+        background-color: rgba(128, 128, 128, 0.08);
+        border-radius: 20px;
+        color: #E2E8F0;
+        font-size: 0.95rem;
+        font-weight: 600;
+        border: 1px solid rgba(128, 128, 128, 0.2);
+        transition: all 0.2s ease;
+    }
+    a.nav-pill:hover {
+        background-color: rgba(128, 128, 128, 0.18);
+        border-color: rgba(128, 128, 128, 0.4);
+    }
+    .nav-container {
+        display: flex;
+        justify-content: center;
+        gap: 15px;
+        margin-bottom: 25px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -132,7 +153,7 @@ if ticker_symbol:
     # --- 2. Dynamic Price Action Chart ---
 
     st.divider()
-    st.markdown("<h2 style='text-align: center; color: #E2E8F0; margin-bottom: 20px;'>Price Action</h2>", unsafe_allow_html=True)
+    st.markdown("<h2 id='price-action' style='text-align: center; color: #E2E8F0; margin-bottom: 20px;'>Price Action</h2>", unsafe_allow_html=True)
 
     
     # Using a spacer column (the '1' in the middle) to force the chart toggle to the far right
@@ -195,7 +216,7 @@ if ticker_symbol:
             
         fig_price.update_layout(
             xaxis_rangeslider_visible=False,
-            margin=dict(l=5, r=5, t=40, b=40),
+            margin=dict(l=5, r=50, t=40, b=40),
             height=400,
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)"
@@ -213,7 +234,7 @@ if ticker_symbol:
     # --- 3. Financial Visuals (Master Toggle for Annual vs Quarterly) ---
     st.divider()
     
-    st.markdown("<h2 style='text-align: center; color: #E2E8F0; margin-bottom: 20px;'>Insights & Stats</h2>", unsafe_allow_html=True)
+    st.markdown("<h2 id='insights-stats' style='text-align: center; color: #E2E8F0; margin-bottom: 20px;'>Insights & Stats</h2>", unsafe_allow_html=True)
     show_quarterly = st.toggle("Switch to Quarterly (TTM) View", value=False)
     
     if show_quarterly:
@@ -402,7 +423,7 @@ if ticker_symbol:
     # --- BOTTOM SECTION: VALUATION ENGINE ---
     # ==========================================
     st.divider()
-    st.markdown("<h2 style='text-align: center; color: #E2E8F0; margin-bottom: 20px;'>Reverse DCF</h2>", unsafe_allow_html=True)
+    st.markdown("<h2 id='reverse-dcf' style='text-align: center; color: #E2E8F0; margin-bottom: 20px;'>Reverse DCF</h2>", unsafe_allow_html=True)
 
     # 1. The Sliders in a clean row
     dcf_col1, dcf_col2, dcf_col3, dcf_col4 = st.columns(4)
