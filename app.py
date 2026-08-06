@@ -565,6 +565,7 @@ if ticker_symbol:
                     st.info("Share Data Unavailable")
             else:
                 st.info("Share Data Unavailable")
+
     # ==========================================
     # --- BOTTOM SECTION: VALUATION ENGINE ---
     # ==========================================
@@ -585,26 +586,78 @@ if ticker_symbol:
 
     with dcf_col1:
         st.markdown("<p style='color: #A3A8B8; font-weight: 600; text-align: center; margin-bottom: 5px;'>Projection Years</p>", unsafe_allow_html=True)
-        st.number_input("Proj Years Input", min_value=1, max_value=10, key='proj_num', value=st.session_state.proj_years, on_change=sync_inputs, args=('proj_years', 'proj_num'), label_visibility="collapsed")
-        st.slider("Proj Years Slider", 1, 10, key='proj_sld', value=st.session_state.proj_years, on_change=sync_inputs, args=('proj_years', 'proj_sld'), label_visibility="collapsed")
-        proj_years = st.session_state.proj_years
+        st.number_input("Proj Years Input", min_value=1, max_value=20, key='proj_num', value=st.session_state.proj_years, on_change=sync_inputs, args=('proj_years', 'proj_num'), label_visibility="collapsed")
+        st.slider("Proj Years Slider", 1, 20, key='proj_sld', value=st.session_state.proj_years, on_change=sync_inputs, args=('proj_years', 'proj_sld'), label_visibility="collapsed")
+        proj_years = int(st.session_state.proj_years)
 
     with dcf_col2:
         st.markdown("<p style='color: #A3A8B8; font-weight: 600; text-align: center; margin-bottom: 5px;'>Growth Rate %</p>", unsafe_allow_html=True)
-        st.number_input("Growth Rate Input", min_value=1.0, max_value=50.0, step=0.5, key='grow_num', value=st.session_state.growth_rate, on_change=sync_inputs, args=('growth_rate', 'grow_num'), label_visibility="collapsed")
-        st.slider("Growth Rate Slider", 1.0, 50.0, key='grow_sld', value=st.session_state.growth_rate, on_change=sync_inputs, args=('growth_rate', 'grow_sld'), label_visibility="collapsed")
-        growth_rate = st.session_state.growth_rate / 100
+        st.number_input("Growth Rate Input", min_value=1.0, max_value=100.0, step=0.5, key='grow_num', value=float(st.session_state.growth_rate), on_change=sync_inputs, args=('growth_rate', 'grow_num'), label_visibility="collapsed")
+        st.slider("Growth Rate Slider", 1.0, 100.0, key='grow_sld', value=float(st.session_state.growth_rate), on_change=sync_inputs, args=('growth_rate', 'grow_sld'), label_visibility="collapsed")
+        growth_rate = float(st.session_state.growth_rate) / 100.0
 
     with dcf_col3:
         st.markdown("<p style='color: #A3A8B8; font-weight: 600; text-align: center; margin-bottom: 5px;'>Discount Rate %</p>", unsafe_allow_html=True)
-        st.number_input("Discount Rate Input", min_value=5.0, max_value=20.0, step=0.5, key='disc_num', value=st.session_state.discount_rate, on_change=sync_inputs, args=('discount_rate', 'disc_num'), label_visibility="collapsed")
-        st.slider("Discount Rate Slider", 5.0, 20.0, key='disc_sld', value=st.session_state.discount_rate, on_change=sync_inputs, args=('discount_rate', 'disc_sld'), label_visibility="collapsed")
-        discount_rate = st.session_state.discount_rate / 100
+        st.number_input("Discount Rate Input", min_value=1.0, max_value=50.0, step=0.5, key='disc_num', value=float(st.session_state.discount_rate), on_change=sync_inputs, args=('discount_rate', 'disc_num'), label_visibility="collapsed")
+        st.slider("Discount Rate Slider", 1.0, 50.0, key='disc_sld', value=float(st.session_state.discount_rate), on_change=sync_inputs, args=('discount_rate', 'disc_sld'), label_visibility="collapsed")
+        discount_rate = float(st.session_state.discount_rate) / 100.0
 
     with dcf_col4:
         st.markdown("<p style='color: #A3A8B8; font-weight: 600; text-align: center; margin-bottom: 5px;'>Exit Multiple</p>", unsafe_allow_html=True)
-        st.number_input("Exit Mult Input", min_value=10.0, max_value=100.0, step=1.0, key='exit_num', value=st.session_state.exit_mult, on_change=sync_inputs, args=('exit_mult', 'exit_num'), label_visibility="collapsed")
-        st.slider("Exit Mult Slider", 10.0, 100.0, key='exit_sld', value=st.session_state.exit_mult, on_change=sync_inputs, args=('exit_mult', 'exit_sld'), label_visibility="collapsed")
-        exit_multiple = st.session_state.exit_mult
+        st.number_input("Exit Mult Input", min_value=1.0, max_value=100.0, step=1.0, key='exit_num', value=float(st.session_state.exit_mult), on_change=sync_inputs, args=('exit_mult', 'exit_num'), label_visibility="collapsed")
+        st.slider("Exit Mult Slider", 1.0, 100.0, key='exit_sld', value=float(st.session_state.exit_mult), on_change=sync_inputs, args=('exit_mult', 'exit_sld'), label_visibility="collapsed")
+        exit_multiple = float(st.session_state.exit_mult)
 
     # 3. Execute DCF Math
+    dcf_valid = False
+    fcf = 0
+    try:
+        shares = f_info.shares
+    except Exception:
+        shares = 0
+            
+    cash_flow = ticker.cashflow
+    if not cash_flow.empty and 'Operating Cash Flow' in cash_flow.index:
+        try:
+            ocf = cash_flow.loc['Operating Cash Flow'].dropna().iloc[0]
+            capex = abs(cash_flow.loc['Capital Expenditure'].dropna().iloc[0]) if 'Capital Expenditure' in cash_flow.index else 0
+            fcf = ocf - capex
+        except Exception:
+            fcf = 0
+
+    if fcf > 0 and shares > 0 and current_price > 0:
+        target_price_sum = 0
+        fcf_n = fcf
+            
+        for t in range(1, proj_years + 1):
+            fcf_n = fcf_n * (1 + growth_rate)
+            target_price_sum += fcf_n / ((1 + discount_rate) ** t)
+                
+        tv = fcf_n * exit_multiple
+        target_price_sum += tv / ((1 + discount_rate) ** proj_years)
+            
+        target_price_per_share = target_price_sum / shares
+        margin_of_safety = ((target_price_per_share - current_price) / current_price) * 100
+        dcf_valid = True
+
+    # 4. Render Output Card
+    if dcf_valid:
+        if margin_of_safety > 0:
+            mos_color = "#16a34a"  # Green
+        else:
+            mos_color = "#dc2626"  # Red
+                
+        st.markdown(f"""
+        <div style="background-color: #1E1E1E; padding: 25px; border-radius: 10px; border: 1px solid #333; margin-top: 20px; display: flex; justify-content: space-around; text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.3);">
+            <div>
+                <p style="color: #A3A8B8; margin: 0; font-size: 14px; font-weight: 600; letter-spacing: 1px;">TARGET ENTRY PRICE</p>
+                <h1 style="margin: 0; color: #E2E8F0; font-size: 36px;">${target_price_per_share:,.2f}</h1>
+            </div>
+            <div>
+                <p style="color: #A3A8B8; margin: 0; font-size: 14px; font-weight: 600; letter-spacing: 1px;">MARGIN OF SAFETY</p>
+                <h1 style="margin: 0; color: {mos_color}; font-size: 36px;">{margin_of_safety:,.2f}%</h1>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.warning("Insufficient cash flow data to run DCF Valuation for this ticker.")
