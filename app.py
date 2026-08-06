@@ -572,41 +572,49 @@ if ticker_symbol:
     st.divider()
     st.markdown("<h2 id='reverse-dcf' style='text-align: center; color: #E2E8F0; margin-bottom: 20px;'>Reverse DCF</h2>", unsafe_allow_html=True)
 
-    # 1. State Management for Two-Way Binding (Slider + Input Sync)
-    if 'proj_years' not in st.session_state: st.session_state.proj_years = 5
-    if 'growth_rate' not in st.session_state: st.session_state.growth_rate = 15.0
-    if 'discount_rate' not in st.session_state: st.session_state.discount_rate = 10.0
-    if 'exit_mult' not in st.session_state: st.session_state.exit_mult = 15.0
+    # 1. State Management for Two-Way Binding (Strict Key-to-Key Sync)
+    if 'proj_num' not in st.session_state: st.session_state.proj_num = 5
+    if 'proj_sld' not in st.session_state: st.session_state.proj_sld = 5
 
-    def sync_inputs(key_to_update, key_to_read):
-        st.session_state[key_to_update] = st.session_state[key_to_read]
+    if 'grow_num' not in st.session_state: st.session_state.grow_num = 15.0
+    if 'grow_sld' not in st.session_state: st.session_state.grow_sld = 15.0
+
+    if 'disc_num' not in st.session_state: st.session_state.disc_num = 10.0
+    if 'disc_sld' not in st.session_state: st.session_state.disc_sld = 10.0
+
+    if 'exit_num' not in st.session_state: st.session_state.exit_num = 15.0
+    if 'exit_sld' not in st.session_state: st.session_state.exit_sld = 15.0
+
+    # The Engine that locks the two widgets together
+    def sync_widgets(source_key, target_key):
+        st.session_state[target_key] = st.session_state[source_key]
 
     # 2. The Hybrid Inputs (Type-in + Slider)
     dcf_col1, dcf_col2, dcf_col3, dcf_col4 = st.columns(4)
 
     with dcf_col1:
         st.markdown("<p style='color: #A3A8B8; font-weight: 600; text-align: center; margin-bottom: 5px;'>Projection Years</p>", unsafe_allow_html=True)
-        st.number_input("Proj Years Input", min_value=1, max_value=20, key='proj_num', value=st.session_state.proj_years, on_change=sync_inputs, args=('proj_years', 'proj_num'), label_visibility="collapsed")
-        st.slider("Proj Years Slider", 1, 20, key='proj_sld', value=st.session_state.proj_years, on_change=sync_inputs, args=('proj_years', 'proj_sld'), label_visibility="collapsed")
-        proj_years = int(st.session_state.proj_years)
+        st.number_input("Proj Years Input", min_value=1, max_value=20, key='proj_num', on_change=sync_widgets, args=('proj_num', 'proj_sld'), label_visibility="collapsed")
+        st.slider("Proj Years Slider", 1, 20, key='proj_sld', on_change=sync_widgets, args=('proj_sld', 'proj_num'), label_visibility="collapsed")
+        proj_years = int(st.session_state.proj_num)
 
     with dcf_col2:
         st.markdown("<p style='color: #A3A8B8; font-weight: 600; text-align: center; margin-bottom: 5px;'>Growth Rate %</p>", unsafe_allow_html=True)
-        st.number_input("Growth Rate Input", min_value=1.0, max_value=100.0, step=0.5, key='grow_num', value=float(st.session_state.growth_rate), on_change=sync_inputs, args=('growth_rate', 'grow_num'), label_visibility="collapsed")
-        st.slider("Growth Rate Slider", 1.0, 100.0, key='grow_sld', value=float(st.session_state.growth_rate), on_change=sync_inputs, args=('growth_rate', 'grow_sld'), label_visibility="collapsed")
-        growth_rate = float(st.session_state.growth_rate) / 100.0
+        st.number_input("Growth Rate Input", min_value=1.0, max_value=100.0, step=0.5, key='grow_num', on_change=sync_widgets, args=('grow_num', 'grow_sld'), label_visibility="collapsed")
+        st.slider("Growth Rate Slider", 1.0, 100.0, key='grow_sld', on_change=sync_widgets, args=('grow_sld', 'grow_num'), label_visibility="collapsed")
+        growth_rate = float(st.session_state.grow_num) / 100.0
 
     with dcf_col3:
         st.markdown("<p style='color: #A3A8B8; font-weight: 600; text-align: center; margin-bottom: 5px;'>Discount Rate %</p>", unsafe_allow_html=True)
-        st.number_input("Discount Rate Input", min_value=1.0, max_value=50.0, step=0.5, key='disc_num', value=float(st.session_state.discount_rate), on_change=sync_inputs, args=('discount_rate', 'disc_num'), label_visibility="collapsed")
-        st.slider("Discount Rate Slider", 1.0, 50.0, key='disc_sld', value=float(st.session_state.discount_rate), on_change=sync_inputs, args=('discount_rate', 'disc_sld'), label_visibility="collapsed")
-        discount_rate = float(st.session_state.discount_rate) / 100.0
+        st.number_input("Discount Rate Input", min_value=1.0, max_value=50.0, step=0.5, key='disc_num', on_change=sync_widgets, args=('disc_num', 'disc_sld'), label_visibility="collapsed")
+        st.slider("Discount Rate Slider", 1.0, 50.0, key='disc_sld', on_change=sync_widgets, args=('disc_sld', 'disc_num'), label_visibility="collapsed")
+        discount_rate = float(st.session_state.disc_num) / 100.0
 
     with dcf_col4:
         st.markdown("<p style='color: #A3A8B8; font-weight: 600; text-align: center; margin-bottom: 5px;'>Exit Multiple</p>", unsafe_allow_html=True)
-        st.number_input("Exit Mult Input", min_value=1.0, max_value=100.0, step=1.0, key='exit_num', value=float(st.session_state.exit_mult), on_change=sync_inputs, args=('exit_mult', 'exit_num'), label_visibility="collapsed")
-        st.slider("Exit Mult Slider", 1.0, 100.0, key='exit_sld', value=float(st.session_state.exit_mult), on_change=sync_inputs, args=('exit_mult', 'exit_sld'), label_visibility="collapsed")
-        exit_multiple = float(st.session_state.exit_mult)
+        st.number_input("Exit Mult Input", min_value=1.0, max_value=100.0, step=1.0, key='exit_num', on_change=sync_widgets, args=('exit_num', 'exit_sld'), label_visibility="collapsed")
+        st.slider("Exit Mult Slider", 1.0, 100.0, key='exit_sld', on_change=sync_widgets, args=('exit_sld', 'exit_num'), label_visibility="collapsed")
+        exit_multiple = float(st.session_state.exit_num)
 
     # 3. Execute DCF Math
     dcf_valid = False
