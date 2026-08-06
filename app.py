@@ -238,11 +238,14 @@ if ticker_symbol:
 # ==========================================
     # --- ADVANCED FINANCIAL HEALTH MATRIX (YAHOOQUERY ENGINE) ---
     # ==========================================
-        st.markdown("<br><h3 style='color: #E2E8F0;'>🔬 Advanced Financial Metrics</h3>", unsafe_allow_html=True)
-        
+    st.markdown("<br><h3 style='color: #E2E8F0;'>🔬 Advanced Financial Metrics</h3>", unsafe_allow_html=True)
+    
     is_quarterly = st.toggle("Show Quarterly Data", value=False, key="advanced_matrix_toggle")
     period = "q" if is_quarterly else "a"
-        
+    
+    # 1. The Critical Fix: Explicitly define the periodType to filter out overlapping TTM data
+    expected_period_type = "3M" if is_quarterly else "12M"
+    
     @st.cache_data(ttl=3600)
     def fetch_yq_data(ticker_symbol, period):
         from yahooquery import Ticker
@@ -257,63 +260,65 @@ if ticker_symbol:
 
     inc_raw, cf_raw, bs_raw = fetch_yq_data(ticker_symbol, period)
 
-    # Helper function to clean YahooQuery's complex MultiIndex data
-    def clean_yq_df(df):
+    # Helper function to clean YahooQuery's complex MultiIndex and slice out duplicates
+    def clean_yq_df(df, expected_ptype):
         if isinstance(df, pd.DataFrame) and not df.empty:
             df = df.reset_index()
+            # Slice away overlapping TTM rows so Plotly doesn't draw spaghetti lines
+            if 'periodType' in df.columns:
+                df = df[df['periodType'] == expected_ptype]
+            
+            # Format dates cleanly
             if 'asOfDate' in df.columns:
                 df['date'] = pd.to_datetime(df['asOfDate'])
+                df = df.drop_duplicates(subset=['date']) # Hard safety net against double-bars
                 return df.sort_values('date')
         return pd.DataFrame()
 
-    inc_df = clean_yq_df(inc_raw)
-    cf_df = clean_yq_df(cf_raw)
-    bs_df = clean_yq_df(bs_raw)
+    inc_df = clean_yq_df(inc_raw, expected_period_type)
+    cf_df = clean_yq_df(cf_raw, expected_period_type)
+    bs_df = clean_yq_df(bs_raw, expected_period_type)
 
     # 2. Build the 2x2 UI Grid
     adv_col1, adv_col2 = st.columns(2)
     adv_col3, adv_col4 = st.columns(2)
 
-    # --- GRAPH 1: Free Cash Flow ---
+    # --- GRAPH 1: Operating Cash Flow ---
     with adv_col1:
-        st.markdown("<p style='color: #A3A8B8; font-weight: 600;'>Free Cash Flow</p>", unsafe_allow_html=True)
-        fcf_plotted = False
-        if not cf_df.empty and 'date' in cf_df.columns:
-            if 'FreeCashFlow' in cf_df.columns:
-                y_vals = cf_df['FreeCashFlow']
-                fcf_plotted = True
-            elif 'OperatingCashFlow' in cf_df.columns and 'CapitalExpenditure' in cf_df.columns:
-                # Fallback math if 'FreeCashFlow' specifically is missing
-                y_vals = cf_df['OperatingCashFlow'] - cf_df['CapitalExpenditure'].abs()
-                fcf_plotted = True
-                    
-            if fcf_plotted:
-                fig_fcf = go.Figure(go.Bar(x=cf_df['date'], y=y_vals, marker_color='#16a34a'))
-                fig_fcf.update_layout(height=250, margin=dict(l=0, r=0, t=10, b=30), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'))
-                st.plotly_chart(fig_fcf, use_container_width=True, config={'displayModeBar': False})
-            
-        if not fcf_plotted:
-            st.info("FCF Data Unavailable")
+        st.markdown("<p style='color: #A3A8B8; font-weight: 600;'>Operating Cash Flow</p>", unsafe_allow_html=True)
+        if not cf_df.empty and 'date' in cf_df.columns and 'OperatingCashFlow' in cf_df.columns:
+            fig_ocf = go.Figure(go.Bar(x=cf_df['date'], y=cf_df['OperatingCashFlow'], marker_color='#0ea5e9')) # Tech blue
+            fig_ocf.update_layout(height=250, margin=dict(l=0, r=0, t=10, b=30), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'))
+            st.plotly_chart(fig_ocf, use_container_width=True, config={'displayModeBar': False})
+        else:
+            st.info("Operating Cash Flow Data Unavailable")
 
     # --- GRAPH 2: Profit Margins ---
     with adv_col2:
         st.markdown("<p style='color: #A3A8B8; font-weight: 600;'>Profit Margins (%)</p>", unsafe_allow_html=True)
         if not inc_df.empty and 'date' in inc_df.columns and 'TotalRevenue' in inc_df.columns and 'GrossProfit' in inc_df.columns:
-            fig_margin = go.Figure()
             rev = inc_df['TotalRevenue']
+            # Safety mask to prevent "division by zero" errors when processing margins
+            mask = rev > 0
+            valid_inc = inc_df[mask]
+            valid_rev = rev[mask]
+            
+            if not valid_inc.empty:
+                fig_margin = go.Figure()
+                gm = (valid_inc['GrossProfit'] / valid_rev) * 100
+                fig_margin.add_trace(go.Scatter(x=valid_inc['date'], y=gm, mode='lines+markers', name='Gross', line=dict(color='#3b82f6')))
                 
-            gm = (inc_df['GrossProfit'] / rev) * 100
-            fig_margin.add_trace(go.Scatter(x=inc_df['date'], y=gm, mode='lines+markers', name='Gross', line=dict(color='#3b82f6')))
+                if 'OperatingIncome' in valid_inc.columns:
+                    om = (valid_inc['OperatingIncome'] / valid_rev) * 100
+                    fig_margin.add_trace(go.Scatter(x=valid_inc['date'], y=om, mode='lines+markers', name='Operating', line=dict(color='#f59e0b')))
+                if 'NetIncome' in valid_inc.columns:
+                    nm = (valid_inc['NetIncome'] / valid_rev) * 100
+                    fig_margin.add_trace(go.Scatter(x=valid_inc['date'], y=nm, mode='lines+markers', name='Net', line=dict(color='#16a34a')))
                 
-            if 'OperatingIncome' in inc_df.columns:
-                om = (inc_df['OperatingIncome'] / rev) * 100
-                fig_margin.add_trace(go.Scatter(x=inc_df['date'], y=om, mode='lines+markers', name='Operating', line=dict(color='#f59e0b')))
-            if 'NetIncome' in inc_df.columns:
-                nm = (inc_df['NetIncome'] / rev) * 100
-                fig_margin.add_trace(go.Scatter(x=inc_df['date'], y=nm, mode='lines+markers', name='Net', line=dict(color='#16a34a')))
-                
-            fig_margin.update_layout(height=250, margin=dict(l=0, r=0, t=10, b=30), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-            st.plotly_chart(fig_margin, use_container_width=True, config={'displayModeBar': False})
+                fig_margin.update_layout(height=250, margin=dict(l=0, r=0, t=10, b=30), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+                st.plotly_chart(fig_margin, use_container_width=True, config={'displayModeBar': False})
+            else:
+                st.info("Margin Data Unavailable")
         else:
             st.info("Margin Data Unavailable")
 
@@ -331,7 +336,7 @@ if ticker_symbol:
     with adv_col4:
         st.markdown("<p style='color: #A3A8B8; font-weight: 600;'>Shares Outstanding</p>", unsafe_allow_html=True)
         share_col = 'DilutedAverageShares' if 'DilutedAverageShares' in inc_df.columns else ('BasicAverageShares' if 'BasicAverageShares' in inc_df.columns else None)
-            
+        
         if not inc_df.empty and 'date' in inc_df.columns and share_col:
             fig_shares = go.Figure(go.Bar(x=inc_df['date'], y=inc_df[share_col], marker_color='#8b5cf6'))
             fig_shares.update_layout(height=250, margin=dict(l=0, r=0, t=10, b=30), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'))
