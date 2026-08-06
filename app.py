@@ -102,6 +102,8 @@ if ticker_symbol:
     
     # --- MAIN PAGE: Dashboards & Visuals ---
     # --- 2. Dynamic Price Action Chart ---
+
+    st.divider()
     st.subheader("Price Action")
     
     # Using a spacer column (the '1' in the middle) to force the chart toggle to the far right
