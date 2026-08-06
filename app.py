@@ -29,7 +29,27 @@ st.markdown("""
         box-sizing: border-box !important;
         overflow: hidden !important;
     }
-    
+    a.nav-pill {
+        text-decoration: none;
+        padding: 8px 18px;
+        background-color: rgba(128, 128, 128, 0.08);
+        border-radius: 20px;
+        color: inherit;
+        font-size: 0.95rem;
+        font-weight: 600;
+        border: 1px solid rgba(128, 128, 128, 0.2);
+        transition: all 0.2s ease;
+    }
+    a.nav-pill:hover {
+        background-color: rgba(128, 128, 128, 0.18);
+        border-color: rgba(128, 128, 128, 0.4);
+    }
+    .nav-container {
+        display: flex;
+        justify-content: center;
+        gap: 15px;
+        margin-bottom: 20px;
+    }
     [data-testid="stPlotlyChart"] > div, [data-testid="stPlotlyChart"] iframe {
         overflow: hidden !important;
     }
@@ -53,6 +73,14 @@ with nav_col2:
         label_visibility="collapsed", 
         placeholder="Search Ticker..."
     ).upper()
+
+st.markdown("""
+<div class="nav-container">
+    <a href="#price-action" class="nav-pill">📉 Price Action</a>
+    <a href="#insights-stats" class="nav-pill">📊 Insights & Stats</a>
+    <a href="#reverse-dcf" class="nav-pill">🧮 Reverse DCF</a>
+</div>
+""", unsafe_allow_html=True)
 
 if ticker_symbol:
     ticker = yf.Ticker(ticker_symbol)
