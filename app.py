@@ -370,9 +370,7 @@ if ticker_symbol:
     # ==========================================
     # --- BOTTOM SECTION: VALUATION ENGINE ---
     # ==========================================
-    st.markdown("<br><hr><br>", unsafe_allow_html=True)
-    st.markdown("### 📊 Valuation Engine: Reverse DCF")
-    st.markdown("<p style='color: #A3A8B8; margin-bottom: 20px;'>Adjust the parameters below to reverse-engineer Wall Street expectations and calculate intrinsic value.</p>", unsafe_allow_html=True)
+    st.markdown("<h2 style='text-align: center; color: #E2E8F0; margin-bottom: 20px;'>Reverse DCF</h2>", unsafe_allow_html=True)
 
     # 1. The Sliders in a clean row
     dcf_col1, dcf_col2, dcf_col3, dcf_col4 = st.columns(4)
