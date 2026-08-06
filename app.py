@@ -288,8 +288,8 @@ if ticker_symbol:
         st.markdown("<p style='color: #A3A8B8; font-weight: 600;'>Operating Cash Flow</p>", unsafe_allow_html=True)
         if not cf_df.empty and 'date' in cf_df.columns and 'OperatingCashFlow' in cf_df.columns:
             fig_ocf = go.Figure(go.Bar(x=cf_df['date'], y=cf_df['OperatingCashFlow'], marker_color='#0ea5e9')) # Tech blue
-            fig_ocf.update_layout(height=250, margin=dict(l=0, r=0, t=10, b=30), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'))
-            st.plotly_chart(fig_ocf, use_container_width=True, config={'displayModeBar': False})
+            fig_fcf.update_layout(xaxis_type='category', height=250, margin=dict(l=0, r=0, t=10, b=30), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'))
+            st.plotly_chart(fig_fcf, use_container_width=True, config={'displayModeBar': False})
         else:
             st.info("Operating Cash Flow Data Unavailable")
 
@@ -315,7 +315,7 @@ if ticker_symbol:
                     nm = (valid_inc['NetIncome'] / valid_rev) * 100
                     fig_margin.add_trace(go.Scatter(x=valid_inc['date'], y=nm, mode='lines+markers', name='Net', line=dict(color='#16a34a')))
                 
-                fig_margin.update_layout(height=250, margin=dict(l=0, r=0, t=10, b=30), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+                fig_margin.update_layout(xaxis_type='category', height=250, margin=dict(l=0, r=0, t=10, b=30), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
                 st.plotly_chart(fig_margin, use_container_width=True, config={'displayModeBar': False})
             else:
                 st.info("Margin Data Unavailable")
@@ -327,7 +327,7 @@ if ticker_symbol:
         st.markdown("<p style='color: #A3A8B8; font-weight: 600;'>Total Debt</p>", unsafe_allow_html=True)
         if not bs_df.empty and 'date' in bs_df.columns and 'TotalDebt' in bs_df.columns:
             fig_debt = go.Figure(go.Bar(x=bs_df['date'], y=bs_df['TotalDebt'], marker_color='#dc2626'))
-            fig_debt.update_layout(height=250, margin=dict(l=0, r=0, t=10, b=30), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'))
+            fig_debt.update_layout(xaxis_type='category', height=250, margin=dict(l=0, r=0, t=10, b=30), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'))
             st.plotly_chart(fig_debt, use_container_width=True, config={'displayModeBar': False})
         else:
             st.info("Debt Data Unavailable")
@@ -339,7 +339,7 @@ if ticker_symbol:
         
         if not inc_df.empty and 'date' in inc_df.columns and share_col:
             fig_shares = go.Figure(go.Bar(x=inc_df['date'], y=inc_df[share_col], marker_color='#8b5cf6'))
-            fig_shares.update_layout(height=250, margin=dict(l=0, r=0, t=10, b=30), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'))
+            fig_shares.update_layout(xaxis_type='category', height=250, margin=dict(l=0, r=0, t=10, b=30), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A3A8B8'))
             st.plotly_chart(fig_shares, use_container_width=True, config={'displayModeBar': False})
         else:
             st.info("Share Data Unavailable")
