@@ -17,7 +17,11 @@ app.add_middleware(
 def get_session():
     session = requests.Session()
     session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive'
     })
     return session
 
@@ -54,7 +58,8 @@ def get_stock_data(ticker: str):
         bs = stock.balance_sheet
         
         fin_data = {
-            "years": [], "revenue": [], "net": [], "gross_margin": [], "op_margin": [], "net_margin": [],
+            "years": [], "revenue": [], "operating": [], "net": [], 
+            "gross_margin": [], "op_margin": [], "net_margin": [],
             "fcf": [], "ocf": [], "capex": [], "cash": [], "debt": [], "shares": []
         }
 
@@ -62,7 +67,6 @@ def get_stock_data(ticker: str):
             cols = fin.columns[::-1] # Sort Oldest to Newest
             fin_data["years"] = [str(c.year) for c in cols]
 
-            # Robust fetcher for inconsistent Yahoo Finance row names
             def get_hist(df, row_names):
                 if df is None or df.empty: return [0] * len(cols)
                 if isinstance(row_names, str): row_names = [row_names]
@@ -75,6 +79,10 @@ def get_stock_data(ticker: str):
             net = get_hist(fin, 'Net Income')
             op_inc = get_hist(fin, 'Operating Income')
             gross = get_hist(fin, 'Gross Profit')
+
+            fin_data["revenue"] = rev
+            fin_data["operating"] = op_inc
+            fin_data["net"] = net
 
             # Margin Calculations
             fin_data["op_margin"] = [(o/r*100) if r else 0 for o, r in zip(op_inc, rev)]
