@@ -27,74 +27,75 @@ def health_check():
 
 @app.get("/api/stock/{ticker}")
 def get_stock_data(ticker: str):
-    """Fetches core pricing, DCF inputs, and all historical financial statements."""
     try:
         session = get_session()
         stock = yf.Ticker(ticker.upper(), session=session)
         f_info = stock.fast_info
         
         # 1. Pricing
-        current_price = f_info.last_price
-        prev_close = f_info.previous_close
+        current_price = getattr(f_info, 'last_price', 0)
+        prev_close = getattr(f_info, 'previous_close', 0)
         change = current_price - prev_close
         pct_change = (change / prev_close) * 100 if prev_close else 0
 
-        # 2. DCF Inputs (Latest FCF & Shares)
+        # 2. DCF Core Inputs
         shares = getattr(f_info, 'shares', 0)
         fcf = 0
         cf = stock.cashflow
-        if not cf.empty and 'Operating Cash Flow' in cf.index:
+        if not cf.empty:
             try:
-                ocf = cf.loc['Operating Cash Flow'].dropna().iloc[0]
+                ocf = cf.loc['Operating Cash Flow'].dropna().iloc[0] if 'Operating Cash Flow' in cf.index else 0
                 capex = abs(cf.loc['Capital Expenditure'].dropna().iloc[0]) if 'Capital Expenditure' in cf.index else 0
                 fcf = float(ocf - capex)
             except: pass
 
-        # 3. Full Financial Statement History (For the 6 Charts)
+        # 3. Full Financial Statement Extraction
         fin = stock.financials
         bs = stock.balance_sheet
         
         fin_data = {
-            "years": [], "revenue": [], "net": [], "op_margin": [], "net_margin": [],
-            "fcf": [], "capex": [], "cash": [], "debt": [], "shares": []
+            "years": [], "revenue": [], "net": [], "gross_margin": [], "op_margin": [], "net_margin": [],
+            "fcf": [], "ocf": [], "capex": [], "cash": [], "debt": [], "shares": []
         }
 
         if not fin.empty:
-            cols = fin.columns[:4][::-1] # Last 4 years
+            cols = fin.columns[::-1] # Sort Oldest to Newest
             fin_data["years"] = [str(c.year) for c in cols]
 
-            # Helper function to safely extract rows even if a company is missing them
-            def get_hist(df, row_name):
-                try:
-                    if not df.empty and row_name in df.index:
-                        return [float(df.loc[row_name, c]) if not pd.isna(df.loc[row_name, c]) else 0 for c in cols if c in df.columns]
-                except: pass
+            # Robust fetcher for inconsistent Yahoo Finance row names
+            def get_hist(df, row_names):
+                if df is None or df.empty: return [0] * len(cols)
+                if isinstance(row_names, str): row_names = [row_names]
+                for r in row_names:
+                    if r in df.index:
+                        return [float(df.loc[r, c]) if c in df.columns and not pd.isna(df.loc[r, c]) else 0 for c in cols]
                 return [0] * len(cols)
 
             rev = get_hist(fin, 'Total Revenue')
             net = get_hist(fin, 'Net Income')
             op_inc = get_hist(fin, 'Operating Income')
+            gross = get_hist(fin, 'Gross Profit')
 
-            # Margins
+            # Margin Calculations
             fin_data["op_margin"] = [(o/r*100) if r else 0 for o, r in zip(op_inc, rev)]
             fin_data["net_margin"] = [(n/r*100) if r else 0 for n, r in zip(net, rev)]
+            fin_data["gross_margin"] = [(g/r*100) if r else 0 for g, r in zip(gross, rev)]
 
-            # Cashflow
-            ocf_hist = get_hist(cf, 'Operating Cash Flow')
+            # Cashflow Breakdown
+            ocf_hist = get_hist(cf, ['Operating Cash Flow', 'Total Cash From Operating Activities'])
             capex_hist = get_hist(cf, 'Capital Expenditure')
             capex_abs = [abs(x) for x in capex_hist]
             
-            fin_data["revenue"] = rev
-            fin_data["net"] = net
-            fin_data["fcf"] = [o - c for o, c in zip(ocf_hist, capex_abs)]
+            fin_data["ocf"] = ocf_hist
             fin_data["capex"] = capex_abs
+            fin_data["fcf"] = [o - c for o, c in zip(ocf_hist, capex_abs)]
 
-            # Balance Sheet
-            fin_data["cash"] = get_hist(bs, 'Cash And Cash Equivalents')
+            # Balance Sheet & Shares
+            fin_data["cash"] = get_hist(bs, ['Cash And Cash Equivalents', 'Total Cash'])
             fin_data["debt"] = get_hist(bs, 'Total Debt')
             fin_data["shares"] = get_hist(bs, 'Ordinary Shares Number')
 
-        # 4. Advanced Stats Matrix
+        # 4. Core Stats
         try:
             info = stock.info
             stats = {
@@ -118,13 +119,12 @@ def get_stock_data(ticker: str):
 
 @app.get("/api/chart/{ticker}")
 def get_chart_data(ticker: str, period: str = "1y", interval: str = "1d"):
-    """Fetches dynamic OHLC chart data."""
     try:
         session = get_session()
         stock = yf.Ticker(ticker.upper(), session=session)
         hist = stock.history(period=period, interval=interval)
         if hist.empty: return {"dates": [], "opens": [], "highs": [], "lows": [], "closes": []}
-        if period == "max": hist = hist.loc['2000':] # The Y2K Slicer
+        if period == "max": hist = hist.loc['2000':] 
         return {
             "dates": hist.index.strftime('%Y-%m-%d %H:%M:%S').tolist(),
             "opens": hist['Open'].tolist(), "highs": hist['High'].tolist(),
