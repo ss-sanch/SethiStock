@@ -3,12 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 import yfinance as yf
 import requests
 
-# Initialize the Server
 app = FastAPI(title="SethiStock Data Engine")
 
-# ==========================================
-# --- THE CORS SECURITY SHIELD ---
-# ==========================================
 allowed_origins = [
     "https://sethiway.com",
     "https://sethistock.sethiway.com",
@@ -24,42 +20,59 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ==========================================
-# --- API ENDPOINTS ---
-# ==========================================
-
 @app.get("/")
 def health_check():
     return {"status": "SethiStock API is online and secure."}
 
 @app.get("/api/stock/{ticker}")
 def get_stock_data(ticker: str):
-    """Fetches real-time fast_info data using a stealth browser session."""
+    """Fetches real-time price, 1Y chart history, and DCF cash flow data."""
     try:
-        # 1. The Stealth Disguise (Bypasses Yahoo Cloud Firewall)
         session = requests.Session()
         session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
         })
         
-        # 2. Fetch Data
         stock = yf.Ticker(ticker.upper(), session=session)
         f_info = stock.fast_info
         
-        # 3. Calculate daily change
+        # 1. Core Pricing
         current_price = f_info.last_price
         prev_close = f_info.previous_close
         change = current_price - prev_close
         pct_change = (change / prev_close) * 100 if prev_close else 0
+        
+        # 2. Chart History (1 Year)
+        hist = stock.history(period="1y")
+        dates = hist.index.strftime('%Y-%m-%d').tolist() if not hist.empty else []
+        closes = hist['Close'].tolist() if not hist.empty else []
 
-        # 4. Return the pure data as JSON
+        # 3. DCF Base Data (Shares & Free Cash Flow)
+        try:
+            shares = f_info.shares
+        except Exception:
+            shares = 0
+            
+        fcf = 0
+        cf = stock.cashflow
+        if not cf.empty and 'Operating Cash Flow' in cf.index:
+            try:
+                ocf = cf.loc['Operating Cash Flow'].dropna().iloc[0]
+                capex = abs(cf.loc['Capital Expenditure'].dropna().iloc[0]) if 'Capital Expenditure' in cf.index else 0
+                fcf = float(ocf - capex)
+            except Exception:
+                pass
+
         return {
             "ticker": ticker.upper(),
             "current_price": round(current_price, 2),
             "change": round(change, 2),
             "pct_change": round(pct_change, 2),
-            "market_cap": f_info.market_cap
+            "market_cap": getattr(f_info, 'market_cap', 0),
+            "shares": shares,
+            "fcf": fcf,
+            "chart_dates": dates,
+            "chart_closes": closes
         }
     except Exception as e:
-        # If it fails, print the exact system error instead of hiding it
         raise HTTPException(status_code=500, detail=f"Yahoo Finance Error: {str(e)}")
