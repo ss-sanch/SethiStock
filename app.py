@@ -8,7 +8,7 @@ app = FastAPI(title="SethiStock Data Engine")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Allowing all for seamless testing
+    allow_origins=["*"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -27,7 +27,7 @@ def health_check():
 
 @app.get("/api/stock/{ticker}")
 def get_stock_data(ticker: str):
-    """Fetches core pricing, DCF inputs, and deep Insights/Stats."""
+    """Fetches core pricing, DCF inputs, and all historical financial statements."""
     try:
         session = get_session()
         stock = yf.Ticker(ticker.upper(), session=session)
@@ -39,7 +39,7 @@ def get_stock_data(ticker: str):
         change = current_price - prev_close
         pct_change = (change / prev_close) * 100 if prev_close else 0
 
-        # 2. DCF Inputs
+        # 2. DCF Inputs (Latest FCF & Shares)
         shares = getattr(f_info, 'shares', 0)
         fcf = 0
         cf = stock.cashflow
@@ -50,19 +50,51 @@ def get_stock_data(ticker: str):
                 fcf = float(ocf - capex)
             except: pass
 
-        # 3. Financial Statement History (For Bar Charts)
+        # 3. Full Financial Statement History (For the 6 Charts)
         fin = stock.financials
-        fin_data = {"years": [], "revenue": [], "operating": [], "net": []}
-        if not fin.empty:
-            cols = fin.columns[:4][::-1] # Last 4 years, chronological
-            fin_data["years"] = [str(c.year) for c in cols]
-            def safe_get(row):
-                return [float(fin.loc[row, c]) if row in fin.index and not pd.isna(fin.loc[row, c]) else 0 for c in cols]
-            fin_data["revenue"] = safe_get('Total Revenue')
-            fin_data["operating"] = safe_get('Operating Income')
-            fin_data["net"] = safe_get('Net Income')
+        bs = stock.balance_sheet
+        
+        fin_data = {
+            "years": [], "revenue": [], "net": [], "op_margin": [], "net_margin": [],
+            "fcf": [], "capex": [], "cash": [], "debt": [], "shares": []
+        }
 
-        # 4. Advanced Stats
+        if not fin.empty:
+            cols = fin.columns[:4][::-1] # Last 4 years
+            fin_data["years"] = [str(c.year) for c in cols]
+
+            # Helper function to safely extract rows even if a company is missing them
+            def get_hist(df, row_name):
+                try:
+                    if not df.empty and row_name in df.index:
+                        return [float(df.loc[row_name, c]) if not pd.isna(df.loc[row_name, c]) else 0 for c in cols if c in df.columns]
+                except: pass
+                return [0] * len(cols)
+
+            rev = get_hist(fin, 'Total Revenue')
+            net = get_hist(fin, 'Net Income')
+            op_inc = get_hist(fin, 'Operating Income')
+
+            # Margins
+            fin_data["op_margin"] = [(o/r*100) if r else 0 for o, r in zip(op_inc, rev)]
+            fin_data["net_margin"] = [(n/r*100) if r else 0 for n, r in zip(net, rev)]
+
+            # Cashflow
+            ocf_hist = get_hist(cf, 'Operating Cash Flow')
+            capex_hist = get_hist(cf, 'Capital Expenditure')
+            capex_abs = [abs(x) for x in capex_hist]
+            
+            fin_data["revenue"] = rev
+            fin_data["net"] = net
+            fin_data["fcf"] = [o - c for o, c in zip(ocf_hist, capex_abs)]
+            fin_data["capex"] = capex_abs
+
+            # Balance Sheet
+            fin_data["cash"] = get_hist(bs, 'Cash And Cash Equivalents')
+            fin_data["debt"] = get_hist(bs, 'Total Debt')
+            fin_data["shares"] = get_hist(bs, 'Ordinary Shares Number')
+
+        # 4. Advanced Stats Matrix
         try:
             info = stock.info
             stats = {
@@ -77,40 +109,26 @@ def get_stock_data(ticker: str):
             stats = {"pe": "N/A", "pb": "N/A", "eps": "N/A", "roe": "N/A", "profit_margin": "N/A", "debt_to_eq": "N/A"}
 
         return {
-            "ticker": ticker.upper(),
-            "current_price": round(current_price, 2),
-            "change": round(change, 2),
-            "pct_change": round(pct_change, 2),
-            "market_cap": getattr(f_info, 'market_cap', 0),
-            "shares": shares,
-            "fcf": fcf,
-            "financials": fin_data,
-            "stats": stats
+            "ticker": ticker.upper(), "current_price": round(current_price, 2),
+            "change": round(change, 2), "pct_change": round(pct_change, 2),
+            "shares": shares, "fcf": fcf, "financials": fin_data, "stats": stats
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/chart/{ticker}")
 def get_chart_data(ticker: str, period: str = "1y", interval: str = "1d"):
-    """Fetches dynamic OHLC chart data based on user timeframe selection."""
+    """Fetches dynamic OHLC chart data."""
     try:
         session = get_session()
         stock = yf.Ticker(ticker.upper(), session=session)
         hist = stock.history(period=period, interval=interval)
-        
-        if hist.empty:
-            return {"dates": [], "opens": [], "highs": [], "lows": [], "closes": []}
-            
-        if period == "max":
-            hist = hist.loc['2000':] # The Y2K Guillotine
-
-        dates = hist.index.strftime('%Y-%m-%d %H:%M:%S').tolist()
+        if hist.empty: return {"dates": [], "opens": [], "highs": [], "lows": [], "closes": []}
+        if period == "max": hist = hist.loc['2000':] # The Y2K Slicer
         return {
-            "dates": dates,
-            "opens": hist['Open'].tolist(),
-            "highs": hist['High'].tolist(),
-            "lows": hist['Low'].tolist(),
-            "closes": hist['Close'].tolist()
+            "dates": hist.index.strftime('%Y-%m-%d %H:%M:%S').tolist(),
+            "opens": hist['Open'].tolist(), "highs": hist['High'].tolist(),
+            "lows": hist['Low'].tolist(), "closes": hist['Close'].tolist()
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
