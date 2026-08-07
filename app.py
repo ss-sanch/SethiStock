@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import yfinance as yf
 import requests
 import pandas as pd
+import re
 
 app = FastAPI(title="SethiStock Data Engine")
 
@@ -52,7 +53,6 @@ def get_stock_data(ticker: str):
             "fcf": [], "ocf": [], "capex": [], "cash": [], "debt": [], "shares": []
         }
 
-        # The Ironclad Exact Matcher (Solves the Revenue Bug)
         def get_hist(df, possible_names):
             if df is None or df.empty: return []
             if isinstance(possible_names, str): possible_names = [possible_names]
@@ -81,12 +81,10 @@ def get_stock_data(ticker: str):
             fin_data["operating"] = op_inc if op_inc else [0]*len(cols)
             fin_data["net"] = net if net else [0]*len(cols)
 
-            # Margins
             fin_data["op_margin"] = [(o/r*100) if r else 0 for o, r in zip(fin_data["operating"], fin_data["revenue"])]
             fin_data["net_margin"] = [(n/r*100) if r else 0 for n, r in zip(fin_data["net"], fin_data["revenue"])]
             fin_data["gross_margin"] = [(g/r*100) if r else 0 for g, r in zip(gross, fin_data["revenue"])] if gross else [0]*len(cols)
 
-            # Cashflow
             ocf_hist = get_hist(cf, ['Operating Cash Flow', 'Total Cash From Operating Activities'])
             capex_hist = get_hist(cf, ['Capital Expenditure', 'CapEx'])
             capex_abs = [abs(x) for x in capex_hist] if capex_hist else [0]*len(cols)
@@ -95,12 +93,10 @@ def get_stock_data(ticker: str):
             fin_data["capex"] = capex_abs
             fin_data["fcf"] = [o - c for o, c in zip(fin_data["ocf"], capex_abs)]
 
-            # Balance Sheet
             fin_data["cash"] = get_hist(bs, ['Cash And Cash Equivalents', 'Total Cash'])
             fin_data["debt"] = get_hist(bs, ['Total Debt', 'Long Term Debt'])
             fin_data["shares"] = get_hist(bs, ['Ordinary Shares Number', 'Common Stock', 'Basic Average Shares'])
 
-            # Fallback
             for k, v in fin_data.items():
                 if not v: fin_data[k] = [0] * len(cols)
         
@@ -118,10 +114,10 @@ def get_stock_data(ticker: str):
             fcf_yield = (latest_fcf / mkt_cap * 100) if mkt_cap and latest_fcf else "N/A"
             if fcf_yield != "N/A": fcf_yield = f"{round(fcf_yield, 2)}%"
 
-            # Fixed Dividend Logic
+            # FIX: Removed the * 100 multiplier entirely. Now dynamically formatting raw return.
             div_yield_raw = info.get("dividendYield")
             if div_yield_raw is not None:
-                div_yield = f"{round(div_yield_raw * 100, 2)}%"
+                div_yield = f"{round(div_yield_raw, 2)}%"
             else:
                 div_yield = "N/A"
 
