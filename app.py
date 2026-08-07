@@ -3,7 +3,6 @@ from fastapi.middleware.cors import CORSMiddleware
 import yfinance as yf
 import requests
 import pandas as pd
-import re
 
 app = FastAPI(title="SethiStock Data Engine")
 
@@ -19,10 +18,7 @@ def get_session():
     session = requests.Session()
     session.headers.update({
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Connection': 'keep-alive'
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
     })
     return session
 
@@ -45,7 +41,7 @@ def get_stock_data(ticker: str):
         mkt_cap = getattr(f_info, 'market_cap', 0)
         shares = getattr(f_info, 'shares', 0)
 
-        # 2. Aggressive Financial Statement Extraction
+        # 2. Strict Financial Statement Extraction
         fin = stock.financials
         cf = stock.cashflow
         bs = stock.balance_sheet
@@ -56,24 +52,28 @@ def get_stock_data(ticker: str):
             "fcf": [], "ocf": [], "capex": [], "cash": [], "debt": [], "shares": []
         }
 
-        def get_hist(df, patterns):
+        # The Ironclad Exact Matcher (Solves the Revenue Bug)
+        def get_hist(df, possible_names):
             if df is None or df.empty: return []
-            if not isinstance(patterns, list): patterns = [patterns]
-            for index_label in df.index:
-                for pattern in patterns:
-                    if re.search(pattern, str(index_label), re.IGNORECASE):
-                        try:
-                            extracted = [float(df.loc[index_label, c]) if not pd.isna(df.loc[index_label, c]) else 0 for c in cols]
-                            if any(extracted): return extracted
-                        except: pass
+            if isinstance(possible_names, str): possible_names = [possible_names]
+            
+            idx_map = {str(k).strip().lower(): k for k in df.index}
+            for name in possible_names:
+                clean_name = name.strip().lower()
+                if clean_name in idx_map:
+                    orig_idx = idx_map[clean_name]
+                    try:
+                        extracted = [float(df.loc[orig_idx, c]) if not pd.isna(df.loc[orig_idx, c]) else 0 for c in cols]
+                        if any(extracted): return extracted
+                    except: pass
             return [0] * len(cols)
 
         if not fin.empty:
             cols = fin.columns[::-1] # Sort Oldest to Newest
             fin_data["years"] = [str(c.year) for c in cols]
 
-            rev = get_hist(fin, ['Total Revenue', 'Operating Revenue', 'Revenue'])
-            net = get_hist(fin, ['Net Income', 'Net Profit'])
+            rev = get_hist(fin, ['Total Revenue', 'Operating Revenue'])
+            net = get_hist(fin, ['Net Income', 'Net Income Common Stockholders', 'Net Profit'])
             op_inc = get_hist(fin, ['Operating Income', 'Operating Profit'])
             gross = get_hist(fin, ['Gross Profit'])
 
@@ -81,11 +81,13 @@ def get_stock_data(ticker: str):
             fin_data["operating"] = op_inc if op_inc else [0]*len(cols)
             fin_data["net"] = net if net else [0]*len(cols)
 
+            # Margins
             fin_data["op_margin"] = [(o/r*100) if r else 0 for o, r in zip(fin_data["operating"], fin_data["revenue"])]
             fin_data["net_margin"] = [(n/r*100) if r else 0 for n, r in zip(fin_data["net"], fin_data["revenue"])]
             fin_data["gross_margin"] = [(g/r*100) if r else 0 for g, r in zip(gross, fin_data["revenue"])] if gross else [0]*len(cols)
 
-            ocf_hist = get_hist(cf, ['Operating Cash Flow', 'Cash From Operating', 'Operating Activities'])
+            # Cashflow
+            ocf_hist = get_hist(cf, ['Operating Cash Flow', 'Total Cash From Operating Activities'])
             capex_hist = get_hist(cf, ['Capital Expenditure', 'CapEx'])
             capex_abs = [abs(x) for x in capex_hist] if capex_hist else [0]*len(cols)
             
@@ -93,16 +95,18 @@ def get_stock_data(ticker: str):
             fin_data["capex"] = capex_abs
             fin_data["fcf"] = [o - c for o, c in zip(fin_data["ocf"], capex_abs)]
 
-            fin_data["cash"] = get_hist(bs, ['Cash And Cash Equivalents', 'Total Cash', 'Cash'])
+            # Balance Sheet
+            fin_data["cash"] = get_hist(bs, ['Cash And Cash Equivalents', 'Total Cash'])
             fin_data["debt"] = get_hist(bs, ['Total Debt', 'Long Term Debt'])
-            fin_data["shares"] = get_hist(bs, ['Ordinary Shares', 'Common Stock', 'Share Issued'])
+            fin_data["shares"] = get_hist(bs, ['Ordinary Shares Number', 'Common Stock', 'Basic Average Shares'])
 
+            # Fallback
             for k, v in fin_data.items():
                 if not v: fin_data[k] = [0] * len(cols)
         
         latest_fcf = fin_data["fcf"][-1] if fin_data["fcf"] and fin_data["fcf"][-1] != 0 else 0
 
-        # 4. Advanced Stats (Fixed Dividend Yield)
+        # 4. Advanced Stats
         try:
             info = stock.info
             def format_mkt_cap(val):
@@ -114,12 +118,10 @@ def get_stock_data(ticker: str):
             fcf_yield = (latest_fcf / mkt_cap * 100) if mkt_cap and latest_fcf else "N/A"
             if fcf_yield != "N/A": fcf_yield = f"{round(fcf_yield, 2)}%"
 
-            # Fixed Dividend logic to prevent 50%+ errors
-            div_yield = info.get("dividendYield", 0)
-            if div_yield:
-                # If yahoo sends 0.0053, multiply by 100 to get 0.53%. If it somehow sends 0.53, leave it.
-                if div_yield < 1: div_yield = div_yield * 100 
-                div_yield = f"{round(div_yield, 2)}%"
+            # Fixed Dividend Logic
+            div_yield_raw = info.get("dividendYield")
+            if div_yield_raw is not None:
+                div_yield = f"{round(div_yield_raw * 100, 2)}%"
             else:
                 div_yield = "N/A"
 
