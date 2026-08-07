@@ -11,46 +11,32 @@ st.set_page_config(page_title="SethiStock", layout="wide", initial_sidebar_state
 # --- CUSTOM CSS FOR DYNAMIC UI POLISH ---
 st.markdown("""
 <style>
+    /* 1. Vaporize the Streamlit padding to make it flush */
     .block-container {
-        padding-top: 2rem;
-        margin-top: 0rem;
+        padding-top: 1rem !important;
+        padding-bottom: 0rem !important;
+        padding-left: 1rem !important;
+        padding-right: 1rem !important;
+        max-width: 100% !important;
     }
-    header {background-color: transparent !important;}
+    
+    /* 2. Nuke the Streamlit Header and Footer */
+    header {visibility: hidden;}
+    footer {visibility: hidden;}
+    
+    /* 3. Hide the Deploy Button & Main Menu */
     #MainMenu {visibility: hidden;}
     .stDeployButton {display: none;}
     [data-testid="stHeaderActionElements"] {display: none;}
     
+    /* Your existing premium card styling */
     [data-testid="stMetric"], [data-testid="stPlotlyChart"] {
         background-color: rgba(128, 128, 128, 0.05);
-        padding: 5px; /* Executive requested tight padding */
+        padding: 5px; 
         border-radius: 12px;
         box-shadow: 0px 4px 6px rgba(0,0,0,0.05);
         border: 1px solid rgba(128, 128, 128, 0.1);
         box-sizing: border-box !important;
-        overflow: hidden !important;
-    }
-    a.nav-pill {
-        text-decoration: none;
-        padding: 8px 18px;
-        background-color: rgba(128, 128, 128, 0.08);
-        border-radius: 20px;
-        color: inherit;
-        font-size: 0.95rem;
-        font-weight: 600;
-        border: 1px solid rgba(128, 128, 128, 0.2);
-        transition: all 0.2s ease;
-    }
-    a.nav-pill:hover {
-        background-color: rgba(128, 128, 128, 0.18);
-        border-color: rgba(128, 128, 128, 0.4);
-    }
-    .nav-container {
-        display: flex;
-        justify-content: center;
-        gap: 15px;
-        margin-bottom: 20px;
-    }
-    [data-testid="stPlotlyChart"] > div, [data-testid="stPlotlyChart"] iframe {
         overflow: hidden !important;
     }
     a.nav-pill {
