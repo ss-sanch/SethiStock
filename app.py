@@ -56,18 +56,14 @@ def get_stock_data(ticker: str):
             "fcf": [], "ocf": [], "capex": [], "cash": [], "debt": [], "shares": []
         }
 
-        # The Ironclad Regex Fetcher
         def get_hist(df, patterns):
             if df is None or df.empty: return []
             if not isinstance(patterns, list): patterns = [patterns]
-            
             for index_label in df.index:
                 for pattern in patterns:
                     if re.search(pattern, str(index_label), re.IGNORECASE):
-                        # Found a match, extract data for the available columns
                         try:
                             extracted = [float(df.loc[index_label, c]) if not pd.isna(df.loc[index_label, c]) else 0 for c in cols]
-                            # If it's all zeros, keep looking for a better match
                             if any(extracted): return extracted
                         except: pass
             return [0] * len(cols)
@@ -85,12 +81,10 @@ def get_stock_data(ticker: str):
             fin_data["operating"] = op_inc if op_inc else [0]*len(cols)
             fin_data["net"] = net if net else [0]*len(cols)
 
-            # Margins
             fin_data["op_margin"] = [(o/r*100) if r else 0 for o, r in zip(fin_data["operating"], fin_data["revenue"])]
             fin_data["net_margin"] = [(n/r*100) if r else 0 for n, r in zip(fin_data["net"], fin_data["revenue"])]
             fin_data["gross_margin"] = [(g/r*100) if r else 0 for g, r in zip(gross, fin_data["revenue"])] if gross else [0]*len(cols)
 
-            # Cashflow Breakdown
             ocf_hist = get_hist(cf, ['Operating Cash Flow', 'Cash From Operating', 'Operating Activities'])
             capex_hist = get_hist(cf, ['Capital Expenditure', 'CapEx'])
             capex_abs = [abs(x) for x in capex_hist] if capex_hist else [0]*len(cols)
@@ -99,36 +93,35 @@ def get_stock_data(ticker: str):
             fin_data["capex"] = capex_abs
             fin_data["fcf"] = [o - c for o, c in zip(fin_data["ocf"], capex_abs)]
 
-            # Balance Sheet & Shares
             fin_data["cash"] = get_hist(bs, ['Cash And Cash Equivalents', 'Total Cash', 'Cash'])
             fin_data["debt"] = get_hist(bs, ['Total Debt', 'Long Term Debt'])
             fin_data["shares"] = get_hist(bs, ['Ordinary Shares', 'Common Stock', 'Share Issued'])
 
-            # Fallback for empty results
             for k, v in fin_data.items():
                 if not v: fin_data[k] = [0] * len(cols)
         
-        # Determine Latest FCF for DCF
         latest_fcf = fin_data["fcf"][-1] if fin_data["fcf"] and fin_data["fcf"][-1] != 0 else 0
 
-        # 4. Advanced Stats (New Elite Metrics)
+        # 4. Advanced Stats (Fixed Dividend Yield)
         try:
             info = stock.info
-            
-            # Format Market Cap
             def format_mkt_cap(val):
                 if val >= 1e12: return f"${val/1e12:.2f}T"
                 if val >= 1e9: return f"${val/1e9:.2f}B"
                 if val >= 1e6: return f"${val/1e6:.2f}M"
                 return f"${val:,.0f}"
 
-            # FCF Yield calculation
             fcf_yield = (latest_fcf / mkt_cap * 100) if mkt_cap and latest_fcf else "N/A"
             if fcf_yield != "N/A": fcf_yield = f"{round(fcf_yield, 2)}%"
 
-            # Dividend Yield
+            # Fixed Dividend logic to prevent 50%+ errors
             div_yield = info.get("dividendYield", 0)
-            div_yield = f"{round(div_yield * 100, 2)}%" if div_yield else "N/A"
+            if div_yield:
+                # If yahoo sends 0.0053, multiply by 100 to get 0.53%. If it somehow sends 0.53, leave it.
+                if div_yield < 1: div_yield = div_yield * 100 
+                div_yield = f"{round(div_yield, 2)}%"
+            else:
+                div_yield = "N/A"
 
             stats = {
                 "pe": round(info.get("trailingPE", 0), 2) if info.get("trailingPE") else "N/A",
