@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import yfinance as yf
+import requests
 
 # Initialize the Server
 app = FastAPI(title="SethiStock Data Engine")
@@ -8,11 +9,10 @@ app = FastAPI(title="SethiStock Data Engine")
 # ==========================================
 # --- THE CORS SECURITY SHIELD ---
 # ==========================================
-# This ensures ONLY your custom domains can talk to this server.
 allowed_origins = [
     "https://sethiway.com",
     "https://sethistock.sethiway.com",
-    "http://localhost:5500", # For local testing
+    "http://localhost:5500", 
     "http://127.0.0.1:5500"
 ]
 
@@ -34,18 +34,25 @@ def health_check():
 
 @app.get("/api/stock/{ticker}")
 def get_stock_data(ticker: str):
-    """Fetches real-time fast_info data for the requested ticker."""
+    """Fetches real-time fast_info data using a stealth browser session."""
     try:
-        stock = yf.Ticker(ticker.upper())
+        # 1. The Stealth Disguise (Bypasses Yahoo Cloud Firewall)
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
+        })
+        
+        # 2. Fetch Data
+        stock = yf.Ticker(ticker.upper(), session=session)
         f_info = stock.fast_info
         
-        # Calculate daily change
+        # 3. Calculate daily change
         current_price = f_info.last_price
         prev_close = f_info.previous_close
         change = current_price - prev_close
         pct_change = (change / prev_close) * 100 if prev_close else 0
 
-        # Return the pure data as JSON
+        # 4. Return the pure data as JSON
         return {
             "ticker": ticker.upper(),
             "current_price": round(current_price, 2),
@@ -54,4 +61,5 @@ def get_stock_data(ticker: str):
             "market_cap": f_info.market_cap
         }
     except Exception as e:
-        raise HTTPException(status_code=404, detail="Ticker data not found or rate limited.")
+        # If it fails, print the exact system error instead of hiding it
+        raise HTTPException(status_code=500, detail=f"Yahoo Finance Error: {str(e)}")
