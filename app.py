@@ -10,7 +10,7 @@ app = FastAPI(title="SethiStock Data Engine")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], 
-    allow_credentials=False, # Securely False
+    allow_credentials=False, 
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -113,30 +113,21 @@ def get_stock_data(ticker: str):
             fcf_yield_raw = (latest_fcf / mkt_cap) if mkt_cap and latest_fcf else None
             fcf_yield = f"{round(fcf_yield_raw * 100, 2)}%" if fcf_yield_raw else "N/A"
 
+            # FIXED DIVIDEND YIELD (Removed the * 100 multiplier)
             div_yield_raw = info.get("dividendYield")
-            div_yield = f"{round(div_yield_raw * 100, 2)}%" if div_yield_raw is not None else "N/A"
+            div_yield = f"{round(div_yield_raw, 2)}%" if div_yield_raw is not None else "N/A"
 
-            # --- ALGORITHMIC SETHI SCORE (Out of 100) ---
+            # --- ALGORITHMIC SETHI SCORE ---
             score = 0
-            # 1. Positive Net Income (10 pts)
             if fin_data["net"] and fin_data["net"][-1] > 0: score += 10
-            # 2. Revenue Growth (10 pts)
             if len(fin_data["revenue"]) >= 2 and fin_data["revenue"][-1] > fin_data["revenue"][-2]: score += 10
-            # 3. Positive Free Cash Flow (10 pts)
             if latest_fcf > 0: score += 10
-            # 4. ROE > 15% (10 pts)
             if info.get("returnOnEquity") and info.get("returnOnEquity") > 0.15: score += 10
-            # 5. Net Margin > 10% (10 pts)
             if info.get("profitMargins") and info.get("profitMargins") > 0.10: score += 10
-            # 6. Debt/Equity < 1.0 (10 pts)
-            if info.get("debtToEquity") and info.get("debtToEquity") < 100: score += 10 # Yahoo returns 100 for 1.0
-            # 7. FCF Yield > 5% (10 pts)
+            if info.get("debtToEquity") and info.get("debtToEquity") < 100: score += 10
             if fcf_yield_raw and fcf_yield_raw > 0.05: score += 10
-            # 8. P/E < 25 (10 pts)
             if info.get("trailingPE") and 0 < info.get("trailingPE") < 25: score += 10
-            # 9. P/B < 5 (10 pts)
             if info.get("priceToBook") and 0 < info.get("priceToBook") < 5: score += 10
-            # 10. Pays a Dividend (10 pts)
             if div_yield_raw and div_yield_raw > 0: score += 10
 
             stats = {
