@@ -3,6 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 import yfinance as yf
 import requests
 import pandas as pd
+import os
+import google.generativeai as genai
 
 app = FastAPI(title="SethiStock Data Engine")
 
