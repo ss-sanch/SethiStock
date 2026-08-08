@@ -205,15 +205,23 @@ def get_stock_data(raw_ticker: str):
         news_text_for_ai = ""
 
         if raw_news:
-            for article in raw_news[:4]:
-                # Bulletproof parsing for Yahoo's changing API
-                title = article.get("title") or article.get("content", {}).get("title", "No Title")
-                publisher = article.get("publisher") or article.get("content", {}).get("provider", {}).get("displayName", "Unknown")
-                link = article.get("link") or article.get("content", {}).get("canonicalUrl", "#")
-
-                if title != "No Title":
-                    news_list.append({"title": title, "publisher": publisher, "link": link})
-                    news_text_for_ai += f"- {title}\n"
+            for article in raw_news[:3]:
+                # 1. robust content extraction
+                content = article.get('content', article)
+                title = content.get("title", article.get("title", "No Title"))
+                publisher = content.get("provider", {}).get("displayName", article.get("publisher", "Unknown"))
+                
+                # 2. robust link extraction
+                link = "#"
+                if "clickThroughUrl" in content and "url" in content["clickThroughUrl"]:
+                    link = content["clickThroughUrl"]["url"]
+                elif "link" in article:
+                    link = article["link"]
+                elif "url" in article:
+                    link = article["url"]
+                
+                news_list.append({"title": title, "publisher": publisher, "link": link})
+                news_context += f"- {title}\n"
 
         # The AI "Why Is It Moving?" Engine
         ai_summary = "AI Summarizer not configured or no news available."
