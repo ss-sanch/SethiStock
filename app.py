@@ -202,6 +202,23 @@ def get_stock_data(raw_ticker: str):
                 "fiftyTwoWeekHigh": fiftyTwoWeekHigh,
                 "fiftyTwoWeekLow": fiftyTwoWeekLow
             }
+
+            # --- NEW: Company Profile & Latest News Intel ---
+            raw_summary = info.get("longBusinessSummary", "Company profile not currently available.")
+            # Extract just the first 2-3 sentences for a punchy summary
+            sentences = raw_summary.split('. ')
+            short_summary = '. '.join(sentences[:3]) + '.' if len(sentences) > 2 else raw_summary
+
+            raw_news = stock.news
+            news_list = []
+            if raw_news:
+                for article in raw_news[:3]: # Grab the 3 latest articles/earnings reports
+                    news_list.append({
+                        "title": article.get("title", "No Title"),
+                        "publisher": article.get("publisher", "Unknown"),
+                        "link": article.get("link", "#")
+                    })
+                    
         except:
             stats = {"pe": "N/A", "pb": "N/A", "eps": "N/A", "ev_ebitda": "N/A", "mkt_cap": "N/A", "fcf_yield": "N/A", "div_yield": "N/A", "sethi_score": 0, "book_value": 0, "fiftyTwoWeekHigh": current_price*1.2, "fiftyTwoWeekLow": current_price*0.8}
 
@@ -230,6 +247,7 @@ def get_stock_data(raw_ticker: str):
             "change": round(change, 2), "pct_change": round(pct_change, 2),
             "shares": shares, "fcf": latest_fcf, "financials": fin_data, "stats": stats,
             "insiders": insider_list, "peers": peers
+            "summary": short_summary, "news": news_list
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
