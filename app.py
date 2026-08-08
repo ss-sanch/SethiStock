@@ -200,47 +200,32 @@ def get_stock_data(raw_ticker: str):
         sentences = raw_summary.split('. ')
         short_summary = '. '.join(sentences[:3]) + '.' if len(sentences) > 2 else raw_summary
 
+        # --- NEWS PARSER & AI SUMMARY ---
         raw_news = stock.news
-        news_list = []
-        news_text_for_ai = ""
-
+        news_context = "" 
+        
         if raw_news:
             for article in raw_news[:3]:
-                # 1. robust content extraction
                 content = article.get('content', article)
                 title = content.get("title", article.get("title", "No Title"))
-                publisher = content.get("provider", {}).get("displayName", article.get("publisher", "Unknown"))
-                
-                # 2. robust link extraction
-                link = "#"
-                if "clickThroughUrl" in content and "url" in content["clickThroughUrl"]:
-                    link = content["clickThroughUrl"]["url"]
-                elif "link" in article:
-                    link = article["link"]
-                elif "url" in article:
-                    link = article["url"]
-                
-                news_list.append({"title": title, "publisher": publisher, "link": link})
                 news_context += f"- {title}\n"
-
-        # The AI "Why Is It Moving?" Engine
-        ai_summary = "AI Summarizer not configured or no news available."
-        GEMINI_API_KEY = os.environ.get("GOOGLE_API_KEY")
+                
+        ai_summary = "AI analysis temporarily unavailable."
         
-        if GEMINI_API_KEY and news_text_for_ai:
+        if news_context.strip():
             try:
-                genai.configure(api_key=GEMINI_API_KEY)
-                model = genai.GenerativeModel('gemini-3.5-flash')
                 prompt = (
                     f"You are an expert financial analyst. Review the following recent news headlines for {ticker.upper()}: \n"
                     f"{news_context}\n"
                     f"Write a single, highly insightful paragraph analyzing what these developments mean for the company's current market position. "
-                    f"Do not just list the titles. Synthesize the information to explain the broader narrative and why the stock might be moving. Keep the tone professional and objective."
+                    f"Do not list the titles. Synthesize the information to explain the broader narrative and why the stock might be moving. Keep the tone professional and objective."
                 )
                 response = model.generate_content(prompt)
-                ai_summary = response.text.strip()
+                ai_summary = response.text.replace('\n', ' ').strip()
             except Exception as e:
-                ai_summary = "AI synthesis currently unavailable."
+                ai_summary = "Not enough data to generate an AI insight today."
+        else:
+            ai_summary = "No recent news available to generate an analysis."
 
         industry = info.get('industry', 'Unknown') if 'info' in locals() else 'Unknown'
 
