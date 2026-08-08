@@ -222,8 +222,13 @@ def get_stock_data(raw_ticker: str):
         if GEMINI_API_KEY and news_text_for_ai:
             try:
                 genai.configure(api_key=GEMINI_API_KEY)
-                model = genai.GenerativeModel('gemini-1.5-flash')
-                prompt = f"You are an expert Wall Street analyst. Read these recent news headlines for {ticker}:\n{news_text_for_ai}\nWrite a punchy, 2-sentence summary explaining why the stock might be moving today based on this news. Do not use asterisks or formatting."
+                model = genai.GenerativeModel('gemini-3.5-flash')
+                prompt = (
+                    f"You are an expert financial analyst. Review the following recent news headlines for {ticker.upper()}: \n"
+                    f"{news_context}\n"
+                    f"Write a single, highly insightful paragraph analyzing what these developments mean for the company's current market position. "
+                    f"Do not just list the titles. Synthesize the information to explain the broader narrative and why the stock might be moving. Keep the tone professional and objective."
+                )
                 response = model.generate_content(prompt)
                 ai_summary = response.text.strip()
             except Exception as e:
