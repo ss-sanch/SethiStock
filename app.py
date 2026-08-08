@@ -23,19 +23,38 @@ def get_session():
     })
     return session
 
+# UPDATED: Smart Search Ticker Resolution 
+def resolve_ticker(query: str):
+    query = query.strip()
+    try:
+        session = get_session()
+        # Hit Yahoo Finance's native search API to map names like 'Apple' to 'AAPL'
+        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={query}&quotesCount=1&newsCount=0"
+        res = session.get(url)
+        if res.status_code == 200:
+            data = res.json()
+            if 'quotes' in data and len(data['quotes']) > 0:
+                return data['quotes'][0]['symbol']
+    except Exception:
+        pass
+    return query.upper()
+
 @app.get("/")
 def health_check():
     return {"status": "SethiStock API is online."}
 
 
-@app.get("/api/stock/{ticker}")
-def get_stock_data(ticker: str):
+@app.get("/api/stock/{raw_ticker}")
+def get_stock_data(raw_ticker: str):
     try:
+        # 1. Intercept and Resolve Ticker
+        ticker = resolve_ticker(raw_ticker)
+        
         session = get_session()
-        stock = yf.Ticker(ticker.upper(), session=session)
+        stock = yf.Ticker(ticker, session=session)
         f_info = stock.fast_info
         
-        # 1. Core Pricing
+        # 2. Core Pricing
         current_price = getattr(f_info, 'last_price', 0)
         prev_close = getattr(f_info, 'previous_close', 0)
         change = current_price - prev_close
@@ -43,7 +62,7 @@ def get_stock_data(ticker: str):
         mkt_cap = getattr(f_info, 'market_cap', 0)
         shares = getattr(f_info, 'shares', 0)
 
-        # 2. Strict Financial Statement Extraction
+        # 3. Strict Financial Statement Extraction
         fin = stock.financials
         cf = stock.cashflow
         bs = stock.balance_sheet
@@ -101,7 +120,7 @@ def get_stock_data(ticker: str):
         
         latest_fcf = fin_data["fcf"][-1] if fin_data["fcf"] and fin_data["fcf"][-1] != 0 else 0
 
-        # 3. Secure SEC Insider Trading Extraction with Dynamic Action Regex
+        # 4. Secure SEC Insider Trading Extraction
         insider_list = []
         try:
             ins_df = stock.insider_transactions
@@ -115,24 +134,15 @@ def get_stock_data(ticker: str):
                 val_col = next((c for c in ins_df.columns if 'value' in str(c).lower()), None)
 
                 for _, row in ins_df.head(15).iterrows():
-                    
-                    # Target 'Text', 'Transaction Text' or 'Acquisition or Disposition'
                     raw_action = str(row.get('Text', row.get('Transaction Text', row.get('Acquisition or Disposition', row.get('Transaction', ''))))).lower()
-                    
-                    # Fallback string hunt across all columns if still empty
                     if not raw_action or raw_action == 'nan':
                         trans_col = next((c for c in ins_df.columns if 'text' in str(c).lower() or 'action' in str(c).lower() or 'transaction' in str(c).lower()), None)
                         if trans_col: raw_action = str(row[trans_col]).lower()
 
-                    # The Ironclad Parser
-                    if 'buy' in raw_action or 'purchase' in raw_action or raw_action.strip() == 'a':
-                        action = 'Buy'
-                    elif 'sell' in raw_action or 'sale' in raw_action or raw_action.strip() == 'd':
-                        action = 'Sell'
-                    elif 'grant' in raw_action or 'award' in raw_action or 'option' in raw_action:
-                        action = 'Grant'
-                    else:
-                        action = 'Execute/Other'
+                    if 'buy' in raw_action or 'purchase' in raw_action or raw_action.strip() == 'a': action = 'Buy'
+                    elif 'sell' in raw_action or 'sale' in raw_action or raw_action.strip() == 'd': action = 'Sell'
+                    elif 'grant' in raw_action or 'award' in raw_action or 'option' in raw_action: action = 'Grant'
+                    else: action = 'Execute/Other'
 
                     insider_list.append({
                         "name": str(row[name_col]) if name_col else "Executive",
@@ -144,7 +154,7 @@ def get_stock_data(ticker: str):
         except Exception:
             pass
 
-        # 4. Advanced Stats & Valuation Frameworks
+        # 5. Advanced Stats & Valuation Frameworks
         try:
             info = stock.info
             def format_mkt_cap(val):
@@ -156,8 +166,9 @@ def get_stock_data(ticker: str):
             fcf_yield_raw = (latest_fcf / mkt_cap) if mkt_cap and latest_fcf else None
             fcf_yield = f"{round(fcf_yield_raw * 100, 2)}%" if fcf_yield_raw else "N/A"
 
+            # UPDATED: Dividend Yield divided by 100 
             div_yield_raw = info.get("dividendYield")
-            div_yield = f"{round(div_yield_raw * 100, 2)}%" if div_yield_raw is not None else "N/A"
+            div_yield = f"{round(div_yield_raw, 2)}%" if div_yield_raw is not None else "N/A"
             
             book_value = info.get("bookValue")
             if not book_value and info.get("priceToBook") and current_price:
@@ -194,7 +205,7 @@ def get_stock_data(ticker: str):
         except:
             stats = {"pe": "N/A", "pb": "N/A", "eps": "N/A", "ev_ebitda": "N/A", "mkt_cap": "N/A", "fcf_yield": "N/A", "div_yield": "N/A", "sethi_score": 0, "book_value": 0, "fiftyTwoWeekHigh": current_price*1.2, "fiftyTwoWeekLow": current_price*0.8}
 
-        # 5. Dynamic Peer Mapping Matrix
+        # 6. Dynamic Peer Mapping Matrix
         industry = info.get('industry', 'Unknown') if 'info' in locals() else 'Unknown'
         
         industry_map = {
@@ -212,8 +223,6 @@ def get_stock_data(ticker: str):
         }
         
         candidate_peers = industry_map.get(industry, ['SPY', 'QQQ', 'DIA'])
-        
-        # Ensure the searched ticker does not compare against itself
         peers = [p for p in candidate_peers if p.upper() != ticker.upper()][:3]
 
         return {
@@ -225,9 +234,10 @@ def get_stock_data(ticker: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/chart/{ticker}")
-def get_chart_data(ticker: str, period: str = "1y", interval: str = "1d"):
+@app.get("/api/chart/{raw_ticker}")
+def get_chart_data(raw_ticker: str, period: str = "1y", interval: str = "1d"):
     try:
+        ticker = resolve_ticker(raw_ticker)
         session = get_session()
         stock = yf.Ticker(ticker.upper(), session=session)
         hist = stock.history(period=period, interval=interval)
