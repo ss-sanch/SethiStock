@@ -27,20 +27,6 @@ def get_session():
 def health_check():
     return {"status": "SethiStock API is online."}
 
-# The Peer Benchmarking Map
-PEER_MAP = {
-    "AAPL": ["MSFT", "GOOGL", "META"], "MSFT": ["AAPL", "GOOGL", "AMZN"],
-    "GOOGL": ["MSFT", "META", "AMZN"], "GOOG": ["MSFT", "META", "AMZN"],
-    "AMZN": ["MSFT", "WMT", "AAPL"], "META": ["GOOGL", "SNAP", "PINS"],
-    "TSLA": ["F", "GM", "TM"], "NVDA": ["AMD", "INTC", "TSM"],
-    "AMD": ["NVDA", "INTC", "QCOM"], "JPM": ["BAC", "WFC", "C"],
-    "V": ["MA", "AXP", "JPM"], "MA": ["V", "AXP", "JPM"],
-    "WMT": ["TGT", "COST", "AMZN"], "JNJ": ["PFE", "UNH", "PG"],
-    "PG": ["JNJ", "KO", "UL"], "KO": ["PEP", "KDP", "MNST"],
-    "PEP": ["KO", "KDP", "MNST"], "XOM": ["CVX", "SHEL", "COP"],
-    "CVX": ["XOM", "COP", "BP"], "BAC": ["C", "WFC", "JPM"],
-    "NFLX": ["DIS", "WBD", "PARA"], "DIS": ["NFLX", "WBD", "CMCSA"]
-}
 
 @app.get("/api/stock/{ticker}")
 def get_stock_data(ticker: str):
@@ -115,25 +101,43 @@ def get_stock_data(ticker: str):
         
         latest_fcf = fin_data["fcf"][-1] if fin_data["fcf"] and fin_data["fcf"][-1] != 0 else 0
 
-        # 3. Secure SEC Insider Trading Extraction
+        # 3. Secure SEC Insider Trading Extraction with Dynamic Action Regex
         insider_list = []
         try:
             ins_df = stock.insider_transactions
             if ins_df is not None and not ins_df.empty:
                 ins_df = ins_df.reset_index()
-                col_names = [str(c).lower() for c in ins_df.columns]
+                ins_df.columns = [str(c).strip() for c in ins_df.columns]
                 
                 name_col = next((c for c in ins_df.columns if 'insider' in str(c).lower() or 'name' in str(c).lower()), None)
                 pos_col = next((c for c in ins_df.columns if 'position' in str(c).lower() or 'title' in str(c).lower()), None)
-                trans_col = next((c for c in ins_df.columns if 'transaction' in str(c).lower() or 'action' in str(c).lower()), None)
                 shares_col = next((c for c in ins_df.columns if 'share' in str(c).lower()), None)
                 val_col = next((c for c in ins_df.columns if 'value' in str(c).lower()), None)
 
                 for _, row in ins_df.head(15).iterrows():
+                    
+                    # Target 'Text', 'Transaction Text' or 'Acquisition or Disposition'
+                    raw_action = str(row.get('Text', row.get('Transaction Text', row.get('Acquisition or Disposition', row.get('Transaction', ''))))).lower()
+                    
+                    # Fallback string hunt across all columns if still empty
+                    if not raw_action or raw_action == 'nan':
+                        trans_col = next((c for c in ins_df.columns if 'text' in str(c).lower() or 'action' in str(c).lower() or 'transaction' in str(c).lower()), None)
+                        if trans_col: raw_action = str(row[trans_col]).lower()
+
+                    # The Ironclad Parser
+                    if 'buy' in raw_action or 'purchase' in raw_action or raw_action.strip() == 'a':
+                        action = 'Buy'
+                    elif 'sell' in raw_action or 'sale' in raw_action or raw_action.strip() == 'd':
+                        action = 'Sell'
+                    elif 'grant' in raw_action or 'award' in raw_action or 'option' in raw_action:
+                        action = 'Grant'
+                    else:
+                        action = 'Execute/Other'
+
                     insider_list.append({
                         "name": str(row[name_col]) if name_col else "Executive",
                         "position": str(row[pos_col]) if pos_col else "N/A",
-                        "transaction": str(row[trans_col]) if trans_col else "Transaction",
+                        "transaction": action,
                         "shares": float(row[shares_col]) if shares_col and pd.notna(row[shares_col]) else 0,
                         "value": float(row[val_col]) if val_col and pd.notna(row[val_col]) else 0,
                     })
@@ -190,7 +194,27 @@ def get_stock_data(ticker: str):
         except:
             stats = {"pe": "N/A", "pb": "N/A", "eps": "N/A", "ev_ebitda": "N/A", "mkt_cap": "N/A", "fcf_yield": "N/A", "div_yield": "N/A", "sethi_score": 0, "book_value": 0, "fiftyTwoWeekHigh": current_price*1.2, "fiftyTwoWeekLow": current_price*0.8}
 
-        peers = PEER_MAP.get(ticker.upper(), ["AAPL", "MSFT", "GOOGL"])
+        # 5. Dynamic Peer Mapping Matrix
+        industry = info.get('industry', 'Unknown') if 'info' in locals() else 'Unknown'
+        
+        industry_map = {
+            'Consumer Electronics': ['MSFT', 'GOOGL', 'META'],
+            'Software - Infrastructure': ['AMZN', 'GOOGL', 'MSFT'],
+            'Semiconductors': ['AMD', 'INTC', 'TSM', 'NVDA', 'AVGO'],
+            'Internet Content & Information': ['GOOGL', 'META', 'SNAP', 'PINS'],
+            'Auto Manufacturers': ['TSLA', 'F', 'GM', 'TM', 'RIVN'],
+            'Banks - Diversified': ['JPM', 'BAC', 'WFC', 'C'],
+            'E-Commerce': ['AMZN', 'BABA', 'WMT', 'EBAY'],
+            'Travel Services': ['BKNG', 'EXPE', 'ABNB', 'TRIP'],
+            'Software - Application': ['CRM', 'ADBE', 'NOW', 'PLTR'],
+            'Software - Travel': ['LYFT', 'ABNB', 'DASH'],
+            'Technology': ['AAPL', 'MSFT', 'GOOGL']
+        }
+        
+        candidate_peers = industry_map.get(industry, ['SPY', 'QQQ', 'DIA'])
+        
+        # Ensure the searched ticker does not compare against itself
+        peers = [p for p in candidate_peers if p.upper() != ticker.upper()][:3]
 
         return {
             "ticker": ticker.upper(), "current_price": round(current_price, 2),
