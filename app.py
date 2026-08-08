@@ -27,6 +27,21 @@ def get_session():
 def health_check():
     return {"status": "SethiStock API is online."}
 
+# The Peer Benchmarking Map
+PEER_MAP = {
+    "AAPL": ["MSFT", "GOOGL", "META"], "MSFT": ["AAPL", "GOOGL", "AMZN"],
+    "GOOGL": ["MSFT", "META", "AMZN"], "GOOG": ["MSFT", "META", "AMZN"],
+    "AMZN": ["MSFT", "WMT", "AAPL"], "META": ["GOOGL", "SNAP", "PINS"],
+    "TSLA": ["F", "GM", "TM"], "NVDA": ["AMD", "INTC", "TSM"],
+    "AMD": ["NVDA", "INTC", "QCOM"], "JPM": ["BAC", "WFC", "C"],
+    "V": ["MA", "AXP", "JPM"], "MA": ["V", "AXP", "JPM"],
+    "WMT": ["TGT", "COST", "AMZN"], "JNJ": ["PFE", "UNH", "PG"],
+    "PG": ["JNJ", "KO", "UL"], "KO": ["PEP", "KDP", "MNST"],
+    "PEP": ["KO", "KDP", "MNST"], "XOM": ["CVX", "SHEL", "COP"],
+    "CVX": ["XOM", "COP", "BP"], "BAC": ["C", "WFC", "JPM"],
+    "NFLX": ["DIS", "WBD", "PARA"], "DIS": ["NFLX", "WBD", "CMCSA"]
+}
+
 @app.get("/api/stock/{ticker}")
 def get_stock_data(ticker: str):
     try:
@@ -70,7 +85,6 @@ def get_stock_data(ticker: str):
         if not fin.empty:
             cols = fin.columns[::-1] 
             fin_data["years"] = [str(c.year) for c in cols]
-
             rev = get_hist(fin, ['Total Revenue', 'Operating Revenue'])
             net = get_hist(fin, ['Net Income', 'Net Income Common Stockholders', 'Net Profit'])
             op_inc = get_hist(fin, ['Operating Income', 'Operating Profit'])
@@ -101,7 +115,32 @@ def get_stock_data(ticker: str):
         
         latest_fcf = fin_data["fcf"][-1] if fin_data["fcf"] and fin_data["fcf"][-1] != 0 else 0
 
-        # 3. Advanced Stats & Sethi Score Algorithm
+        # 3. Secure SEC Insider Trading Extraction
+        insider_list = []
+        try:
+            ins_df = stock.insider_transactions
+            if ins_df is not None and not ins_df.empty:
+                ins_df = ins_df.reset_index()
+                col_names = [str(c).lower() for c in ins_df.columns]
+                
+                name_col = next((c for c in ins_df.columns if 'insider' in str(c).lower() or 'name' in str(c).lower()), None)
+                pos_col = next((c for c in ins_df.columns if 'position' in str(c).lower() or 'title' in str(c).lower()), None)
+                trans_col = next((c for c in ins_df.columns if 'transaction' in str(c).lower() or 'action' in str(c).lower()), None)
+                shares_col = next((c for c in ins_df.columns if 'share' in str(c).lower()), None)
+                val_col = next((c for c in ins_df.columns if 'value' in str(c).lower()), None)
+
+                for _, row in ins_df.head(15).iterrows():
+                    insider_list.append({
+                        "name": str(row[name_col]) if name_col else "Executive",
+                        "position": str(row[pos_col]) if pos_col else "N/A",
+                        "transaction": str(row[trans_col]) if trans_col else "Transaction",
+                        "shares": float(row[shares_col]) if shares_col and pd.notna(row[shares_col]) else 0,
+                        "value": float(row[val_col]) if val_col and pd.notna(row[val_col]) else 0,
+                    })
+        except Exception:
+            pass
+
+        # 4. Advanced Stats & Valuation Frameworks
         try:
             info = stock.info
             def format_mkt_cap(val):
@@ -113,11 +152,16 @@ def get_stock_data(ticker: str):
             fcf_yield_raw = (latest_fcf / mkt_cap) if mkt_cap and latest_fcf else None
             fcf_yield = f"{round(fcf_yield_raw * 100, 2)}%" if fcf_yield_raw else "N/A"
 
-            # FIXED DIVIDEND YIELD (Removed the * 100 multiplier)
             div_yield_raw = info.get("dividendYield")
-            div_yield = f"{round(div_yield_raw, 2)}%" if div_yield_raw is not None else "N/A"
+            div_yield = f"{round(div_yield_raw * 100, 2)}%" if div_yield_raw is not None else "N/A"
+            
+            book_value = info.get("bookValue")
+            if not book_value and info.get("priceToBook") and current_price:
+                book_value = current_price / info.get("priceToBook")
 
-            # --- ALGORITHMIC SETHI SCORE ---
+            fiftyTwoWeekHigh = info.get("fiftyTwoWeekHigh", current_price * 1.2)
+            fiftyTwoWeekLow = info.get("fiftyTwoWeekLow", current_price * 0.8)
+
             score = 0
             if fin_data["net"] and fin_data["net"][-1] > 0: score += 10
             if len(fin_data["revenue"]) >= 2 and fin_data["revenue"][-1] > fin_data["revenue"][-2]: score += 10
@@ -138,15 +182,21 @@ def get_stock_data(ticker: str):
                 "mkt_cap": format_mkt_cap(mkt_cap) if mkt_cap else "N/A",
                 "fcf_yield": fcf_yield,
                 "div_yield": div_yield,
-                "sethi_score": score
+                "sethi_score": score,
+                "book_value": book_value if book_value else 0,
+                "fiftyTwoWeekHigh": fiftyTwoWeekHigh,
+                "fiftyTwoWeekLow": fiftyTwoWeekLow
             }
         except:
-            stats = {"pe": "N/A", "pb": "N/A", "eps": "N/A", "ev_ebitda": "N/A", "mkt_cap": "N/A", "fcf_yield": "N/A", "div_yield": "N/A", "sethi_score": 0}
+            stats = {"pe": "N/A", "pb": "N/A", "eps": "N/A", "ev_ebitda": "N/A", "mkt_cap": "N/A", "fcf_yield": "N/A", "div_yield": "N/A", "sethi_score": 0, "book_value": 0, "fiftyTwoWeekHigh": current_price*1.2, "fiftyTwoWeekLow": current_price*0.8}
+
+        peers = PEER_MAP.get(ticker.upper(), ["AAPL", "MSFT", "GOOGL"])
 
         return {
             "ticker": ticker.upper(), "current_price": round(current_price, 2),
             "change": round(change, 2), "pct_change": round(pct_change, 2),
-            "shares": shares, "fcf": latest_fcf, "financials": fin_data, "stats": stats
+            "shares": shares, "fcf": latest_fcf, "financials": fin_data, "stats": stats,
+            "insiders": insider_list, "peers": peers
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
