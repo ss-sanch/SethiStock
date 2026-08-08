@@ -202,13 +202,34 @@ def get_stock_data(raw_ticker: str):
 
         raw_news = stock.news
         news_list = []
+        news_text_for_ai = ""
+
         if raw_news:
-            for article in raw_news[:3]:
-                news_list.append({
-                    "title": article.get("title", "No Title"),
-                    "publisher": article.get("publisher", "Unknown"),
-                    "link": article.get("link", "#")
-                })
+            for article in raw_news[:4]:
+                # Bulletproof parsing for Yahoo's changing API
+                title = article.get("title") or article.get("content", {}).get("title", "No Title")
+                publisher = article.get("publisher") or article.get("content", {}).get("provider", {}).get("displayName", "Unknown")
+                link = article.get("link") or article.get("content", {}).get("canonicalUrl", "#")
+
+                if title != "No Title":
+                    news_list.append({"title": title, "publisher": publisher, "link": link})
+                    news_text_for_ai += f"- {title}\n"
+
+        # The AI "Why Is It Moving?" Engine
+        ai_summary = "AI Summarizer not configured or no news available."
+        GEMINI_API_KEY = os.environ.get("GOOGLE_API_KEY")
+        
+        if GEMINI_API_KEY and news_text_for_ai:
+            try:
+                genai.configure(api_key=GEMINI_API_KEY)
+                model = genai.GenerativeModel('gemini-1.5-flash')
+                prompt = f"You are an expert Wall Street analyst. Read these recent news headlines for {ticker}:\n{news_text_for_ai}\nWrite a punchy, 2-sentence summary explaining why the stock might be moving today based on this news. Do not use asterisks or formatting."
+                response = model.generate_content(prompt)
+                ai_summary = response.text.strip()
+            except Exception as e:
+                ai_summary = "AI synthesis currently unavailable."
+
+        industry = info.get('industry', 'Unknown') if 'info' in locals() else 'Unknown'
 
         industry = info.get('industry', 'Unknown') if 'info' in locals() else 'Unknown'
         industry_map = {
@@ -233,7 +254,7 @@ def get_stock_data(raw_ticker: str):
             "change": round(change, 2), "pct_change": round(pct_change, 2),
             "shares": shares, "fcf": latest_fcf, "financials": fin_data, "stats": stats,
             "insiders": insider_list, "peers": peers,
-            "summary": short_summary, "news": news_list
+            "summary": short_summary, "news": news_list, "ai_summary": ai_summary
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
