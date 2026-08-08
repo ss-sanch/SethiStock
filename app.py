@@ -3,7 +3,6 @@ from fastapi.middleware.cors import CORSMiddleware
 import yfinance as yf
 import requests
 import pandas as pd
-import re
 
 app = FastAPI(title="SethiStock Data Engine")
 
@@ -23,12 +22,10 @@ def get_session():
     })
     return session
 
-# UPDATED: Smart Search Ticker Resolution 
 def resolve_ticker(query: str):
     query = query.strip()
     try:
         session = get_session()
-        # Hit Yahoo Finance's native search API to map names like 'Apple' to 'AAPL'
         url = f"https://query2.finance.yahoo.com/v1/finance/search?q={query}&quotesCount=1&newsCount=0"
         res = session.get(url)
         if res.status_code == 200:
@@ -43,18 +40,14 @@ def resolve_ticker(query: str):
 def health_check():
     return {"status": "SethiStock API is online."}
 
-
 @app.get("/api/stock/{raw_ticker}")
 def get_stock_data(raw_ticker: str):
     try:
-        # 1. Intercept and Resolve Ticker
         ticker = resolve_ticker(raw_ticker)
-        
         session = get_session()
         stock = yf.Ticker(ticker, session=session)
         f_info = stock.fast_info
         
-        # 2. Core Pricing
         current_price = getattr(f_info, 'last_price', 0)
         prev_close = getattr(f_info, 'previous_close', 0)
         change = current_price - prev_close
@@ -62,7 +55,6 @@ def get_stock_data(raw_ticker: str):
         mkt_cap = getattr(f_info, 'market_cap', 0)
         shares = getattr(f_info, 'shares', 0)
 
-        # 3. Strict Financial Statement Extraction
         fin = stock.financials
         cf = stock.cashflow
         bs = stock.balance_sheet
@@ -120,7 +112,6 @@ def get_stock_data(raw_ticker: str):
         
         latest_fcf = fin_data["fcf"][-1] if fin_data["fcf"] and fin_data["fcf"][-1] != 0 else 0
 
-        # 4. Secure SEC Insider Trading Extraction
         insider_list = []
         try:
             ins_df = stock.insider_transactions
@@ -154,7 +145,6 @@ def get_stock_data(raw_ticker: str):
         except Exception:
             pass
 
-        # 5. Advanced Stats & Valuation Frameworks
         try:
             info = stock.info
             def format_mkt_cap(val):
@@ -166,7 +156,6 @@ def get_stock_data(raw_ticker: str):
             fcf_yield_raw = (latest_fcf / mkt_cap) if mkt_cap and latest_fcf else None
             fcf_yield = f"{round(fcf_yield_raw * 100, 2)}%" if fcf_yield_raw else "N/A"
 
-            # UPDATED: Dividend Yield divided by 100 
             div_yield_raw = info.get("dividendYield")
             div_yield = f"{round(div_yield_raw, 2)}%" if div_yield_raw is not None else "N/A"
             
@@ -202,29 +191,24 @@ def get_stock_data(raw_ticker: str):
                 "fiftyTwoWeekHigh": fiftyTwoWeekHigh,
                 "fiftyTwoWeekLow": fiftyTwoWeekLow
             }
-
-            # --- NEW: Company Profile & Latest News Intel ---
-            raw_summary = info.get("longBusinessSummary", "Company profile not currently available.")
-            # Extract just the first 2-3 sentences for a punchy summary
-            sentences = raw_summary.split('. ')
-            short_summary = '. '.join(sentences[:3]) + '.' if len(sentences) > 2 else raw_summary
-
-            raw_news = stock.news
-            news_list = []
-            if raw_news:
-                for article in raw_news[:3]: # Grab the 3 latest articles/earnings reports
-                    news_list.append({
-                        "title": article.get("title", "No Title"),
-                        "publisher": article.get("publisher", "Unknown"),
-                        "link": article.get("link", "#")
-                    })
-                    
         except:
             stats = {"pe": "N/A", "pb": "N/A", "eps": "N/A", "ev_ebitda": "N/A", "mkt_cap": "N/A", "fcf_yield": "N/A", "div_yield": "N/A", "sethi_score": 0, "book_value": 0, "fiftyTwoWeekHigh": current_price*1.2, "fiftyTwoWeekLow": current_price*0.8}
 
-        # 6. Dynamic Peer Mapping Matrix
+        raw_summary = info.get("longBusinessSummary", "Company profile not currently available.")
+        sentences = raw_summary.split('. ')
+        short_summary = '. '.join(sentences[:3]) + '.' if len(sentences) > 2 else raw_summary
+
+        raw_news = stock.news
+        news_list = []
+        if raw_news:
+            for article in raw_news[:3]:
+                news_list.append({
+                    "title": article.get("title", "No Title"),
+                    "publisher": article.get("publisher", "Unknown"),
+                    "link": article.get("link", "#")
+                })
+
         industry = info.get('industry', 'Unknown') if 'info' in locals() else 'Unknown'
-        
         industry_map = {
             'Consumer Electronics': ['MSFT', 'GOOGL', 'META'],
             'Software - Infrastructure': ['AMZN', 'GOOGL', 'MSFT'],
@@ -246,7 +230,7 @@ def get_stock_data(raw_ticker: str):
             "ticker": ticker.upper(), "current_price": round(current_price, 2),
             "change": round(change, 2), "pct_change": round(pct_change, 2),
             "shares": shares, "fcf": latest_fcf, "financials": fin_data, "stats": stats,
-            "insiders": insider_list, "peers": peers
+            "insiders": insider_list, "peers": peers,
             "summary": short_summary, "news": news_list
         }
     except Exception as e:
