@@ -3,3 +3,4 @@ uvicorn==0.24.0
 yfinance>=0.2.40
 pandas==2.1.2
 requests
+google-generativeai
