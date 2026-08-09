@@ -223,7 +223,7 @@ def get_stock_data(raw_ticker: str):
                 response = model.generate_content(prompt)
                 ai_summary = response.text.replace('\n', ' ').strip()
             except Exception as e:
-                ai_summary = "Not enough data to generate an AI insight today."
+                ai_summary = f"API ERROR: {str(e)}"
         else:
             ai_summary = "No recent news available to generate an analysis."
 
