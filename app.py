@@ -5,6 +5,7 @@ import requests
 import pandas as pd
 import os
 import google.generativeai as genai
+from functools import lru_cache
 
 app = FastAPI(title="SethiStock Data Engine")
 
@@ -37,6 +38,28 @@ def resolve_ticker(query: str):
     except Exception:
         pass
     return query.upper()
+
+@lru_cache(maxsize=100)
+def get_ai_summary(ticker: str, news_context: str):
+    api_key = os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        return "API Key not found in environment."
+    
+    genai.configure(api_key=api_key)
+    # Note: We are using the correct, modern 1.5-flash model!
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    
+    try:
+        prompt = (
+            f"You are an expert financial analyst. Review the following recent news headlines for {ticker}: \n"
+            f"{news_context}\n"
+            f"Write a single, highly insightful paragraph analyzing what these developments mean for the company's current market position. "
+            f"Do not list the titles. Synthesize the information to explain the broader narrative and why the stock might be moving. Keep the tone professional and objective."
+        )
+        response = model.generate_content(prompt)
+        return response.text.replace('\n', ' ').strip()
+    except Exception as e:
+        return f"API ERROR: {str(e)}"
 
 @app.get("/")
 def health_check():
@@ -210,25 +233,9 @@ def get_stock_data(raw_ticker: str):
                 title = content.get("title", article.get("title", "No Title"))
                 news_context += f"- {title}\n"
                 
-        ai_summary = "AI analysis temporarily unavailable."
-        
         if news_context.strip():
-            
-            api_key = os.environ.get("GOOGLE_API_KEY")
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel('gemini-3.5-flash')
-                                          
-            try:
-                prompt = (
-                    f"You are an expert financial analyst. Review the following recent news headlines for {ticker.upper()}: \n"
-                    f"{news_context}\n"
-                    f"Write a single, highly insightful paragraph analyzing what these developments mean for the company's current market position. "
-                    f"Do not list the titles. Synthesize the information to explain the broader narrative and why the stock might be moving. Keep the tone professional and objective."
-                )
-                response = model.generate_content(prompt)
-                ai_summary = response.text.replace('\n', ' ').strip()
-            except Exception as e:
-                ai_summary = f"API ERROR: {str(e)}"
+            # This is where the magic happens! It uses the cache.
+            ai_summary = get_ai_summary(ticker.upper(), news_context)
         else:
             ai_summary = "No recent news available to generate an analysis."
 
