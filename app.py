@@ -53,7 +53,7 @@ def get_ai_summary(ticker: str, news_context: str):
         prompt = (
             f"You are an expert financial analyst. Review the following recent news headlines for {ticker}: \n"
             f"{news_context}\n"
-            f"Write a single, concise, highly insightful paragraph in UK English analyzing what these developments (along with doing your own research from reliable sites) mean for the company's current market position. "
+            f"Write a single, concise, highly insightful paragraph (maximum 3 sentences) in UK English analyzing what these developments (along with doing your own research from reliable sites) mean for the company's current market position. "
             f"Do not list the titles. Synthesize the information to explain the broader narrative and why the stock might be moving. Keep the tone professional and objective."
         )
         response = model.generate_content(prompt)
@@ -211,6 +211,7 @@ def get_stock_data(raw_ticker: str):
                 "mkt_cap": format_mkt_cap(mkt_cap) if mkt_cap else "N/A",
                 "fcf_yield": fcf_yield,
                 "div_yield": div_yield,
+                "roe": f"{round(info.get('returnOnEquity', 0) * 100, 2)}%" if info.get("returnOnEquity") else "N/A",
                 "sethi_score": score,
                 "book_value": book_value if book_value else 0,
                 "fiftyTwoWeekHigh": fiftyTwoWeekHigh,
