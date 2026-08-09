@@ -47,13 +47,13 @@ def get_ai_summary(ticker: str, news_context: str):
     
     genai.configure(api_key=api_key)
     # Note: We are using the correct, modern 1.5-flash model!
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-2.5-flash')
     
     try:
         prompt = (
             f"You are an expert financial analyst. Review the following recent news headlines for {ticker}: \n"
             f"{news_context}\n"
-            f"Write a single, highly insightful paragraph analyzing what these developments mean for the company's current market position. "
+            f"Write a single, concise, highly insightful paragraph in UK English analyzing what these developments (along with doing your own research from reliable sites) mean for the company's current market position. "
             f"Do not list the titles. Synthesize the information to explain the broader narrative and why the stock might be moving. Keep the tone professional and objective."
         )
         response = model.generate_content(prompt)
