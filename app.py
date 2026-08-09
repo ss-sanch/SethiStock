@@ -59,7 +59,11 @@ def get_ai_summary(ticker: str, news_context: str):
         response = model.generate_content(prompt)
         return response.text.replace('\n', ' ').strip()
     except Exception as e:
-        return f"API ERROR: {str(e)}"
+        error_str = str(e)
+        if "429" in error_str or "Quota" in error_str:
+            return "Sethiway AI is experiencing high traffic. Please wait a minute and refresh."
+        else:
+            return "Sethiway AI analysis is temporarily unavailable."
 
 @app.get("/")
 def health_check():
