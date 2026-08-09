@@ -213,6 +213,11 @@ def get_stock_data(raw_ticker: str):
         ai_summary = "AI analysis temporarily unavailable."
         
         if news_context.strip():
+            
+            api_key = os.environ.get("GOOGLE_API_KEY")
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel('gemini-3.5-flash'
+                                          
             try:
                 prompt = (
                     f"You are an expert financial analyst. Review the following recent news headlines for {ticker.upper()}: \n"
