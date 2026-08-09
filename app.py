@@ -216,7 +216,7 @@ def get_stock_data(raw_ticker: str):
             
             api_key = os.environ.get("GOOGLE_API_KEY")
             genai.configure(api_key=api_key)
-            model = genai.GenerativeModel('gemini-3.5-flash'
+            model = genai.GenerativeModel('gemini-3.5-flash')
                                           
             try:
                 prompt = (
