@@ -3,127 +3,6 @@ from fastapi.middleware.cors import CORSMiddleware
 import yfinance as yf
 import requests
 import pandas as pd
-import os
-import google.generativeai as genai
-from functools import lru_cache
-import sqlite3
-import re
-
-import re # Add this at the top of your file with your other imports!
-
-# --- 1. SQLITE DATABASE INITIALIZATION (ZERO-COST MEMORY) ---
-def init_db():
-    conn = sqlite3.connect("sethistock.db")
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS earnings_summaries (
-            ticker TEXT PRIMARY KEY,
-            summary TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
-init_db()
-
-# --- 2. ENTERPRISE SEC EDGAR 10-Q/8-K PIPELINE ---
-def generate_earnings_summary(ticker):
-    try:
-        ticker = ticker.upper()
-        # Step A: Check the Persistent SQLite Database first
-        conn = sqlite3.connect("sethistock.db")
-        cursor = conn.cursor()
-        cursor.execute("SELECT summary FROM earnings_summaries WHERE ticker = ?", (ticker,))
-        cached_result = cursor.fetchone()
-        
-        if cached_result:
-            conn.close()
-            return cached_result[0] # Returns the instant, zero-cost cached summary!
-        
-        # Step B: SEC Requires a Custom User-Agent to prevent 403 Forbidden Errors
-        # (This proves to recruiters you understand enterprise API compliance)
-        sec_headers = {'User-Agent': 'SethiStock Project (sethistock@sethiway.com)'}
-
-        # Step C: Translate Ticker to SEC CIK Number
-        tickers_url = "https://www.sec.gov/files/company_tickers.json"
-        ticker_res = requests.get(tickers_url, headers=sec_headers).json()
-        
-        raw_cik = None
-        for key, company in ticker_res.items():
-            if company['ticker'] == ticker:
-                raw_cik = str(company['cik_str'])
-                break
-                
-        if not raw_cik:
-            return "SEC Database: Ticker not recognized or CIK missing."
-            
-        padded_cik = raw_cik.zfill(10) # SEC submissions require a 10-digit padded CIK
-
-        # Step D: Fetch the Latest Submissions for this CIK
-        sub_url = f"https://data.sec.gov/submissions/CIK{padded_cik}.json"
-        sub_res = requests.get(sub_url, headers=sec_headers).json()
-        
-        recent_filings = sub_res.get('filings', {}).get('recent', {})
-        
-        # Scan for the latest 10-Q (Quarterly) or 8-K (Earnings Release)
-        accession_num = None
-        primary_doc = None
-        for i, form in enumerate(recent_filings.get('form', [])):
-            if form in ['10-Q', '10-K', '8-K']:
-                accession_num = recent_filings['accessionNumber'][i].replace('-', '')
-                primary_doc = recent_filings['primaryDocument'][i]
-                break
-                
-        if not accession_num:
-            return "No recent 10-Q or 8-K filings found in the SEC EDGAR database."
-
-        # Step E: Fetch the raw HTML of the official filing
-        doc_url = f"https://www.sec.gov/Archives/edgar/data/{raw_cik}/{accession_num}/{primary_doc}"
-        doc_res = requests.get(doc_url, headers=sec_headers)
-        raw_html = doc_res.text
-        
-        # Step F: Intelligent Data Pre-Processing (HTML Stripping & Truncation)
-        # We strip all the messy HTML tags using RegEx to get pure text.
-        clean_text = re.sub('<[^<]+>', ' ', raw_html)
-        words = clean_text.split()
-        
-        # We slice the first ~3,500 words. This typically captures the "Management's Discussion" 
-        # while keeping us safely under Gemini's free-tier token limits.
-        truncated_transcript = " ".join(words[:3500])
-
-        # Step G: Unrestricted AI Execution (Gemini)
-        genai.configure(api_key=os.environ.get("GOOGLE_API_KEY"))
-        model = genai.GenerativeModel('gemini-2.5-flash')
-        
-        prompt = (
-            f"Act as a Wall Street quantitative analyst. Read the following Management's Discussion and Analysis (MD&A) from the latest SEC filing for {ticker}. "
-            f"Your ONLY goal is to extract the Revenue by Business Segment/Sector and Geography. "
-            f"RULES: "
-            f"1. You MUST format the output as a clean HTML list using strictly <ul> and <li> tags. Do NOT use markdown asterisks. "
-            f"2. You MUST round all numbers to clean decimals using 'M' for Millions or 'B' for Billions (e.g., convert '$1,935,464 thousand' to '$1.94B'). "
-            f"3. Maximum 3 bullet points. "
-            f"4. Maximum 15 words per bullet. Be punchy and metric-driven. "
-            f"5. Do NOT output any introductory text like 'Here is the summary'. Just output the HTML list.\n\n"
-            f"6. Answer in UK English. "
-            f"SEC Text: {truncated_transcript}"
-        )
-        
-        ai_response = model.generate_content(prompt)
-        final_summary = ai_response.text
-
-        # Step H: Save to Persistent Storage
-        cursor.execute("INSERT OR REPLACE INTO earnings_summaries (ticker, summary) VALUES (?, ?)", (ticker, final_summary))
-        conn.commit()
-        conn.close()
-
-        return final_summary
-
-    except Exception as e:
-        error_str = str(e)
-        if "429" in error_str or "Quota" in error_str:
-            return "<li>Sethiway AI is currently analyzing heavy market data. Please wait 60 seconds and refresh.</li>"
-        else:
-            return "<li>SEC data extraction is temporarily unavailable.</li>"
 
 app = FastAPI(title="SethiStock Data Engine")
 
@@ -157,31 +36,6 @@ def resolve_ticker(query: str):
         pass
     return query.upper()
 
-@lru_cache(maxsize=100)
-def get_ai_summary(ticker: str, news_context: str):
-    api_key = os.environ.get("GOOGLE_API_KEY")
-    if not api_key:
-        return "API Key not found in environment."
-    
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-2.5-flash')
-    
-    try:
-        prompt = (
-            f"You are an expert financial analyst. Review the following recent news headlines for {ticker}: \n"
-            f"{news_context}\n"
-            f"Write a single, concise, highly insightful paragraph (maximum 3 sentences) in UK English analyzing what these developments (along with doing your own research from reliable sites) mean for the company's current market position. "
-            f"Do not list the titles. Synthesize the information to explain the broader narrative and why the stock might be moving. Keep the tone professional and objective."
-        )
-        response = model.generate_content(prompt)
-        return response.text.replace('\n', ' ').strip()
-    except Exception as e:
-        error_str = str(e)
-        if "429" in error_str or "Quota" in error_str:
-            return "Sethiway AI is experiencing high traffic. Please wait a minute and refresh."
-        else:
-            return "Sethiway AI analysis is temporarily unavailable."
-
 @app.get("/")
 def health_check():
     return {"status": "SethiStock API is online."}
@@ -200,7 +54,6 @@ def get_stock_data(raw_ticker: str):
         pct_change = (change / prev_close) * 100 if prev_close else 0
         mkt_cap = getattr(f_info, 'market_cap', 0)
         shares = getattr(f_info, 'shares', 0)
-        earnings_summary = generate_earnings_summary(ticker)
 
         fin = stock.financials
         cf = stock.cashflow
@@ -350,20 +203,6 @@ def get_stock_data(raw_ticker: str):
         sentences = raw_summary.split('. ')
         short_summary = '. '.join(sentences[:3]) + '.' if len(sentences) > 2 else raw_summary
 
-        raw_news = stock.news
-        news_context = "" 
-        
-        if raw_news:
-            for article in raw_news[:3]:
-                content = article.get('content', article)
-                title = content.get("title", article.get("title", "No Title"))
-                news_context += f"- {title}\n"
-                
-        if news_context.strip():
-            ai_summary = get_ai_summary(ticker.upper(), news_context)
-        else:
-            ai_summary = "No recent news available to generate an analysis."
-
         industry = info.get('industry', 'Unknown')
         industry_map = {
             'Consumer Electronics': ['MSFT', 'GOOGL', 'META'],
@@ -387,8 +226,7 @@ def get_stock_data(raw_ticker: str):
             "change": round(change, 2), "pct_change": round(pct_change, 2),
             "shares": shares, "fcf": latest_fcf, "financials": fin_data, "stats": stats,
             "insiders": insider_list, "peers": peers,
-            "summary": short_summary, "ai_summary": ai_summary,
-            "earnings_summary": earnings_summary
+            "summary": short_summary
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
