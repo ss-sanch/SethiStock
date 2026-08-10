@@ -339,7 +339,7 @@ def get_stock_data(raw_ticker: str):
             "change": round(change, 2), "pct_change": round(pct_change, 2),
             "shares": shares, "fcf": latest_fcf, "financials": fin_data, "stats": stats,
             "insiders": insider_list, "peers": peers,
-            "summary": short_summary, "ai_summary": ai_summary
+            "summary": short_summary, "ai_summary": ai_summary,
             "earnings_summary": earnings_summary
         }
     except Exception as e:
