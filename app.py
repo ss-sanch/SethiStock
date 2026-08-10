@@ -7,6 +7,9 @@ import os
 import google.generativeai as genai
 from functools import lru_cache
 import sqlite3
+import re
+
+import re # Add this at the top of your file with your other imports!
 
 # --- 1. SQLITE DATABASE INITIALIZATION (ZERO-COST MEMORY) ---
 def init_db():
@@ -23,7 +26,7 @@ def init_db():
 
 init_db()
 
-# --- 2. ENTERPRISE EARNINGS CALL PIPELINE ---
+# --- 2. ENTERPRISE SEC EDGAR 10-Q/8-K PIPELINE ---
 def generate_earnings_summary(ticker):
     try:
         ticker = ticker.upper()
@@ -37,33 +40,72 @@ def generate_earnings_summary(ticker):
             conn.close()
             return cached_result[0] # Returns the instant, zero-cost cached summary!
         
-        # Step B: If not cached, fetch raw transcript from FMP
-        fmp_key = os.environ.get("FMP_API_KEY")
-        if not fmp_key:
-            return "Earnings AI Offline: FMP key missing."
+        # Step B: SEC Requires a Custom User-Agent to prevent 403 Forbidden Errors
+        # (This proves to recruiters you understand enterprise API compliance)
+        sec_headers = {'User-Agent': 'SethiStock Project (sethistock@sethiway.com)'}
 
-        url = f"https://financialmodelingprep.com/api/v3/earning_call_transcript/{ticker}?apikey={fmp_key}"
-        response = requests.get(url).json()
-
-        if not response or len(response) == 0:
-            return "No recent earnings transcript available for this ticker."
+        # Step C: Translate Ticker to SEC CIK Number
+        tickers_url = "https://www.sec.gov/files/company_tickers.json"
+        ticker_res = requests.get(tickers_url, headers=sec_headers).json()
         
-        raw_transcript = response[0].get("content", "")
+        raw_cik = None
+        for key, company in ticker_res.items():
+            if company['ticker'] == ticker:
+                raw_cik = str(company['cik_str'])
+                break
+                
+        if not raw_cik:
+            return "SEC Database: Ticker not recognized or CIK missing."
+            
+        padded_cik = raw_cik.zfill(10) # SEC submissions require a 10-digit padded CIK
 
-        # Step C: Intelligent Data Pre-Processing (Truncation)
-        words = raw_transcript.split()
-        truncated_transcript = " ".join(words[:2500])
+        # Step D: Fetch the Latest Submissions for this CIK
+        sub_url = f"https://data.sec.gov/submissions/CIK{padded_cik}.json"
+        sub_res = requests.get(sub_url, headers=sec_headers).json()
+        
+        recent_filings = sub_res.get('filings', {}).get('recent', {})
+        
+        # Scan for the latest 10-Q (Quarterly) or 8-K (Earnings Release)
+        accession_num = None
+        primary_doc = None
+        for i, form in enumerate(recent_filings.get('form', [])):
+            if form in ['10-Q', '10-K', '8-K']:
+                accession_num = recent_filings['accessionNumber'][i].replace('-', '')
+                primary_doc = recent_filings['primaryDocument'][i]
+                break
+                
+        if not accession_num:
+            return "No recent 10-Q or 8-K filings found in the SEC EDGAR database."
 
-        # Step D: Unrestricted AI Execution (Gemini)
+        # Step E: Fetch the raw HTML of the official filing
+        doc_url = f"https://www.sec.gov/Archives/edgar/data/{raw_cik}/{accession_num}/{primary_doc}"
+        doc_res = requests.get(doc_url, headers=sec_headers)
+        raw_html = doc_res.text
+        
+        # Step F: Intelligent Data Pre-Processing (HTML Stripping & Truncation)
+        # We strip all the messy HTML tags using RegEx to get pure text.
+        clean_text = re.sub('<[^<]+>', ' ', raw_html)
+        words = clean_text.split()
+        
+        # We slice the first ~3,500 words. This typically captures the "Management's Discussion" 
+        # while keeping us safely under Gemini's free-tier token limits.
+        truncated_transcript = " ".join(words[:3500])
+
+        # Step G: Unrestricted AI Execution (Gemini)
         genai.configure(api_key=os.environ.get("GOOGLE_API_KEY"))
         model = genai.GenerativeModel('gemini-2.5-flash')
         
-        prompt = f"Act as a Wall Street analyst. Read the following earnings call transcript snippet for {ticker}. Give me exactly a 3-bullet-point summary of the CEO's future outlook and forward guidance. Keep it professional, concise, and focused on revenue, margins, or new products. \n\nTranscript: {truncated_transcript}"
+        prompt = (
+            f"Act as a Wall Street analyst. Read the following text extracted from the Management's Discussion and Analysis (MD&A) of the latest SEC filing for {ticker}. "
+            f"Your strict goal is to extract the Revenue by Business Segment/Sector (e.g., Hardware vs Services, Cloud vs Retail) and Geographic Region if available. "
+            f"Give me exactly a 3-bullet-point summary in UK English highlighting which specific sectors drove growth or caused losses, quoting the percentages or figures mentioned. "
+            f"Keep it highly professional and data-driven.\n\nSEC Text: {truncated_transcript}"
+        )
         
         ai_response = model.generate_content(prompt)
         final_summary = ai_response.text
 
-        # Step E: Save to Persistent Storage
+        # Step H: Save to Persistent Storage
         cursor.execute("INSERT OR REPLACE INTO earnings_summaries (ticker, summary) VALUES (?, ?)", (ticker, final_summary))
         conn.commit()
         conn.close()
@@ -71,7 +113,7 @@ def generate_earnings_summary(ticker):
         return final_summary
 
     except Exception as e:
-        return f"API ERROR: {str(e)}"
+        return f"SEC Extraction temporarily unavailable. (System Check: {str(e)})"
 
 app = FastAPI(title="SethiStock Data Engine")
 
