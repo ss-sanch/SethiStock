@@ -10,7 +10,6 @@ import sqlite3
 
 # --- 1. SQLITE DATABASE INITIALIZATION (ZERO-COST MEMORY) ---
 def init_db():
-    # Creates a lightweight database file right inside your Render server
     conn = sqlite3.connect("sethistock.db")
     cursor = conn.cursor()
     cursor.execute('''
@@ -52,8 +51,6 @@ def generate_earnings_summary(ticker):
         raw_transcript = response[0].get("content", "")
 
         # Step C: Intelligent Data Pre-Processing (Truncation)
-        # We slice the text to the first 2,500 words to capture the CEO's outlook 
-        # while stripping away the bloated Q&A section to save API tokens.
         words = raw_transcript.split()
         truncated_transcript = " ".join(words[:2500])
 
@@ -66,7 +63,7 @@ def generate_earnings_summary(ticker):
         ai_response = model.generate_content(prompt)
         final_summary = ai_response.text
 
-        # Step E: Save to Persistent Storage so we never pay to process this transcript again
+        # Step E: Save to Persistent Storage
         cursor.execute("INSERT OR REPLACE INTO earnings_summaries (ticker, summary) VALUES (?, ?)", (ticker, final_summary))
         conn.commit()
         conn.close()
@@ -115,7 +112,6 @@ def get_ai_summary(ticker: str, news_context: str):
         return "API Key not found in environment."
     
     genai.configure(api_key=api_key)
-    # Note: We are using the correct, modern 1.5-flash model!
     model = genai.GenerativeModel('gemini-2.5-flash')
     
     try:
@@ -173,10 +169,10 @@ def get_stock_data(raw_ticker: str):
                 if clean_name in idx_map:
                     orig_idx = idx_map[clean_name]
                     try:
-                        extracted = [float(df.loc[orig_idx, c]) if not pd.isna(df.loc[orig_idx, c]) else 0 for c in cols]
+                        extracted = [float(df.loc[orig_idx, c]) if not pd.isna(df.loc[orig_idx, c]) else 0 for c in df.columns[::-1]]
                         if any(extracted): return extracted
                     except: pass
-            return [0] * len(cols)
+            return [0] * len(df.columns) if df is not None and not df.empty else []
 
         if not fin.empty:
             cols = fin.columns[::-1] 
@@ -244,13 +240,13 @@ def get_stock_data(raw_ticker: str):
         except Exception:
             pass
 
-        info = {}  # 1. We guarantee the variable exists in memory FIRST
+        info = {}  
         try:
             fetched_info = stock.info 
             if fetched_info:
-                info = fetched_info  # 2. Only overwrite if Yahoo Finance actually returns data
+                info = fetched_info  
         except Exception:
-            pass  # 3. If Yahoo rate-limits us, we silently ignore it and keep using the empty dict
+            pass  
 
         def format_mkt_cap(val):
             if val >= 1e12: return f"${val/1e12:.2f}T"
@@ -271,40 +267,37 @@ def get_stock_data(raw_ticker: str):
         fiftyTwoWeekHigh = info.get("fiftyTwoWeekHigh", current_price * 1.2)
         fiftyTwoWeekLow = info.get("fiftyTwoWeekLow", current_price * 0.8)
 
-            score = 0
-            if fin_data["net"] and fin_data["net"][-1] > 0: score += 10
-            if len(fin_data["revenue"]) >= 2 and fin_data["revenue"][-1] > fin_data["revenue"][-2]: score += 10
-            if latest_fcf > 0: score += 10
-            if info.get("returnOnEquity") and info.get("returnOnEquity") > 0.15: score += 10
-            if info.get("profitMargins") and info.get("profitMargins") > 0.10: score += 10
-            if info.get("debtToEquity") and info.get("debtToEquity") < 100: score += 10
-            if fcf_yield_raw and fcf_yield_raw > 0.05: score += 10
-            if info.get("trailingPE") and 0 < info.get("trailingPE") < 25: score += 10
-            if info.get("priceToBook") and 0 < info.get("priceToBook") < 5: score += 10
-            if div_yield_raw and div_yield_raw > 0: score += 10
+        score = 0
+        if fin_data["net"] and fin_data["net"][-1] > 0: score += 10
+        if len(fin_data["revenue"]) >= 2 and fin_data["revenue"][-1] > fin_data["revenue"][-2]: score += 10
+        if latest_fcf > 0: score += 10
+        if info.get("returnOnEquity") and info.get("returnOnEquity") > 0.15: score += 10
+        if info.get("profitMargins") and info.get("profitMargins") > 0.10: score += 10
+        if info.get("debtToEquity") and info.get("debtToEquity") < 100: score += 10
+        if fcf_yield_raw and fcf_yield_raw > 0.05: score += 10
+        if info.get("trailingPE") and 0 < info.get("trailingPE") < 25: score += 10
+        if info.get("priceToBook") and 0 < info.get("priceToBook") < 5: score += 10
+        if div_yield_raw and div_yield_raw > 0: score += 10
 
-            stats = {
-                "pe": round(info.get("trailingPE", 0), 2) if info.get("trailingPE") else "N/A",
-                "pb": round(info.get("priceToBook", 0), 2) if info.get("priceToBook") else "N/A",
-                "eps": round(info.get("trailingEps", 0), 2) if info.get("trailingEps") else "N/A",
-                "ev_ebitda": round(info.get("enterpriseToEbitda", 0), 2) if info.get("enterpriseToEbitda") else "N/A",
-                "mkt_cap": format_mkt_cap(mkt_cap) if mkt_cap else "N/A",
-                "fcf_yield": fcf_yield,
-                "div_yield": div_yield,
-                "roe": f"{round(info.get('returnOnEquity', 0) * 100, 2)}%" if info.get("returnOnEquity") else "N/A",
-                "sethi_score": score,
-                "book_value": book_value if book_value else 0,
-                "fiftyTwoWeekHigh": fiftyTwoWeekHigh,
-                "fiftyTwoWeekLow": fiftyTwoWeekLow
-            }
-        except:
-            stats = {"pe": "N/A", "pb": "N/A", "eps": "N/A", "ev_ebitda": "N/A", "mkt_cap": "N/A", "fcf_yield": "N/A", "div_yield": "N/A", "sethi_score": 0, "book_value": 0, "fiftyTwoWeekHigh": current_price*1.2, "fiftyTwoWeekLow": current_price*0.8}
+        stats = {
+            "pe": round(info.get("trailingPE", 0), 2) if info.get("trailingPE") else "N/A",
+            "pb": round(info.get("priceToBook", 0), 2) if info.get("priceToBook") else "N/A",
+            "eps": round(info.get("trailingEps", 0), 2) if info.get("trailingEps") else "N/A",
+            "ev_ebitda": round(info.get("enterpriseToEbitda", 0), 2) if info.get("enterpriseToEbitda") else "N/A",
+            "mkt_cap": format_mkt_cap(mkt_cap) if mkt_cap else "N/A",
+            "fcf_yield": fcf_yield,
+            "div_yield": div_yield,
+            "roe": f"{round(info.get('returnOnEquity', 0) * 100, 2)}%" if info.get("returnOnEquity") else "N/A",
+            "sethi_score": score,
+            "book_value": book_value if book_value else 0,
+            "fiftyTwoWeekHigh": fiftyTwoWeekHigh,
+            "fiftyTwoWeekLow": fiftyTwoWeekLow
+        }
 
         raw_summary = info.get("longBusinessSummary", "Company profile not currently available.")
         sentences = raw_summary.split('. ')
         short_summary = '. '.join(sentences[:3]) + '.' if len(sentences) > 2 else raw_summary
 
-        # --- NEWS PARSER & AI SUMMARY ---
         raw_news = stock.news
         news_context = "" 
         
@@ -315,14 +308,11 @@ def get_stock_data(raw_ticker: str):
                 news_context += f"- {title}\n"
                 
         if news_context.strip():
-            # This is where the magic happens! It uses the cache.
             ai_summary = get_ai_summary(ticker.upper(), news_context)
         else:
             ai_summary = "No recent news available to generate an analysis."
 
-        industry = info.get('industry', 'Unknown') if 'info' in locals() else 'Unknown'
-
-        industry = info.get('industry', 'Unknown') if 'info' in locals() else 'Unknown'
+        industry = info.get('industry', 'Unknown')
         industry_map = {
             'Consumer Electronics': ['MSFT', 'GOOGL', 'META'],
             'Software - Infrastructure': ['AMZN', 'GOOGL', 'MSFT'],
