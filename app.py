@@ -74,7 +74,7 @@ def generate_earnings_summary(ticker):
         return final_summary
 
     except Exception as e:
-        return f"Earnings Call Summary currently unavailable due to high traffic."
+        return f"API ERROR: {str(e)}"
 
 app = FastAPI(title="SethiStock Data Engine")
 
