@@ -6,6 +6,75 @@ import pandas as pd
 import os
 import google.generativeai as genai
 from functools import lru_cache
+import sqlite3
+
+# --- 1. SQLITE DATABASE INITIALIZATION (ZERO-COST MEMORY) ---
+def init_db():
+    # Creates a lightweight database file right inside your Render server
+    conn = sqlite3.connect("sethistock.db")
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS earnings_summaries (
+            ticker TEXT PRIMARY KEY,
+            summary TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+init_db()
+
+# --- 2. ENTERPRISE EARNINGS CALL PIPELINE ---
+def generate_earnings_summary(ticker):
+    try:
+        ticker = ticker.upper()
+        # Step A: Check the Persistent SQLite Database first
+        conn = sqlite3.connect("sethistock.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT summary FROM earnings_summaries WHERE ticker = ?", (ticker,))
+        cached_result = cursor.fetchone()
+        
+        if cached_result:
+            conn.close()
+            return cached_result[0] # Returns the instant, zero-cost cached summary!
+        
+        # Step B: If not cached, fetch raw transcript from FMP
+        fmp_key = os.environ.get("FMP_API_KEY")
+        if not fmp_key:
+            return "Earnings AI Offline: FMP key missing."
+
+        url = f"https://financialmodelingprep.com/api/v3/earning_call_transcript/{ticker}?apikey={fmp_key}"
+        response = requests.get(url).json()
+
+        if not response or len(response) == 0:
+            return "No recent earnings transcript available for this ticker."
+        
+        raw_transcript = response[0].get("content", "")
+
+        # Step C: Intelligent Data Pre-Processing (Truncation)
+        # We slice the text to the first 2,500 words to capture the CEO's outlook 
+        # while stripping away the bloated Q&A section to save API tokens.
+        words = raw_transcript.split()
+        truncated_transcript = " ".join(words[:2500])
+
+        # Step D: Unrestricted AI Execution (Gemini)
+        genai.configure(api_key=os.environ.get("GOOGLE_API_KEY"))
+        model = genai.GenerativeModel('gemini-2.5-flash')
+        
+        prompt = f"Act as a Wall Street analyst. Read the following earnings call transcript snippet for {ticker}. Give me exactly a 3-bullet-point summary of the CEO's future outlook and forward guidance. Keep it professional, concise, and focused on revenue, margins, or new products. \n\nTranscript: {truncated_transcript}"
+        
+        ai_response = model.generate_content(prompt)
+        final_summary = ai_response.text
+
+        # Step E: Save to Persistent Storage so we never pay to process this transcript again
+        cursor.execute("INSERT OR REPLACE INTO earnings_summaries (ticker, summary) VALUES (?, ?)", (ticker, final_summary))
+        conn.commit()
+        conn.close()
+
+        return final_summary
+
+    except Exception as e:
+        return f"Earnings Call Summary currently unavailable due to high traffic."
 
 app = FastAPI(title="SethiStock Data Engine")
 
@@ -83,6 +152,7 @@ def get_stock_data(raw_ticker: str):
         pct_change = (change / prev_close) * 100 if prev_close else 0
         mkt_cap = getattr(f_info, 'market_cap', 0)
         shares = getattr(f_info, 'shares', 0)
+        earnings_summary = generate_earnings_summary(ticker)
 
         fin = stock.financials
         cf = stock.cashflow
@@ -270,6 +340,7 @@ def get_stock_data(raw_ticker: str):
             "shares": shares, "fcf": latest_fcf, "financials": fin_data, "stats": stats,
             "insiders": insider_list, "peers": peers,
             "summary": short_summary, "ai_summary": ai_summary
+            "earnings_summary": earnings_summary
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
