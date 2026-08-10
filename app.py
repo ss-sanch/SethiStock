@@ -253,10 +253,10 @@ def get_stock_data(raw_ticker: str):
             pass  # 3. If Yahoo rate-limits us, we silently ignore it and keep using the empty dict
 
         def format_mkt_cap(val):
-                if val >= 1e12: return f"${val/1e12:.2f}T"
-                if val >= 1e9: return f"${val/1e9:.2f}B"
-                if val >= 1e6: return f"${val/1e6:.2f}M"
-                return f"${val:,.0f}"
+            if val >= 1e12: return f"${val/1e12:.2f}T"
+            if val >= 1e9: return f"${val/1e9:.2f}B"
+            if val >= 1e6: return f"${val/1e6:.2f}M"
+            return f"${val:,.0f}"
 
             fcf_yield_raw = (latest_fcf / mkt_cap) if mkt_cap and latest_fcf else None
             fcf_yield = f"{round(fcf_yield_raw * 100, 2)}%" if fcf_yield_raw else "N/A"
