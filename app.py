@@ -119,7 +119,11 @@ def generate_earnings_summary(ticker):
         return final_summary
 
     except Exception as e:
-        return f"SEC Extraction temporarily unavailable. (System Check: {str(e)})"
+        error_str = str(e)
+        if "429" in error_str or "Quota" in error_str:
+            return "<li>Sethiway AI is currently analyzing heavy market data. Please wait 60 seconds and refresh.</li>"
+        else:
+            return "<li>SEC data extraction is temporarily unavailable.</li>"
 
 app = FastAPI(title="SethiStock Data Engine")
 
