@@ -96,10 +96,16 @@ def generate_earnings_summary(ticker):
         model = genai.GenerativeModel('gemini-2.5-flash')
         
         prompt = (
-            f"Act as a Wall Street analyst. Read the following text extracted from the Management's Discussion and Analysis (MD&A) of the latest SEC filing for {ticker}. "
-            f"Your strict goal is to extract the Revenue by Business Segment/Sector (e.g., Hardware vs Services, Cloud vs Retail) and Geographic Region if available. "
-            f"Give me exactly a 3-bullet-point summary in UK English highlighting which specific sectors drove growth or caused losses, quoting the percentages or figures mentioned. "
-            f"Keep it highly professional and data-driven.\n\nSEC Text: {truncated_transcript}"
+            f"Act as a Wall Street quantitative analyst. Read the following Management's Discussion and Analysis (MD&A) from the latest SEC filing for {ticker}. "
+            f"Your ONLY goal is to extract the Revenue by Business Segment/Sector and Geography. "
+            f"RULES: "
+            f"1. You MUST format the output as a clean HTML list using strictly <ul> and <li> tags. Do NOT use markdown asterisks. "
+            f"2. You MUST round all numbers to clean decimals using 'M' for Millions or 'B' for Billions (e.g., convert '$1,935,464 thousand' to '$1.94B'). "
+            f"3. Maximum 3 bullet points. "
+            f"4. Maximum 15 words per bullet. Be punchy and metric-driven. "
+            f"5. Do NOT output any introductory text like 'Here is the summary'. Just output the HTML list.\n\n"
+            f"6. Answer in UK English. "
+            f"SEC Text: {truncated_transcript}"
         )
         
         ai_response = model.generate_content(prompt)
