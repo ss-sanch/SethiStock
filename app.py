@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import yfinance as yf
 import requests
 import pandas as pd
+import numpy as np # INJECTED: Required for VaR and Volatility statistics
 
 app = FastAPI(title="SethiStock Data Engine")
 
@@ -35,6 +36,85 @@ def resolve_ticker(query: str):
     except Exception:
         pass
     return query.upper()
+
+# ==========================================
+# --- NEW QUANTITATIVE ENGINES (PHASE 1) ---
+# ==========================================
+
+def calculate_dupont_analysis(income_stmt, balance_sheet):
+    """Breaks down ROE into its 3 core fundamental drivers"""
+    try:
+        # Utilizing fallback keys to account for Yahoo Finance indexing changes
+        net_income = income_stmt.loc['Net Income'].iloc[0] if 'Net Income' in income_stmt.index else income_stmt.loc['Net Income Common Stockholders'].iloc[0]
+        revenue = income_stmt.loc['Total Revenue'].iloc[0] if 'Total Revenue' in income_stmt.index else income_stmt.loc['Operating Revenue'].iloc[0]
+        total_assets = balance_sheet.loc['Total Assets'].iloc[0]
+        
+        # Safely find Equity
+        if 'Stockholders Equity' in balance_sheet.index:
+            total_equity = balance_sheet.loc['Stockholders Equity'].iloc[0]
+        elif 'Total Equity Gross Minority Interest' in balance_sheet.index:
+            total_equity = balance_sheet.loc['Total Equity Gross Minority Interest'].iloc[0]
+        else:
+            total_equity = balance_sheet.loc['Common Stock Equity'].iloc[0]
+
+        # The 3 Pillars of DuPont
+        net_profit_margin = net_income / revenue
+        asset_turnover = revenue / total_assets
+        equity_multiplier = total_assets / total_equity
+        
+        roe = net_profit_margin * asset_turnover * equity_multiplier
+        
+        return {
+            "net_profit_margin": round(net_profit_margin * 100, 2),
+            "asset_turnover": round(asset_turnover, 2),
+            "equity_multiplier": round(equity_multiplier, 2),
+            "calculated_roe": round(roe * 100, 2)
+        }
+    except Exception as e:
+        return {"error": "DuPont Data Unavailable"}
+
+def calculate_risk_profile(ticker_symbol):
+    """Calculates 5-Year Historical Value at Risk (VaR) and Volatility"""
+    try:
+        stock = yf.Ticker(ticker_symbol)
+        hist = stock.history(period="5y")
+        
+        daily_returns = hist['Close'].pct_change().dropna()
+        var_95 = np.percentile(daily_returns, 5) # 5th percentile worst days
+        volatility = daily_returns.std() * np.sqrt(252) # Annualized
+        
+        return {
+            "daily_var_95": round(var_95 * 100, 2),
+            "annualized_volatility": round(volatility * 100, 2)
+        }
+    except Exception as e:
+        return {"error": "Risk Profile Unavailable"}
+
+def generate_sensitivity_matrix(base_wacc, base_exit_multiple, fcf_projections, shares_outstanding):
+    """Generates a 5x5 grid of target share prices based on changing WACC & Multiples"""
+    try:
+        wacc_steps = [base_wacc - 0.02, base_wacc - 0.01, base_wacc, base_wacc + 0.01, base_wacc + 0.02]
+        mult_steps = [base_exit_multiple - 2, base_exit_multiple - 1, base_exit_multiple, base_exit_multiple + 1, base_exit_multiple + 2]
+        
+        matrix = []
+        for wacc in wacc_steps:
+            row = []
+            for mult in mult_steps:
+                pv_fcfs = sum([fcf / ((1 + wacc) ** i) for i, fcf in enumerate(fcf_projections, 1)])
+                terminal_value = fcf_projections[-1] * mult
+                pv_tv = terminal_value / ((1 + wacc) ** len(fcf_projections))
+                implied_price = (pv_fcfs + pv_tv) / (shares_outstanding if shares_outstanding else 1)
+                row.append(round(implied_price, 2))
+            
+            matrix.append({f"WACC_{round(wacc*100, 1)}%": row})
+            
+        return matrix
+    except Exception as e:
+        return []
+
+# ==========================================
+# --- MAIN API ENDPOINTS -------------------
+# ==========================================
 
 @app.get("/")
 def health_check():
@@ -111,6 +191,14 @@ def get_stock_data(raw_ticker: str):
                 if not v: fin_data[k] = [0] * len(cols)
         
         latest_fcf = fin_data["fcf"][-1] if fin_data["fcf"] and fin_data["fcf"][-1] != 0 else 0
+
+        # --- EXECUTE QUANTITATIVE ENGINES ---
+        dupont_metrics = calculate_dupont_analysis(fin, bs)
+        risk_metrics = calculate_risk_profile(ticker)
+        
+        # Generating a default Base Sensitivity Matrix (Assuming 10% WACC, 15x Multiple, 15% Growth for 5 yrs)
+        base_fcf_projections = [latest_fcf * ((1.15) ** i) for i in range(1, 6)] if latest_fcf > 0 else [0,0,0,0,0]
+        sensitivity_matrix = generate_sensitivity_matrix(0.10, 15.0, base_fcf_projections, shares)
 
         insider_list = []
         try:
@@ -226,7 +314,10 @@ def get_stock_data(raw_ticker: str):
             "change": round(change, 2), "pct_change": round(pct_change, 2),
             "shares": shares, "fcf": latest_fcf, "financials": fin_data, "stats": stats,
             "insiders": insider_list, "peers": peers,
-            "summary": short_summary
+            "summary": short_summary,
+            "dupont_analysis": dupont_metrics,           # <-- NEW PAYLOAD DATA
+            "risk_profile": risk_metrics,                # <-- NEW PAYLOAD DATA
+            "sensitivity_matrix": sensitivity_matrix     # <-- NEW PAYLOAD DATA
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
