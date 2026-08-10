@@ -258,18 +258,18 @@ def get_stock_data(raw_ticker: str):
             if val >= 1e6: return f"${val/1e6:.2f}M"
             return f"${val:,.0f}"
 
-            fcf_yield_raw = (latest_fcf / mkt_cap) if mkt_cap and latest_fcf else None
-            fcf_yield = f"{round(fcf_yield_raw * 100, 2)}%" if fcf_yield_raw else "N/A"
+        fcf_yield_raw = (latest_fcf / mkt_cap) if mkt_cap and latest_fcf else None
+        fcf_yield = f"{round(fcf_yield_raw * 100, 2)}%" if fcf_yield_raw else "N/A"
 
-            div_yield_raw = info.get("dividendYield")
-            div_yield = f"{round(div_yield_raw, 2)}%" if div_yield_raw is not None else "N/A"
-            
-            book_value = info.get("bookValue")
-            if not book_value and info.get("priceToBook") and current_price:
-                book_value = current_price / info.get("priceToBook")
+        div_yield_raw = info.get("dividendYield")
+        div_yield = f"{round(div_yield_raw, 2)}%" if div_yield_raw is not None else "N/A"
+        
+        book_value = info.get("bookValue")
+        if not book_value and info.get("priceToBook") and current_price:
+            book_value = current_price / info.get("priceToBook")
 
-            fiftyTwoWeekHigh = info.get("fiftyTwoWeekHigh", current_price * 1.2)
-            fiftyTwoWeekLow = info.get("fiftyTwoWeekLow", current_price * 0.8)
+        fiftyTwoWeekHigh = info.get("fiftyTwoWeekHigh", current_price * 1.2)
+        fiftyTwoWeekLow = info.get("fiftyTwoWeekLow", current_price * 0.8)
 
             score = 0
             if fin_data["net"] and fin_data["net"][-1] > 0: score += 10
