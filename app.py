@@ -244,9 +244,15 @@ def get_stock_data(raw_ticker: str):
         except Exception:
             pass
 
+        info = {}  # 1. We guarantee the variable exists in memory FIRST
         try:
-            info = stock.info
-            def format_mkt_cap(val):
+            fetched_info = stock.info 
+            if fetched_info:
+                info = fetched_info  # 2. Only overwrite if Yahoo Finance actually returns data
+        except Exception:
+            pass  # 3. If Yahoo rate-limits us, we silently ignore it and keep using the empty dict
+
+        def format_mkt_cap(val):
                 if val >= 1e12: return f"${val/1e12:.2f}T"
                 if val >= 1e9: return f"${val/1e9:.2f}B"
                 if val >= 1e6: return f"${val/1e6:.2f}M"
