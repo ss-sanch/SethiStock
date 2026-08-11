@@ -309,6 +309,24 @@ def get_stock_data(raw_ticker: str):
         short_float = info.get("shortPercentOfFloat")
         short_interest = f"{round(short_float * 100, 2)}%" if short_float else "N/A"
 
+        next_earnings = "N/A"
+        next_dividend = "N/A"
+        try:
+            # yfinance sometimes returns calendar data as a dict, sometimes as a DataFrame
+            cal = stock.calendar
+            if isinstance(cal, dict) and 'Earnings Date' in cal:
+                raw_earnings = cal['Earnings Date']
+                if isinstance(raw_earnings, list) and len(raw_earnings) > 0:
+                    next_earnings = raw_earnings[0].strftime('%b %d, %Y')
+            
+            # Fetch Next Dividend Date
+            div_date = info.get("exDividendDate")
+            if div_date:
+                from datetime import datetime # Ensure datetime is imported
+                next_dividend = datetime.fromtimestamp(div_date).strftime('%b %d, %Y')
+        except Exception:
+            pass # Silently fail and leave as "N/A" to prevent server crash
+
         stats = {
             "pe": round(info.get("trailingPE", 0), 2) if info.get("trailingPE") else "N/A",
             "pb": round(info.get("priceToBook", 0), 2) if info.get("priceToBook") else "N/A",
@@ -322,13 +340,14 @@ def get_stock_data(raw_ticker: str):
             "book_value": book_value if book_value else 0,
             "fiftyTwoWeekHigh": fiftyTwoWeekHigh,
             "fiftyTwoWeekLow": fiftyTwoWeekLow,
-            # -- THE NEW DATA --
             "beta": round(info.get("beta", 0), 2) if info.get("beta") else "N/A",
             "short_interest": short_interest,
             "dist_52w_high": f"{dist_52w_high}%" if dist_52w_high != "N/A" else "N/A",
             "rsi_14": rsi_14,
             "stoch_k": stoch_k,
-            "sma_200_pct": f"{sma_200_pct}%" if sma_200_pct != "N/A" else "N/A"
+            "sma_200_pct": f"{sma_200_pct}%" if sma_200_pct != "N/A" else "N/A",
+            "next_earnings": next_earnings,  # <-- NEW
+            "next_dividend": next_dividend   # <-- NEW
         }
 
         raw_summary = info.get("longBusinessSummary", "Company profile not currently available.")
