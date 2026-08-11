@@ -331,6 +331,7 @@ def get_stock_data(raw_ticker: str):
             "pe": round(info.get("trailingPE", 0), 2) if info.get("trailingPE") else "N/A",
             "pb": round(info.get("priceToBook", 0), 2) if info.get("priceToBook") else "N/A",
             "eps": round(info.get("trailingEps", 0), 2) if info.get("trailingEps") else "N/A",
+            "forward_eps": round(info.get("forwardEps", 0), 2) if info.get("forwardEps") else "N/A", # <-- NEW LINE
             "ev_ebitda": round(info.get("enterpriseToEbitda", 0), 2) if info.get("enterpriseToEbitda") else "N/A",
             "mkt_cap": format_mkt_cap(mkt_cap) if mkt_cap else "N/A",
             "fcf_yield": fcf_yield,
