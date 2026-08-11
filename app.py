@@ -272,6 +272,43 @@ def get_stock_data(raw_ticker: str):
         if info.get("priceToBook") and 0 < info.get("priceToBook") < 5: score += 10
         if div_yield_raw and div_yield_raw > 0: score += 10
 
+        # --- NEW TECHNICAL & RISK MATH ENGINE ---
+        daily_hist = stock.history(period="1y")
+        rsi_14 = "N/A"
+        stoch_k = "N/A"
+        sma_200_pct = "N/A"
+        
+        if not daily_hist.empty and len(daily_hist) >= 14:
+            closes = daily_hist['Close']
+            lows = daily_hist['Low']
+            highs = daily_hist['High']
+
+            # 14-Day RSI
+            delta = closes.diff()
+            gain = delta.where(delta > 0, 0)
+            loss = -delta.where(delta < 0, 0)
+            avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
+            avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
+            rs = avg_gain / avg_loss
+            rsi_14 = round((100 - (100 / (1 + rs))).iloc[-1], 2)
+
+            # 14-Day Stochastic
+            low_14 = lows.rolling(14).min().iloc[-1]
+            high_14 = highs.rolling(14).max().iloc[-1]
+            stoch_k = round(100 * ((current_price - low_14) / (high_14 - low_14)), 2) if high_14 != low_14 else 50
+
+            # 200-Day SMA % Difference
+            if len(daily_hist) >= 200:
+                sma_200 = closes.rolling(200).mean().iloc[-1]
+                sma_200_pct = round(((current_price - sma_200) / sma_200) * 100, 2)
+
+        # Distance from 52W High
+        dist_52w_high = round(((current_price - fiftyTwoWeekHigh) / fiftyTwoWeekHigh) * 100, 2) if fiftyTwoWeekHigh and fiftyTwoWeekHigh > 0 else "N/A"
+        
+        # Short Interest %
+        short_float = info.get("shortPercentOfFloat")
+        short_interest = f"{round(short_float * 100, 2)}%" if short_float else "N/A"
+
         stats = {
             "pe": round(info.get("trailingPE", 0), 2) if info.get("trailingPE") else "N/A",
             "pb": round(info.get("priceToBook", 0), 2) if info.get("priceToBook") else "N/A",
@@ -284,7 +321,14 @@ def get_stock_data(raw_ticker: str):
             "sethi_score": score,
             "book_value": book_value if book_value else 0,
             "fiftyTwoWeekHigh": fiftyTwoWeekHigh,
-            "fiftyTwoWeekLow": fiftyTwoWeekLow
+            "fiftyTwoWeekLow": fiftyTwoWeekLow,
+            # -- THE NEW DATA --
+            "beta": round(info.get("beta", 0), 2) if info.get("beta") else "N/A",
+            "short_interest": short_interest,
+            "dist_52w_high": f"{dist_52w_high}%" if dist_52w_high != "N/A" else "N/A",
+            "rsi_14": rsi_14,
+            "stoch_k": stoch_k,
+            "sma_200_pct": f"{sma_200_pct}%" if sma_200_pct != "N/A" else "N/A"
         }
 
         raw_summary = info.get("longBusinessSummary", "Company profile not currently available.")
