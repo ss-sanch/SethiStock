@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import yfinance as yf
 import pandas as pd
 import numpy as np 
+import time
 
 app = FastAPI(title="SethiStock Data Engine")
 
@@ -14,33 +15,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def get_safe_session():
-    """THE CLOUDSCRAPER BYPASS: Solves WAF challenges so Render IPs aren't blocked"""
-    import cloudscraper
-    from requests.adapters import HTTPAdapter
-    from urllib3.util.retry import Retry
-    
-    # Mimics a real Windows Chrome Browser perfectly
-    scraper = cloudscraper.create_scraper(
-        browser={
-            'browser': 'chrome',
-            'platform': 'windows',
-            'desktop': True
-        }
-    )
-    
-    retry = Retry(total=2, backoff_factor=0.5, status_forcelist=[403, 429, 500, 502, 503, 504])
-    adapter = HTTPAdapter(max_retries=retry)
-    scraper.mount('http://', adapter)
-    scraper.mount('https://', adapter)
-    
-    return scraper
-
 def resolve_ticker(query: str):
     query = query.strip()
     try:
-        session = get_safe_session()
-        ticker_obj = yf.Ticker(query, session=session)
+        ticker_obj = yf.Ticker(query)
         info_dict = getattr(ticker_obj, 'info', {})
         if info_dict and 'symbol' in info_dict:
             return info_dict['symbol']
@@ -82,8 +60,7 @@ def calculate_dupont_analysis(income_stmt, balance_sheet):
 
 def calculate_risk_profile(ticker_symbol):
     try:
-        safe_sess = get_safe_session()
-        stock = yf.Ticker(ticker_symbol, session=safe_sess)
+        stock = yf.Ticker(ticker_symbol)
         hist = stock.history(period="5y")
             
         daily_returns = hist['Close'].pct_change().dropna()
@@ -133,9 +110,8 @@ def get_stock_data(raw_ticker: str):
         f_info, fin, cf, bs, info = None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}
         q_fin = pd.DataFrame() 
         
-        # Deploy Cloudscraper to punch through the WAF
-        safe_sess = get_safe_session()
-        stock = yf.Ticker(ticker, session=safe_sess)
+        # PURE NATIVE FETCH - Letting yfinance manage its own cookies and crumbs
+        stock = yf.Ticker(ticker)
         
         try: f_info = stock.fast_info
         except Exception: f_info = None
@@ -484,8 +460,7 @@ def get_chart_data(raw_ticker: str, period: str = "1y", interval: str = "1d"):
         
         hist = pd.DataFrame()
         try:
-            safe_sess = get_safe_session()
-            stock = yf.Ticker(ticker.upper(), session=safe_sess)
+            stock = yf.Ticker(ticker.upper())
             hist = stock.history(period=period, interval=interval)
         except Exception:
             pass
