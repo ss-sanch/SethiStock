@@ -26,12 +26,14 @@ def resolve_ticker(query: str):
     return query.upper()
 
 def get_safe_session():
+    """Fortified: Reduced backoff to prevent 2-minute server hangs"""
     import requests
     from requests.adapters import HTTPAdapter
     from urllib3.util.retry import Retry
     
     session = requests.Session()
-    retry = Retry(total=3, backoff_factor=1, status_forcelist=[403, 429, 500, 502, 503, 504])
+    # FIXED: Reduced total retries from 3 to 1 so the fallback triggers instantly instead of hanging
+    retry = Retry(total=1, backoff_factor=0.5, status_forcelist=[403, 429, 500, 502, 503, 504])
     adapter = HTTPAdapter(max_retries=retry)
     session.mount('http://', adapter)
     session.mount('https://', adapter)
@@ -135,9 +137,9 @@ def get_stock_data(raw_ticker: str):
         f_info, fin, cf, bs, info = None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}
         q_fin = pd.DataFrame() 
         
-        for attempt in range(3):
+        for attempt in range(2): # Reduced outer loop to fail fast
             try:
-                if attempt < 2:
+                if attempt == 0:
                     safe_sess = get_safe_session()
                     stock = yf.Ticker(ticker, session=safe_sess)
                 else:
@@ -167,7 +169,7 @@ def get_stock_data(raw_ticker: str):
                     break
             except Exception:
                 pass
-            time.sleep(1.5)
+            time.sleep(1)
         
         recent_hist = pd.DataFrame()
         try:
@@ -183,8 +185,8 @@ def get_stock_data(raw_ticker: str):
                 pass
 
         # =================================================================
-        # --- THE SAFE FLOAT GUILLOTINE ---
-        # Blocks any 'NoneType' crashes from missing Yahoo Data
+        # --- FIXED: ARMORED CELLS & SAFE FLOAT ---
+        # Absolutely guarantees no 'currentTradingPeriod' or NoneType crashes
         # =================================================================
         def safe_float(val, fallback=0.0):
             try:
@@ -193,22 +195,31 @@ def get_stock_data(raw_ticker: str):
             except Exception:
                 return float(fallback)
 
+        def get_fast_info(f_obj, prop_name):
+            """Evaluates the lazy-loaded fast_info securely inside a try/except cell"""
+            if f_obj is None: return None
+            try:
+                # This catches the KeyError before it can blow up the app!
+                return getattr(f_obj, prop_name)
+            except Exception:
+                return None
+
         current_price, prev_close, mkt_cap, shares = 0.0, 0.0, 0.0, 0.0
 
         if recent_hist is not None and not recent_hist.empty and len(recent_hist) >= 2:
             current_price = safe_float(recent_hist['Close'].iloc[-1])
             prev_close = safe_float(recent_hist['Close'].iloc[-2])
         else:
-            cp_val = getattr(f_info, 'last_price', None) if f_info is not None else None
+            cp_val = get_fast_info(f_info, 'last_price')
             current_price = safe_float(cp_val, safe_float(info.get('currentPrice') if info else 0))
                 
-            pc_val = getattr(f_info, 'previous_close', None) if f_info is not None else None
+            pc_val = get_fast_info(f_info, 'previous_close')
             prev_close = safe_float(pc_val, safe_float(info.get('previousClose') if info else 0))
 
-        mc_val = getattr(f_info, 'market_cap', None) if f_info is not None else None
+        mc_val = get_fast_info(f_info, 'market_cap')
         mkt_cap = safe_float(mc_val, safe_float(info.get('marketCap') if info else 0))
             
-        sh_val = getattr(f_info, 'shares', None) if f_info is not None else None
+        sh_val = get_fast_info(f_info, 'shares')
         shares = safe_float(sh_val, safe_float(info.get('sharesOutstanding') if info else 0))
             
         change = current_price - prev_close
@@ -359,7 +370,6 @@ def get_stock_data(raw_ticker: str):
         fiftyTwoWeekHigh = safe_float(info.get("fiftyTwoWeekHigh") if info else None, current_price * 1.2)
         fiftyTwoWeekLow = safe_float(info.get("fiftyTwoWeekLow") if info else None, current_price * 0.8)
 
-        # Applying Safe Float to all scoring metrics
         actual_roe = safe_float(info.get("returnOnEquity") if info else None, fallback_roe)
         actual_margin = safe_float(info.get("profitMargins") if info else None, fallback_margin)
         actual_pe = safe_float(info.get("trailingPE") if info else None, fallback_pe)
