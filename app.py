@@ -14,34 +14,39 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+def get_safe_session():
+    """THE CLOUDSCRAPER BYPASS: Solves WAF challenges so Render IPs aren't blocked"""
+    import cloudscraper
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+    
+    # Mimics a real Windows Chrome Browser perfectly
+    scraper = cloudscraper.create_scraper(
+        browser={
+            'browser': 'chrome',
+            'platform': 'windows',
+            'desktop': True
+        }
+    )
+    
+    retry = Retry(total=2, backoff_factor=0.5, status_forcelist=[403, 429, 500, 502, 503, 504])
+    adapter = HTTPAdapter(max_retries=retry)
+    scraper.mount('http://', adapter)
+    scraper.mount('https://', adapter)
+    
+    return scraper
+
 def resolve_ticker(query: str):
     query = query.strip()
     try:
-        ticker_obj = yf.Ticker(query)
+        session = get_safe_session()
+        ticker_obj = yf.Ticker(query, session=session)
         info_dict = getattr(ticker_obj, 'info', {})
         if info_dict and 'symbol' in info_dict:
             return info_dict['symbol']
     except Exception:
         pass
     return query.upper()
-
-def get_safe_session():
-    """Fortified: Reduced backoff to prevent 2-minute server hangs"""
-    import requests
-    from requests.adapters import HTTPAdapter
-    from urllib3.util.retry import Retry
-    
-    session = requests.Session()
-    # FIXED: Reduced total retries from 3 to 1 so the fallback triggers instantly instead of hanging
-    retry = Retry(total=1, backoff_factor=0.5, status_forcelist=[403, 429, 500, 502, 503, 504])
-    adapter = HTTPAdapter(max_retries=retry)
-    session.mount('http://', adapter)
-    session.mount('https://', adapter)
-    
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    })
-    return session
 
 # ==========================================
 # --- QUANTITATIVE ENGINES ---
@@ -79,15 +84,7 @@ def calculate_risk_profile(ticker_symbol):
     try:
         safe_sess = get_safe_session()
         stock = yf.Ticker(ticker_symbol, session=safe_sess)
-        hist = pd.DataFrame()
-        try:
-            hist = stock.history(period="5y")
-        except Exception:
-            pass
-            
-        if hist.empty:
-            native_stock = yf.Ticker(ticker_symbol)
-            hist = native_stock.history(period="5y")
+        hist = stock.history(period="5y")
             
         daily_returns = hist['Close'].pct_change().dropna()
         var_95 = np.percentile(daily_returns, 5) 
@@ -131,62 +128,43 @@ def health_check():
 @app.get("/api/stock/{raw_ticker}")
 def get_stock_data(raw_ticker: str):
     try:
-        import time 
         ticker = resolve_ticker(raw_ticker)
         
         f_info, fin, cf, bs, info = None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}
         q_fin = pd.DataFrame() 
         
-        for attempt in range(2): # Reduced outer loop to fail fast
-            try:
-                if attempt == 0:
-                    safe_sess = get_safe_session()
-                    stock = yf.Ticker(ticker, session=safe_sess)
-                else:
-                    stock = yf.Ticker(ticker)
-                
-                try: f_info = stock.fast_info
-                except Exception: f_info = None
-                
-                try: fin = stock.financials
-                except Exception: fin = pd.DataFrame()
-                
-                try: cf = stock.cashflow
-                except Exception: cf = pd.DataFrame()
-                
-                try: bs = stock.balance_sheet
-                except Exception: bs = pd.DataFrame()
-                
-                try: q_fin = stock.quarterly_financials
-                except Exception: q_fin = pd.DataFrame()
-                
-                try: 
-                    fetched_info = stock.info 
-                    if fetched_info: info = fetched_info  
-                except Exception: pass
-                
-                if isinstance(fin, pd.DataFrame) and not fin.empty:
-                    break
-            except Exception:
-                pass
-            time.sleep(1)
+        # Deploy Cloudscraper to punch through the WAF
+        safe_sess = get_safe_session()
+        stock = yf.Ticker(ticker, session=safe_sess)
+        
+        try: f_info = stock.fast_info
+        except Exception: f_info = None
+        
+        try: fin = stock.financials
+        except Exception: fin = pd.DataFrame()
+        
+        try: cf = stock.cashflow
+        except Exception: cf = pd.DataFrame()
+        
+        try: bs = stock.balance_sheet
+        except Exception: bs = pd.DataFrame()
+        
+        try: q_fin = stock.quarterly_financials
+        except Exception: q_fin = pd.DataFrame()
+        
+        try: 
+            fetched_info = stock.info 
+            if fetched_info: info = fetched_info  
+        except Exception: pass
         
         recent_hist = pd.DataFrame()
         try:
             recent_hist = stock.history(period="5d")
         except Exception:
             pass
-            
-        if recent_hist is None or recent_hist.empty:
-            try:
-                native_stock = yf.Ticker(ticker)
-                recent_hist = native_stock.history(period="5d")
-            except Exception:
-                pass
 
         # =================================================================
-        # --- FIXED: ARMORED CELLS & SAFE FLOAT ---
-        # Absolutely guarantees no 'currentTradingPeriod' or NoneType crashes
+        # --- SECURE MATH ENGINE ---
         # =================================================================
         def safe_float(val, fallback=0.0):
             try:
@@ -196,13 +174,9 @@ def get_stock_data(raw_ticker: str):
                 return float(fallback)
 
         def get_fast_info(f_obj, prop_name):
-            """Evaluates the lazy-loaded fast_info securely inside a try/except cell"""
             if f_obj is None: return None
-            try:
-                # This catches the KeyError before it can blow up the app!
-                return getattr(f_obj, prop_name)
-            except Exception:
-                return None
+            try: return getattr(f_obj, prop_name)
+            except Exception: return None
 
         current_price, prev_close, mkt_cap, shares = 0.0, 0.0, 0.0, 0.0
 
@@ -224,8 +198,6 @@ def get_stock_data(raw_ticker: str):
             
         change = current_price - prev_close
         pct_change = (change / prev_close) * 100 if prev_close else 0
-
-        # =================================================================
 
         fin_data = {
             "years": [], "revenue": [], "operating": [], "net": [], 
@@ -312,8 +284,8 @@ def get_stock_data(raw_ticker: str):
                         "name": str(row[name_col]) if name_col else "Executive",
                         "position": str(row[pos_col]) if pos_col else "N/A",
                         "transaction": action,
-                        "shares": float(row[shares_col]) if shares_col and pd.notna(row[shares_col]) else 0,
-                        "value": float(row[val_col]) if val_col and pd.notna(row[val_col]) else 0,
+                        "shares": safe_float(row[shares_col]),
+                        "value": safe_float(row[val_col])
                     })
         except Exception:
             pass
@@ -404,13 +376,6 @@ def get_stock_data(raw_ticker: str):
             daily_hist = stock.history(period="1y")
         except Exception:
             pass
-            
-        if daily_hist is None or daily_hist.empty:
-            try:
-                native_stock = yf.Ticker(ticker)
-                daily_hist = native_stock.history(period="1y")
-            except Exception:
-                pass
 
         rsi_14 = "N/A"
         stoch_k = "N/A"
@@ -524,13 +489,6 @@ def get_chart_data(raw_ticker: str, period: str = "1y", interval: str = "1d"):
             hist = stock.history(period=period, interval=interval)
         except Exception:
             pass
-            
-        if hist is None or hist.empty:
-            try:
-                native_stock = yf.Ticker(ticker.upper())
-                hist = native_stock.history(period=period, interval=interval)
-            except Exception:
-                pass
 
         if hist is None or hist.empty: 
             return {"dates": [], "opens": [], "highs": [], "lows": [], "closes": []}
