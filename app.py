@@ -301,18 +301,62 @@ def get_stock_data(raw_ticker: str):
         fallback_debt = fin_data["debt"][-1] if fin_data["debt"] and len(fin_data["debt"]) > 0 else 0
         fallback_de = (fallback_debt / total_equity * 100) if total_equity > 0 else 0
 
+        final_mkt_cap = mkt_cap if mkt_cap > 0 else fallback_mkt_cap
+
+        # =======================================================
+        # NEW: PROPRIETARY DATA MATHEMATICAL FALLBACKS
+        # =======================================================
+        
+        # 1. Manually Calculate EV/EBITDA
+        try:
+            cash_on_hand = fin_data["cash"][-1] if fin_data["cash"] and len(fin_data["cash"]) > 0 else 0
+            ev = final_mkt_cap + fallback_debt - cash_on_hand
+            ebitda = fin_data["operating"][-1] if fin_data["operating"] and len(fin_data["operating"]) > 0 else 0
+            fallback_ev_ebitda = round(ev / ebitda, 2) if ebitda > 0 else "N/A"
+        except Exception:
+            fallback_ev_ebitda = "N/A"
+
+        # 2. Manually Calculate 1-Year Dividend Yield
+        fallback_div_yield = "N/A"
+        try:
+            divs = stock.dividends
+            if divs is not None and not divs.empty:
+                recent_divs = divs[divs.index > (pd.Timestamp.now(tz=divs.index.tz) - pd.DateOffset(years=1))]
+                if not recent_divs.empty and current_price > 0:
+                    yield_pct = (recent_divs.sum() / current_price) * 100
+                    fallback_div_yield = f"{round(yield_pct, 2)}%"
+        except Exception:
+            pass
+
+        # 3. Manually Calculate Beta (1-Year Volatility vs S&P 500)
+        fallback_beta = "N/A"
+        try:
+            spy_hist = yf.Ticker("SPY").history(period="1y")
+            daily_hist = stock.history(period="1y")
+            if not daily_hist.empty and not spy_hist.empty:
+                stock_rets = daily_hist['Close'].pct_change().dropna()
+                spy_rets = spy_hist['Close'].pct_change().dropna()
+                aligned = pd.concat([stock_rets, spy_rets], axis=1).dropna()
+                covar = np.cov(aligned.iloc[:,0], aligned.iloc[:,1])[0][1]
+                spy_var = np.var(aligned.iloc[:,1])
+                fallback_beta = round(covar / spy_var, 2) if spy_var > 0 else "N/A"
+        except Exception:
+            pass
+
+        # =======================================================
+
         def format_mkt_cap(val):
             if val >= 1e12: return f"${val/1e12:.2f}T"
             if val >= 1e9: return f"${val/1e9:.2f}B"
             if val >= 1e6: return f"${val/1e6:.2f}M"
             return f"${val:,.0f}"
             
-        final_mkt_cap = mkt_cap if mkt_cap > 0 else fallback_mkt_cap
         fcf_yield_raw = (latest_fcf / final_mkt_cap) if final_mkt_cap and latest_fcf else 0
         fcf_yield = f"{round(fcf_yield_raw * 100, 2)}%" if fcf_yield_raw != 0 else "N/A"
         
+        # Inject our calculated Div Yield if the API fails
         div_yield_raw = safe_float(info.get("dividendYield") if info else info.get("trailingAnnualDividendYield") if info else None)
-        div_yield = f"{round(div_yield_raw * 100, 2)}%" if div_yield_raw > 0 else "N/A"
+        div_yield = f"{round(div_yield_raw * 100, 2)}%" if div_yield_raw > 0 else fallback_div_yield
         
         book_value = safe_float(info.get("bookValue") if info else None, fallback_bv)
         fiftyTwoWeekHigh = safe_float(info.get("fiftyTwoWeekHigh") if info else None, current_price * 1.2)
@@ -345,7 +389,7 @@ def get_stock_data(raw_ticker: str):
         grade("Free Cash Flow Yield > 5%", fcf_yield_raw > 0.05)
         grade("P/E Ratio < 25", 0 < actual_pe < 25)
         grade("P/B Ratio < 5", 0 < actual_pb < 5)
-        grade("Pays a Dividend", div_yield_raw > 0)
+        grade("Pays a Dividend", (div_yield_raw > 0) or (fallback_div_yield != "N/A"))
 
         daily_hist = pd.DataFrame()
         try:
@@ -398,7 +442,8 @@ def get_stock_data(raw_ticker: str):
             "pb": round(actual_pb, 2) if actual_pb else "N/A",
             "eps": round(actual_eps, 2) if actual_eps else "N/A",
             "forward_eps": round(info.get("forwardEps", 0), 2) if info and info.get("forwardEps") else "N/A",
-            "ev_ebitda": round(info.get("enterpriseToEbitda", 0), 2) if info and info.get("enterpriseToEbitda") else "N/A",
+            # Inject our calculated EV/EBITDA and Beta here
+            "ev_ebitda": round(info.get("enterpriseToEbitda", 0), 2) if info and info.get("enterpriseToEbitda") else fallback_ev_ebitda,
             "mkt_cap": format_mkt_cap(final_mkt_cap) if final_mkt_cap else "N/A",
             "fcf_yield": fcf_yield,
             "div_yield": div_yield,
@@ -408,7 +453,7 @@ def get_stock_data(raw_ticker: str):
             "book_value": book_value if book_value else 0,
             "fiftyTwoWeekHigh": fiftyTwoWeekHigh,
             "fiftyTwoWeekLow": fiftyTwoWeekLow,
-            "beta": round(info.get("beta", 0), 2) if info and info.get("beta") else "N/A",
+            "beta": round(info.get("beta", 0), 2) if info and info.get("beta") else fallback_beta,
             "short_interest": short_interest,
             "dist_52w_high": f"{dist_52w_high}%" if dist_52w_high != "N/A" else "N/A",
             "rsi_14": rsi_14,
@@ -422,23 +467,23 @@ def get_stock_data(raw_ticker: str):
         sentences = raw_summary.split('. ')
         short_summary = '. '.join(sentences[:3]) + '.' if len(sentences) > 2 else raw_summary
 
-        industry = info.get('industry', 'Unknown') if info else 'Unknown'
-        industry_map = {
-            'Consumer Electronics': ['MSFT', 'GOOGL', 'META'],
-            'Software - Infrastructure': ['AMZN', 'GOOGL', 'MSFT'],
-            'Semiconductors': ['AMD', 'INTC', 'TSM', 'NVDA', 'AVGO'],
-            'Internet Content & Information': ['GOOGL', 'META', 'SNAP', 'PINS'],
-            'Auto Manufacturers': ['TSLA', 'F', 'GM', 'TM', 'RIVN'],
-            'Banks - Diversified': ['JPM', 'BAC', 'WFC', 'C'],
-            'E-Commerce': ['AMZN', 'BABA', 'WMT', 'EBAY'],
-            'Travel Services': ['BKNG', 'EXPE', 'ABNB', 'TRIP'],
-            'Software - Application': ['CRM', 'ADBE', 'NOW', 'PLTR'],
-            'Software - Travel': ['LYFT', 'ABNB', 'DASH'],
-            'Technology': ['AAPL', 'MSFT', 'GOOGL']
+        # =======================================================
+        # NEW: HARDCODED PEER MATRIX (Bypasses the missing 'info' dict)
+        # =======================================================
+        ticker_peers = {
+            'AAPL': ['MSFT', 'GOOGL', 'META'],
+            'MSFT': ['AAPL', 'GOOGL', 'AMZN'],
+            'TSLA': ['F', 'GM', 'RIVN'],
+            'NVDA': ['AMD', 'INTC', 'TSM'],
+            'AMZN': ['WMT', 'BABA', 'EBAY'],
+            'META': ['GOOGL', 'SNAP', 'PINS'],
+            'GOOGL': ['META', 'MSFT', 'AMZN'],
+            'NFLX': ['DIS', 'WBD', 'AMZN'],
+            'JPM': ['BAC', 'WFC', 'C'],
+            'V': ['MA', 'AXP', 'PYPL'],
+            'AMD': ['NVDA', 'INTC', 'QCOM']
         }
-        
-        candidate_peers = industry_map.get(industry, ['SPY', 'QQQ', 'DIA'])
-        peers = [p for p in candidate_peers if p.upper() != ticker.upper()][:3]
+        peers = ticker_peers.get(ticker.upper(), ['SPY', 'QQQ', 'DIA'])
 
         return {
             "ticker": ticker.upper(), "current_price": round(current_price, 2),
