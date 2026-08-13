@@ -24,8 +24,26 @@ def resolve_ticker(query: str):
         pass
     return query.upper()
 
+def get_safe_session():
+    """Restored and Fortified: Bypasses rate limits without breaking the Info Crumb"""
+    import requests
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+    
+    session = requests.Session()
+    retry = Retry(total=3, backoff_factor=1, status_forcelist=[403, 429, 500, 502, 503, 504])
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+    
+    # Clean User-Agent only. Heavy headers break the yfinance crumb scraper.
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    })
+    return session
+
 # ==========================================
-# --- NEW QUANTITATIVE ENGINES (PHASE 1) ---
+# --- QUANTITATIVE ENGINES ---
 # ==========================================
 
 def calculate_dupont_analysis(income_stmt, balance_sheet):
@@ -58,8 +76,8 @@ def calculate_dupont_analysis(income_stmt, balance_sheet):
 
 def calculate_risk_profile(ticker_symbol):
     try:
-        # FIXED: Removed the broken custom session
-        stock = yf.Ticker(ticker_symbol)
+        safe_sess = get_safe_session()
+        stock = yf.Ticker(ticker_symbol, session=safe_sess)
         hist = stock.history(period="5y")
         
         daily_returns = hist['Close'].pct_change().dropna()
@@ -87,9 +105,7 @@ def generate_sensitivity_matrix(base_wacc, base_exit_multiple, fcf_projections, 
                 pv_tv = terminal_value / ((1 + wacc) ** len(fcf_projections))
                 implied_price = (pv_fcfs + pv_tv) / (shares_outstanding if shares_outstanding else 1)
                 row.append(round(implied_price, 2))
-            
             matrix.append({f"WACC_{round(wacc*100, 1)}%": row})
-            
         return matrix
     except Exception:
         return []
@@ -112,9 +128,10 @@ def get_stock_data(raw_ticker: str):
         f_info, fin, cf, bs, info = None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}
         q_fin = pd.DataFrame() 
         
-        # FIXED: Let yfinance manage its own cookies natively
         for attempt in range(3):
-            stock = yf.Ticker(ticker)
+            # SAFE SESSION RESTORED HERE
+            safe_sess = get_safe_session()
+            stock = yf.Ticker(ticker, session=safe_sess)
             
             f_info = stock.fast_info
             fin = stock.financials
@@ -122,17 +139,16 @@ def get_stock_data(raw_ticker: str):
             bs = stock.balance_sheet
             q_fin = stock.quarterly_financials
             
+            try:
+                fetched_info = stock.info 
+                if fetched_info:
+                    info = fetched_info  
+            except Exception:
+                pass
+                
             if not fin.empty:
                 break
-                
             time.sleep(1.5)
-            
-        try:
-            fetched_info = stock.info 
-            if fetched_info:
-                info = fetched_info  
-        except Exception:
-            pass
         
         recent_hist = stock.history(period="5d")
         if not recent_hist.empty and len(recent_hist) >= 2:
@@ -238,6 +254,7 @@ def get_stock_data(raw_ticker: str):
         except Exception:
             pass
 
+        # --- THE TTM FALLBACK ENGINE ---
         calc_shares = shares if shares > 0 else (fin_data["shares"][-1] if fin_data["shares"] and len(fin_data["shares"]) > 0 and fin_data["shares"][-1] > 0 else 1)
         
         ttm_net_income = 0
@@ -296,9 +313,7 @@ def get_stock_data(raw_ticker: str):
         actual_pb = info.get("priceToBook") if info.get("priceToBook") is not None else fallback_pb
         actual_de = info.get("debtToEquity") if info.get("debtToEquity") is not None else fallback_de
 
-        # ==========================================
-        # --- THE SETHISCORE X-RAY TRACKER ---------
-        # ==========================================
+        # --- SETHISCORE TRACKER ---
         score_breakdown = {}
         score = 0
         
@@ -309,13 +324,13 @@ def get_stock_data(raw_ticker: str):
             if is_pass:
                 score += 10
 
-        grade("Positive Net Income (TTM)", ttm_net_income > 0)
-        grade("Revenue Growth (YoY)", len(fin_data["revenue"]) >= 2 and fin_data["revenue"][-1] > fin_data["revenue"][-2])
+        grade("Positive Net Income", ttm_net_income > 0)
+        grade("Consistent Revenue Growth", len(fin_data["revenue"]) >= 2 and fin_data["revenue"][-1] > fin_data["revenue"][-2])
         grade("Positive Free Cash Flow", latest_fcf > 0)
-        grade("Return on Equity > 15%", actual_roe and actual_roe > 0.15)
-        grade("Profit Margin > 10%", actual_margin and actual_margin > 0.10)
-        grade("Debt to Equity < 1.0", actual_de is not None and actual_de < 100) 
-        grade("FCF Yield > 5%", fcf_yield_raw and fcf_yield_raw > 0.05)
+        grade("Return on Equity (ROE) > 15%", actual_roe and actual_roe > 0.15)
+        grade("Net Profit Margin > 10%", actual_margin and actual_margin > 0.10)
+        grade("Debt-to-Equity Ratio < 1.0", actual_de is not None and actual_de < 100) 
+        grade("Free Cash Flow Yield > 5%", fcf_yield_raw and fcf_yield_raw > 0.05)
         grade("P/E Ratio < 25", actual_pe and 0 < actual_pe < 25)
         grade("P/B Ratio < 5", actual_pb and 0 < actual_pb < 5)
         grade("Pays a Dividend", div_yield_raw and div_yield_raw > 0)
@@ -425,8 +440,9 @@ def get_stock_data(raw_ticker: str):
 def get_chart_data(raw_ticker: str, period: str = "1y", interval: str = "1d"):
     try:
         ticker = resolve_ticker(raw_ticker)
-        # FIXED: Removed the broken custom session
-        stock = yf.Ticker(ticker.upper())
+        # SAFE SESSION RESTORED HERE TOO
+        safe_sess = get_safe_session()
+        stock = yf.Ticker(ticker.upper(), session=safe_sess)
         
         hist = stock.history(period=period, interval=interval)
         if hist.empty: return {"dates": [], "opens": [], "highs": [], "lows": [], "closes": []}
