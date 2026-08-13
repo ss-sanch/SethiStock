@@ -26,7 +26,6 @@ def resolve_ticker(query: str):
     return query.upper()
 
 def get_safe_session():
-    """Restored and Fortified: Bypasses rate limits without breaking the Info Crumb"""
     import requests
     from requests.adapters import HTTPAdapter
     from urllib3.util.retry import Retry
@@ -184,35 +183,33 @@ def get_stock_data(raw_ticker: str):
                 pass
 
         # =================================================================
-        # --- FIXED: STRICT LAZY-LOAD SAFEGUARDS AGAINST KEYERRORS ---
+        # --- THE SAFE FLOAT GUILLOTINE ---
+        # Blocks any 'NoneType' crashes from missing Yahoo Data
         # =================================================================
-        current_price, prev_close, mkt_cap, shares = 0, 0, 0, 0
+        def safe_float(val, fallback=0.0):
+            try:
+                if val is None or pd.isna(val): return float(fallback)
+                return float(val)
+            except Exception:
+                return float(fallback)
 
-        # 1. Armored Price Extraction
+        current_price, prev_close, mkt_cap, shares = 0.0, 0.0, 0.0, 0.0
+
         if recent_hist is not None and not recent_hist.empty and len(recent_hist) >= 2:
-            current_price = float(recent_hist['Close'].iloc[-1])
-            prev_close = float(recent_hist['Close'].iloc[-2])
+            current_price = safe_float(recent_hist['Close'].iloc[-1])
+            prev_close = safe_float(recent_hist['Close'].iloc[-2])
         else:
-            try:
-                current_price = f_info.last_price if f_info is not None else (info.get('currentPrice', 0) if info else 0)
-            except Exception:
-                current_price = info.get('currentPrice', 0) if info else 0
+            cp_val = getattr(f_info, 'last_price', None) if f_info is not None else None
+            current_price = safe_float(cp_val, safe_float(info.get('currentPrice') if info else 0))
                 
-            try:
-                prev_close = f_info.previous_close if f_info is not None else (info.get('previousClose', 0) if info else 0)
-            except Exception:
-                prev_close = info.get('previousClose', 0) if info else 0
+            pc_val = getattr(f_info, 'previous_close', None) if f_info is not None else None
+            prev_close = safe_float(pc_val, safe_float(info.get('previousClose') if info else 0))
 
-        # 2. Armored Market Cap & Shares Extraction (Prevents 'currentTradingPeriod' crash)
-        try:
-            mkt_cap = f_info.market_cap if f_info is not None else 0
-        except Exception:
-            mkt_cap = info.get('marketCap', 0) if info else 0
+        mc_val = getattr(f_info, 'market_cap', None) if f_info is not None else None
+        mkt_cap = safe_float(mc_val, safe_float(info.get('marketCap') if info else 0))
             
-        try:
-            shares = f_info.shares if f_info is not None else 0
-        except Exception:
-            shares = info.get('sharesOutstanding', 0) if info else 0
+        sh_val = getattr(f_info, 'shares', None) if f_info is not None else None
+        shares = safe_float(sh_val, safe_float(info.get('sharesOutstanding') if info else 0))
             
         change = current_price - prev_close
         pct_change = (change / prev_close) * 100 if prev_close else 0
@@ -352,22 +349,23 @@ def get_stock_data(raw_ticker: str):
             return f"${val:,.0f}"
             
         final_mkt_cap = mkt_cap if mkt_cap > 0 else fallback_mkt_cap
-        fcf_yield_raw = (latest_fcf / final_mkt_cap) if final_mkt_cap and latest_fcf else None
-        fcf_yield = f"{round(fcf_yield_raw * 100, 2)}%" if fcf_yield_raw else "N/A"
+        fcf_yield_raw = (latest_fcf / final_mkt_cap) if final_mkt_cap and latest_fcf else 0
+        fcf_yield = f"{round(fcf_yield_raw * 100, 2)}%" if fcf_yield_raw != 0 else "N/A"
         
-        div_yield_raw = info.get("dividendYield", info.get("trailingAnnualDividendYield")) if info else None
-        div_yield = f"{round(div_yield_raw * 100, 2)}%" if div_yield_raw is not None else "N/A"
+        div_yield_raw = safe_float(info.get("dividendYield") if info else info.get("trailingAnnualDividendYield") if info else None)
+        div_yield = f"{round(div_yield_raw * 100, 2)}%" if div_yield_raw > 0 else "N/A"
         
-        book_value = info.get("bookValue", fallback_bv) if info else fallback_bv
-        fiftyTwoWeekHigh = info.get("fiftyTwoWeekHigh", current_price * 1.2) if info else current_price * 1.2
-        fiftyTwoWeekLow = info.get("fiftyTwoWeekLow", current_price * 0.8) if info else current_price * 0.8
+        book_value = safe_float(info.get("bookValue") if info else None, fallback_bv)
+        fiftyTwoWeekHigh = safe_float(info.get("fiftyTwoWeekHigh") if info else None, current_price * 1.2)
+        fiftyTwoWeekLow = safe_float(info.get("fiftyTwoWeekLow") if info else None, current_price * 0.8)
 
-        actual_roe = info.get("returnOnEquity") if info and info.get("returnOnEquity") is not None else fallback_roe
-        actual_margin = info.get("profitMargins") if info and info.get("profitMargins") is not None else fallback_margin
-        actual_pe = info.get("trailingPE") if info and info.get("trailingPE") is not None else fallback_pe
-        actual_eps = info.get("trailingEps") if info and info.get("trailingEps") is not None else fallback_eps
-        actual_pb = info.get("priceToBook") if info and info.get("priceToBook") is not None else fallback_pb
-        actual_de = info.get("debtToEquity") if info and info.get("debtToEquity") is not None else fallback_de
+        # Applying Safe Float to all scoring metrics
+        actual_roe = safe_float(info.get("returnOnEquity") if info else None, fallback_roe)
+        actual_margin = safe_float(info.get("profitMargins") if info else None, fallback_margin)
+        actual_pe = safe_float(info.get("trailingPE") if info else None, fallback_pe)
+        actual_eps = safe_float(info.get("trailingEps") if info else None, fallback_eps)
+        actual_pb = safe_float(info.get("priceToBook") if info else None, fallback_pb)
+        actual_de = safe_float(info.get("debtToEquity") if info else None, fallback_de)
 
         # --- SETHISCORE TRACKER ---
         score_breakdown = {}
@@ -383,13 +381,13 @@ def get_stock_data(raw_ticker: str):
         grade("Positive Net Income", ttm_net_income > 0)
         grade("Consistent Revenue Growth", len(fin_data["revenue"]) >= 2 and fin_data["revenue"][-1] > fin_data["revenue"][-2])
         grade("Positive Free Cash Flow", latest_fcf > 0)
-        grade("Return on Equity (ROE) > 15%", actual_roe and actual_roe > 0.15)
-        grade("Net Profit Margin > 10%", actual_margin and actual_margin > 0.10)
-        grade("Debt-to-Equity Ratio < 1.0", actual_de is not None and actual_de < 100) 
-        grade("Free Cash Flow Yield > 5%", fcf_yield_raw and fcf_yield_raw > 0.05)
-        grade("P/E Ratio < 25", actual_pe and 0 < actual_pe < 25)
-        grade("P/B Ratio < 5", actual_pb and 0 < actual_pb < 5)
-        grade("Pays a Dividend", div_yield_raw and div_yield_raw > 0)
+        grade("Return on Equity (ROE) > 15%", actual_roe > 0.15)
+        grade("Net Profit Margin > 10%", actual_margin > 0.10)
+        grade("Debt-to-Equity Ratio < 1.0", actual_de < 100) 
+        grade("Free Cash Flow Yield > 5%", fcf_yield_raw > 0.05)
+        grade("P/E Ratio < 25", 0 < actual_pe < 25)
+        grade("P/B Ratio < 5", 0 < actual_pb < 5)
+        grade("Pays a Dividend", div_yield_raw > 0)
 
         daily_hist = pd.DataFrame()
         try:
