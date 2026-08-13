@@ -33,9 +33,10 @@ def resolve_ticker(query: str):
 # ==========================================
 
 def scrape_finviz_data(ticker: str):
-    """Surgically extracts Proprietary Stats and Insider Trading directly from Finviz"""
+    """Surgically extracts Proprietary Stats, Profile, and Insider Trading directly from Finviz"""
     finviz_stats = {}
     finviz_insiders = []
+    company_summary = "Company profile not currently available."
     
     try:
         url = f"https://finviz.com/quote.ashx?t={ticker}"
@@ -64,8 +65,16 @@ def scrape_finviz_data(ticker: str):
                                 finviz_stats[key] = val
             except Exception:
                 pass
+
+            # 2. Scrape the Company Overview / Summary
+            try:
+                profile_box = soup.find('td', class_='fullview-profile')
+                if profile_box:
+                    company_summary = profile_box.text.strip()
+            except Exception:
+                pass
                 
-            # 2. Scrape the Missing Insider Trading Table
+            # 3. Scrape the Missing Insider Trading Table
             try:
                 insider_table = soup.find('table', class_='body-table')
                 if insider_table:
@@ -97,7 +106,7 @@ def scrape_finviz_data(ticker: str):
     except Exception:
         pass
         
-    return finviz_stats, finviz_insiders
+    return finviz_stats, finviz_insiders, company_summary
 
 # ==========================================
 # --- QUANTITATIVE ENGINES ---
@@ -213,7 +222,7 @@ def get_stock_data(raw_ticker: str):
             pass
 
         # 2. RUN THE FINVIZ SCRAPER TO FILL IN THE BLANKS
-        fv_stats, fv_insiders = scrape_finviz_data(ticker)
+        fv_stats, fv_insiders, fv_summary = scrape_finviz_data(ticker)
 
         # =================================================================
         # --- SECURE MATH ENGINE ---
@@ -494,18 +503,21 @@ def get_stock_data(raw_ticker: str):
 
         dist_52w_high = round(((current_price - fiftyTwoWeekHigh) / fiftyTwoWeekHigh) * 100, 2) if fiftyTwoWeekHigh and fiftyTwoWeekHigh > 0 else "N/A"
         
-        # Merge Yahoo Info with Finviz Scrapes
-        finviz_short = fv_stats.get("Short Float", "N/A")
-        short_interest = finviz_short if finviz_short != "N/A" else (f"{round(info.get('shortPercentOfFloat') * 100, 2)}%" if info and info.get("shortPercentOfFloat") else "N/A")
+        # --- FINVIZ DATA MAPPING ---
+        short_interest = fv_stats.get("Short Float", "N/A")
+        next_earnings = fv_stats.get("Earnings", "N/A")
+        next_dividend = fv_stats.get("Dividend Ex-Date", "N/A")
 
-        finviz_fwd_eps = fv_stats.get("EPS next Y", "N/A")
-        forward_eps = finviz_fwd_eps if finviz_fwd_eps != "N/A" else (round(info.get("forwardEps", 0), 2) if info and info.get("forwardEps") else "N/A")
-
-        finviz_earnings = fv_stats.get("Earnings", "N/A")
-        next_earnings = finviz_earnings if finviz_earnings != "N/A" else "N/A"
-        
-        finviz_dividend = fv_stats.get("Dividend Ex-Date", "N/A")
-        next_dividend = finviz_dividend if finviz_dividend != "N/A" else "N/A"
+        # Quant Math: Calculate Forward EPS using Current Price and Finviz Forward P/E
+        forward_eps = "N/A"
+        try:
+            fwd_pe_str = fv_stats.get("Forward P/E", "N/A")
+            if fwd_pe_str != "N/A" and current_price > 0:
+                fwd_pe = float(fwd_pe_str.replace(',', ''))
+                if fwd_pe > 0:
+                    forward_eps = round(current_price / fwd_pe, 2)
+        except Exception:
+            pass
 
         stats = {
             "pe": round(actual_pe, 2) if actual_pe else "N/A",
@@ -532,7 +544,8 @@ def get_stock_data(raw_ticker: str):
             "next_dividend": next_dividend   
         }
 
-        raw_summary = info.get("longBusinessSummary", "Company profile not currently available.") if info else "Company profile not currently available."
+        # Format the Finviz Company Overview down to 3 sentences
+        raw_summary = fv_summary if fv_summary and fv_summary != "Company profile not currently available." else (info.get("longBusinessSummary", "Company profile not currently available.") if info else "Company profile not currently available.")
         sentences = raw_summary.split('. ')
         short_summary = '. '.join(sentences[:3]) + '.' if len(sentences) > 2 else raw_summary
 
