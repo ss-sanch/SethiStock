@@ -18,7 +18,6 @@ def resolve_ticker(query: str):
     query = query.strip()
     try:
         ticker_obj = yf.Ticker(query)
-        # Prevent NoneType crashes when checking info natively
         info_dict = getattr(ticker_obj, 'info', {})
         if info_dict and 'symbol' in info_dict:
             return info_dict['symbol']
@@ -137,18 +136,14 @@ def get_stock_data(raw_ticker: str):
         f_info, fin, cf, bs, info = None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}
         q_fin = pd.DataFrame() 
         
-        # --- THE HYBRID FETCH LOOP (Armored against NoneType crashes) ---
         for attempt in range(3):
             try:
-                # We honor your Safe Session for the first two attempts
                 if attempt < 2:
                     safe_sess = get_safe_session()
                     stock = yf.Ticker(ticker, session=safe_sess)
                 else:
-                    # Final attempt gracefully falls back to native yfinance to bypass strict crumb errors
                     stock = yf.Ticker(ticker)
                 
-                # Each property is individually wrapped to prevent NoneType crashes
                 try: f_info = stock.fast_info
                 except Exception: f_info = None
                 
@@ -175,7 +170,6 @@ def get_stock_data(raw_ticker: str):
                 pass
             time.sleep(1.5)
         
-        # Armored History Fetch
         recent_hist = pd.DataFrame()
         try:
             recent_hist = stock.history(period="5d")
@@ -189,17 +183,41 @@ def get_stock_data(raw_ticker: str):
             except Exception:
                 pass
 
+        # =================================================================
+        # --- FIXED: STRICT LAZY-LOAD SAFEGUARDS AGAINST KEYERRORS ---
+        # =================================================================
+        current_price, prev_close, mkt_cap, shares = 0, 0, 0, 0
+
+        # 1. Armored Price Extraction
         if recent_hist is not None and not recent_hist.empty and len(recent_hist) >= 2:
             current_price = float(recent_hist['Close'].iloc[-1])
             prev_close = float(recent_hist['Close'].iloc[-2])
         else:
-            current_price = getattr(f_info, 'last_price', 0) if f_info is not None else 0
-            prev_close = getattr(f_info, 'previous_close', 0) if f_info is not None else 0
+            try:
+                current_price = f_info.last_price if f_info is not None else (info.get('currentPrice', 0) if info else 0)
+            except Exception:
+                current_price = info.get('currentPrice', 0) if info else 0
+                
+            try:
+                prev_close = f_info.previous_close if f_info is not None else (info.get('previousClose', 0) if info else 0)
+            except Exception:
+                prev_close = info.get('previousClose', 0) if info else 0
 
+        # 2. Armored Market Cap & Shares Extraction (Prevents 'currentTradingPeriod' crash)
+        try:
+            mkt_cap = f_info.market_cap if f_info is not None else 0
+        except Exception:
+            mkt_cap = info.get('marketCap', 0) if info else 0
+            
+        try:
+            shares = f_info.shares if f_info is not None else 0
+        except Exception:
+            shares = info.get('sharesOutstanding', 0) if info else 0
+            
         change = current_price - prev_close
         pct_change = (change / prev_close) * 100 if prev_close else 0
-        mkt_cap = getattr(f_info, 'market_cap', 0) if f_info is not None else 0
-        shares = getattr(f_info, 'shares', 0) if f_info is not None else 0
+
+        # =================================================================
 
         fin_data = {
             "years": [], "revenue": [], "operating": [], "net": [], 
