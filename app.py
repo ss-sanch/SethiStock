@@ -60,7 +60,6 @@ def calculate_dupont_analysis(income_stmt, balance_sheet):
 def calculate_risk_profile(ticker_symbol):
     """Calculates 5-Year Historical Value at Risk (VaR) and Volatility"""
     try:
-        # FIXED: Added proper call to get_safe_session to prevent NameError crashes
         safe_sess = get_safe_session()
         stock = yf.Ticker(ticker_symbol, session=safe_sess)
         hist = stock.history(period="5y")
@@ -108,10 +107,9 @@ def health_check():
     return {"status": "SethiStock API is online."}
 
 def get_safe_session():
-    """Generates a clean browser session to bypass Yahoo's bot-detection without triggering WAF blocks"""
+    """Generates a clean browser session to bypass Yahoo's bot-detection"""
     import requests
     session = requests.Session()
-    # FIXED: Removed aggressive headers that trigger Cloudflare/Yahoo cached blocks
     session.headers.update({
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     })
@@ -124,6 +122,7 @@ def get_stock_data(raw_ticker: str):
         ticker = resolve_ticker(raw_ticker)
         
         f_info, fin, cf, bs, info = None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}
+        q_fin = pd.DataFrame() # Quarterly Financials for true TTM math
         
         for attempt in range(3):
             safe_session = get_safe_session()
@@ -133,6 +132,7 @@ def get_stock_data(raw_ticker: str):
             fin = stock.financials
             cf = stock.cashflow
             bs = stock.balance_sheet
+            q_fin = stock.quarterly_financials
             
             try:
                 fetched_info = stock.info 
@@ -146,7 +146,6 @@ def get_stock_data(raw_ticker: str):
                 
             time.sleep(1.5)
         
-        # FIXED: Bulletproof Live Pricing to fix the "Outdated Numbers" bug
         recent_hist = stock.history(period="5d")
         if not recent_hist.empty and len(recent_hist) >= 2:
             current_price = float(recent_hist['Close'].iloc[-1])
@@ -212,7 +211,6 @@ def get_stock_data(raw_ticker: str):
                 if not v: fin_data[k] = [0] * len(cols)
         
         latest_fcf = fin_data["fcf"][-1] if fin_data["fcf"] and len(fin_data["fcf"]) > 0 and fin_data["fcf"][-1] != 0 else 0
-
         dupont_metrics = calculate_dupont_analysis(fin, bs)
         risk_metrics = calculate_risk_profile(ticker)
         
@@ -253,12 +251,24 @@ def get_stock_data(raw_ticker: str):
             pass
 
         # ==========================================
-        # --- THE QUANT FALLBACK MATH ENGINE ---
+        # --- THE TTM (TRAILING 12-MONTHS) MATH ENGINE ---
+        # Fixed the outdated PE/EPS bug by manually rolling up quarters
         # ==========================================
         
         calc_shares = shares if shares > 0 else (fin_data["shares"][-1] if fin_data["shares"] and len(fin_data["shares"]) > 0 and fin_data["shares"][-1] > 0 else 1)
-        calc_net_income = fin_data["net"][-1] if fin_data["net"] and len(fin_data["net"]) > 0 else 0
-        calc_revenue = fin_data["revenue"][-1] if fin_data["revenue"] and len(fin_data["revenue"]) > 0 else 0
+        
+        ttm_net_income = 0
+        ttm_revenue = 0
+        if not q_fin.empty:
+            q_net = get_hist(q_fin, ['Net Income', 'Net Income Common Stockholders', 'Net Profit'])
+            q_rev = get_hist(q_fin, ['Total Revenue', 'Operating Revenue'])
+            # Sum the last 4 available quarters
+            ttm_net_income = sum(q_net[-4:]) if len(q_net) >= 4 else sum(q_net)
+            ttm_revenue = sum(q_rev[-4:]) if len(q_rev) >= 4 else sum(q_rev)
+        else:
+            # Absolute worst-case fallback to last year's annual data
+            ttm_net_income = fin_data["net"][-1] if fin_data["net"] and len(fin_data["net"]) > 0 else 0
+            ttm_revenue = fin_data["revenue"][-1] if fin_data["revenue"] and len(fin_data["revenue"]) > 0 else 0
         
         total_equity = 0
         if not bs.empty:
@@ -269,15 +279,17 @@ def get_stock_data(raw_ticker: str):
             elif 'Common Stock Equity' in bs.index:
                 total_equity = bs.loc['Common Stock Equity'].iloc[0]
 
-        fallback_eps = calc_net_income / calc_shares if calc_shares > 1 else 0
+        fallback_eps = ttm_net_income / calc_shares if calc_shares > 1 else 0
         fallback_pe = current_price / fallback_eps if fallback_eps > 0 else 0
         fallback_bv = total_equity / calc_shares if calc_shares > 1 else 0
         fallback_pb = current_price / fallback_bv if fallback_bv > 0 else 0
         fallback_mkt_cap = current_price * calc_shares if calc_shares > 1 else 0
         
-        # FIXED: Core Fallbacks for SethiScore
         fallback_roe = (fallback_eps / fallback_bv) if fallback_bv > 0 else 0
-        fallback_margin = (calc_net_income / calc_revenue) if calc_revenue > 0 else 0
+        fallback_margin = (ttm_net_income / ttm_revenue) if ttm_revenue > 0 else 0
+        
+        fallback_debt = fin_data["debt"][-1] if fin_data["debt"] and len(fin_data["debt"]) > 0 else 0
+        fallback_de = (fallback_debt / total_equity * 100) if total_equity > 0 else 0
 
         def format_mkt_cap(val):
             if val >= 1e12: return f"${val/1e12:.2f}T"
@@ -296,26 +308,37 @@ def get_stock_data(raw_ticker: str):
         fiftyTwoWeekHigh = info.get("fiftyTwoWeekHigh", current_price * 1.2)
         fiftyTwoWeekLow = info.get("fiftyTwoWeekLow", current_price * 0.8)
 
-        # FIXED: Wire the SethiScore directly into the fallback math variables!
+        # Wire the SethiScore directly into True TTM fallbacks if API is blocked
         actual_roe = info.get("returnOnEquity") if info.get("returnOnEquity") is not None else fallback_roe
         actual_margin = info.get("profitMargins") if info.get("profitMargins") is not None else fallback_margin
         actual_pe = info.get("trailingPE") if info.get("trailingPE") is not None else fallback_pe
+        actual_eps = info.get("trailingEps") if info.get("trailingEps") is not None else fallback_eps
         actual_pb = info.get("priceToBook") if info.get("priceToBook") is not None else fallback_pb
+        actual_de = info.get("debtToEquity") if info.get("debtToEquity") is not None else fallback_de
 
+        # ==========================================
+        # --- THE SETHISCORE X-RAY TRACKER ---------
+        # ==========================================
+        score_breakdown = {}
         score = 0
-        if fin_data["net"] and len(fin_data["net"]) > 0 and fin_data["net"][-1] > 0: score += 10
-        if len(fin_data["revenue"]) >= 2 and fin_data["revenue"][-1] > fin_data["revenue"][-2]: score += 10
-        if latest_fcf > 0: score += 10
-        if actual_roe and actual_roe > 0.15: score += 10
-        if actual_margin and actual_margin > 0.10: score += 10
         
-        debt_equity = info.get("debtToEquity")
-        if debt_equity is not None and debt_equity < 100: score += 10
-        
-        if fcf_yield_raw and fcf_yield_raw > 0.05: score += 10
-        if actual_pe and 0 < actual_pe < 25: score += 10
-        if actual_pb and 0 < actual_pb < 5: score += 10
-        if div_yield_raw and div_yield_raw > 0: score += 10
+        def grade(metric_name, condition):
+            nonlocal score
+            is_pass = bool(condition)
+            score_breakdown[metric_name] = is_pass
+            if is_pass:
+                score += 10
+
+        grade("Positive Net Income (TTM)", ttm_net_income > 0)
+        grade("Revenue Growth (YoY)", len(fin_data["revenue"]) >= 2 and fin_data["revenue"][-1] > fin_data["revenue"][-2])
+        grade("Positive Free Cash Flow", latest_fcf > 0)
+        grade("Return on Equity > 15%", actual_roe and actual_roe > 0.15)
+        grade("Profit Margin > 10%", actual_margin and actual_margin > 0.10)
+        grade("Debt to Equity < 1.0", actual_de is not None and actual_de < 100) # < 100% means ratio < 1.0
+        grade("FCF Yield > 5%", fcf_yield_raw and fcf_yield_raw > 0.05)
+        grade("P/E Ratio < 25", actual_pe and 0 < actual_pe < 25)
+        grade("P/B Ratio < 5", actual_pb and 0 < actual_pb < 5)
+        grade("Pays a Dividend", div_yield_raw and div_yield_raw > 0)
 
         daily_hist = stock.history(period="1y")
         rsi_14 = "N/A"
@@ -344,7 +367,6 @@ def get_stock_data(raw_ticker: str):
                 sma_200_pct = round(((current_price - sma_200) / sma_200) * 100, 2)
 
         dist_52w_high = round(((current_price - fiftyTwoWeekHigh) / fiftyTwoWeekHigh) * 100, 2) if fiftyTwoWeekHigh and fiftyTwoWeekHigh > 0 else "N/A"
-        
         short_float = info.get("shortPercentOfFloat")
         short_interest = f"{round(short_float * 100, 2)}%" if short_float else "N/A"
 
@@ -362,7 +384,7 @@ def get_stock_data(raw_ticker: str):
         stats = {
             "pe": round(actual_pe, 2) if actual_pe else "N/A",
             "pb": round(actual_pb, 2) if actual_pb else "N/A",
-            "eps": round(info.get("trailingEps", fallback_eps), 2) if info.get("trailingEps", fallback_eps) else "N/A",
+            "eps": round(actual_eps, 2) if actual_eps else "N/A",
             "forward_eps": round(info.get("forwardEps", 0), 2) if info.get("forwardEps") else "N/A",
             "ev_ebitda": round(info.get("enterpriseToEbitda", 0), 2) if info.get("enterpriseToEbitda") else "N/A",
             "mkt_cap": format_mkt_cap(final_mkt_cap) if final_mkt_cap else "N/A",
@@ -370,6 +392,7 @@ def get_stock_data(raw_ticker: str):
             "div_yield": div_yield,
             "roe": f"{round(actual_roe * 100, 2)}%" if actual_roe else "N/A",
             "sethi_score": score,
+            "sethi_score_breakdown": score_breakdown, # FED DIRECTLY TO FRONTEND
             "book_value": book_value if book_value else 0,
             "fiftyTwoWeekHigh": fiftyTwoWeekHigh,
             "fiftyTwoWeekLow": fiftyTwoWeekLow,
