@@ -4,6 +4,14 @@ import yfinance as yf
 import requests
 import pandas as pd
 import numpy as np # INJECTED: Required for VaR and Volatility statistics
+import requests_cache # <-- ADD THIS NEW IMPORT
+
+# --- RATE LIMIT SHIELD & MEMORY VAULT ---
+# This saves stock data for 15 minutes to prevent Yahoo from banning the Render server
+session = requests_cache.CachedSession('yfinance.cache', expire_after=900)
+
+# Disguise the server to look like a normal human using Google Chrome on Windows
+session.headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
 app = FastAPI(title="SethiStock Data Engine")
 
@@ -15,18 +23,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def get_session():
-    session = requests.Session()
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-    })
-    return session
-
 def resolve_ticker(query: str):
     query = query.strip()
     try:
-        session = get_session()
+        # Use our cached session here too!
         url = f"https://query2.finance.yahoo.com/v1/finance/search?q={query}&quotesCount=1&newsCount=0"
         res = session.get(url)
         if res.status_code == 200:
@@ -76,7 +76,8 @@ def calculate_dupont_analysis(income_stmt, balance_sheet):
 def calculate_risk_profile(ticker_symbol):
     """Calculates 5-Year Historical Value at Risk (VaR) and Volatility"""
     try:
-        stock = yf.Ticker(ticker_symbol)
+        # FIXED: Added the session=session here so historical data is also cached!
+        stock = yf.Ticker(ticker_symbol, session=session)
         hist = stock.history(period="5y")
         
         daily_returns = hist['Close'].pct_change().dropna()
@@ -124,7 +125,7 @@ def health_check():
 def get_stock_data(raw_ticker: str):
     try:
         ticker = resolve_ticker(raw_ticker)
-        session = get_session()
+        # REMOVED the old get_session() here. Now using global cache!
         stock = yf.Ticker(ticker, session=session)
         f_info = stock.fast_info
         
@@ -331,7 +332,7 @@ def get_stock_data(raw_ticker: str):
             "pe": round(info.get("trailingPE", 0), 2) if info.get("trailingPE") else "N/A",
             "pb": round(info.get("priceToBook", 0), 2) if info.get("priceToBook") else "N/A",
             "eps": round(info.get("trailingEps", 0), 2) if info.get("trailingEps") else "N/A",
-            "forward_eps": round(info.get("forwardEps", 0), 2) if info.get("forwardEps") else "N/A", # <-- NEW LINE
+            "forward_eps": round(info.get("forwardEps", 0), 2) if info.get("forwardEps") else "N/A",
             "ev_ebitda": round(info.get("enterpriseToEbitda", 0), 2) if info.get("enterpriseToEbitda") else "N/A",
             "mkt_cap": format_mkt_cap(mkt_cap) if mkt_cap else "N/A",
             "fcf_yield": fcf_yield,
@@ -347,8 +348,8 @@ def get_stock_data(raw_ticker: str):
             "rsi_14": rsi_14,
             "stoch_k": stoch_k,
             "sma_200_pct": f"{sma_200_pct}%" if sma_200_pct != "N/A" else "N/A",
-            "next_earnings": next_earnings,  # <-- NEW
-            "next_dividend": next_dividend   # <-- NEW
+            "next_earnings": next_earnings,  
+            "next_dividend": next_dividend   
         }
 
         raw_summary = info.get("longBusinessSummary", "Company profile not currently available.")
@@ -379,9 +380,9 @@ def get_stock_data(raw_ticker: str):
             "shares": shares, "fcf": latest_fcf, "financials": fin_data, "stats": stats,
             "insiders": insider_list, "peers": peers,
             "summary": short_summary,
-            "dupont_analysis": dupont_metrics,           # <-- NEW PAYLOAD DATA
-            "risk_profile": risk_metrics,                # <-- NEW PAYLOAD DATA
-            "sensitivity_matrix": sensitivity_matrix     # <-- NEW PAYLOAD DATA
+            "dupont_analysis": dupont_metrics,           
+            "risk_profile": risk_metrics,                
+            "sensitivity_matrix": sensitivity_matrix     
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -390,7 +391,7 @@ def get_stock_data(raw_ticker: str):
 def get_chart_data(raw_ticker: str, period: str = "1y", interval: str = "1d"):
     try:
         ticker = resolve_ticker(raw_ticker)
-        session = get_session()
+        # REMOVED the old get_session() here too. Using global cache.
         stock = yf.Ticker(ticker.upper(), session=session)
         hist = stock.history(period=period, interval=interval)
         if hist.empty: return {"dates": [], "opens": [], "highs": [], "lows": [], "closes": []}
