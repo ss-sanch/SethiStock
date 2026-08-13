@@ -52,20 +52,16 @@ def scrape_finviz_data(ticker: str):
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            # 1. Scrape the Missing Insights & Stats
-            try:
-                tables = soup.find_all('table', class_='snapshot-table2')
-                if tables:
-                    for row in tables[0].find_all('tr'):
-                        cols = row.find_all('td')
-                        for i in range(0, len(cols), 2):
-                            if i+1 < len(cols):
-                                key = cols[i].text.strip()
-                                val = cols[i+1].text.strip()
-                                finviz_stats[key] = val
-            except Exception:
-                pass
-
+            # 1. BULLETPROOF STATS EXTRACTION 
+            # Hunts exactly for the text labels, completely ignoring Finviz's CSS class changes
+            targets = ["Forward P/E", "Short Float", "Earnings", "Dividend Ex-Date"]
+            for td in soup.find_all('td'):
+                txt = td.text.strip()
+                if txt in targets:
+                    nxt = td.find_next_sibling('td')
+                    if nxt:
+                        finviz_stats[txt] = nxt.text.strip()
+                        
             # 2. Scrape the Company Overview / Summary
             try:
                 profile_box = soup.find('td', class_='fullview-profile')
@@ -74,7 +70,7 @@ def scrape_finviz_data(ticker: str):
             except Exception:
                 pass
                 
-            # 3. Scrape the Missing Insider Trading Table
+            # 3. Scrape the Insider Trading Table
             try:
                 insider_table = soup.find('table', class_='body-table')
                 if insider_table:
