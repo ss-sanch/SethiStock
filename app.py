@@ -18,8 +18,10 @@ def resolve_ticker(query: str):
     query = query.strip()
     try:
         ticker_obj = yf.Ticker(query)
-        if ticker_obj.info and 'symbol' in ticker_obj.info:
-            return ticker_obj.info['symbol']
+        # Prevent NoneType crashes when checking info natively
+        info_dict = getattr(ticker_obj, 'info', {})
+        if info_dict and 'symbol' in info_dict:
+            return info_dict['symbol']
     except Exception:
         pass
     return query.upper()
@@ -36,7 +38,6 @@ def get_safe_session():
     session.mount('http://', adapter)
     session.mount('https://', adapter)
     
-    # Clean User-Agent only. Heavy headers break the yfinance crumb scraper.
     session.headers.update({
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     })
@@ -78,8 +79,16 @@ def calculate_risk_profile(ticker_symbol):
     try:
         safe_sess = get_safe_session()
         stock = yf.Ticker(ticker_symbol, session=safe_sess)
-        hist = stock.history(period="5y")
-        
+        hist = pd.DataFrame()
+        try:
+            hist = stock.history(period="5y")
+        except Exception:
+            pass
+            
+        if hist.empty:
+            native_stock = yf.Ticker(ticker_symbol)
+            hist = native_stock.history(period="5y")
+            
         daily_returns = hist['Close'].pct_change().dropna()
         var_95 = np.percentile(daily_returns, 5) 
         volatility = daily_returns.std() * np.sqrt(252) 
@@ -128,40 +137,69 @@ def get_stock_data(raw_ticker: str):
         f_info, fin, cf, bs, info = None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}
         q_fin = pd.DataFrame() 
         
+        # --- THE HYBRID FETCH LOOP (Armored against NoneType crashes) ---
         for attempt in range(3):
-            # SAFE SESSION RESTORED HERE
-            safe_sess = get_safe_session()
-            stock = yf.Ticker(ticker, session=safe_sess)
-            
-            f_info = stock.fast_info
-            fin = stock.financials
-            cf = stock.cashflow
-            bs = stock.balance_sheet
-            q_fin = stock.quarterly_financials
-            
             try:
-                fetched_info = stock.info 
-                if fetched_info:
-                    info = fetched_info  
+                # We honor your Safe Session for the first two attempts
+                if attempt < 2:
+                    safe_sess = get_safe_session()
+                    stock = yf.Ticker(ticker, session=safe_sess)
+                else:
+                    # Final attempt gracefully falls back to native yfinance to bypass strict crumb errors
+                    stock = yf.Ticker(ticker)
+                
+                # Each property is individually wrapped to prevent NoneType crashes
+                try: f_info = stock.fast_info
+                except Exception: f_info = None
+                
+                try: fin = stock.financials
+                except Exception: fin = pd.DataFrame()
+                
+                try: cf = stock.cashflow
+                except Exception: cf = pd.DataFrame()
+                
+                try: bs = stock.balance_sheet
+                except Exception: bs = pd.DataFrame()
+                
+                try: q_fin = stock.quarterly_financials
+                except Exception: q_fin = pd.DataFrame()
+                
+                try: 
+                    fetched_info = stock.info 
+                    if fetched_info: info = fetched_info  
+                except Exception: pass
+                
+                if isinstance(fin, pd.DataFrame) and not fin.empty:
+                    break
             except Exception:
                 pass
-                
-            if not fin.empty:
-                break
             time.sleep(1.5)
         
-        recent_hist = stock.history(period="5d")
-        if not recent_hist.empty and len(recent_hist) >= 2:
+        # Armored History Fetch
+        recent_hist = pd.DataFrame()
+        try:
+            recent_hist = stock.history(period="5d")
+        except Exception:
+            pass
+            
+        if recent_hist is None or recent_hist.empty:
+            try:
+                native_stock = yf.Ticker(ticker)
+                recent_hist = native_stock.history(period="5d")
+            except Exception:
+                pass
+
+        if recent_hist is not None and not recent_hist.empty and len(recent_hist) >= 2:
             current_price = float(recent_hist['Close'].iloc[-1])
             prev_close = float(recent_hist['Close'].iloc[-2])
         else:
-            current_price = getattr(f_info, 'last_price', 0)
-            prev_close = getattr(f_info, 'previous_close', 0)
+            current_price = getattr(f_info, 'last_price', 0) if f_info is not None else 0
+            prev_close = getattr(f_info, 'previous_close', 0) if f_info is not None else 0
 
         change = current_price - prev_close
         pct_change = (change / prev_close) * 100 if prev_close else 0
-        mkt_cap = getattr(f_info, 'market_cap', 0)
-        shares = getattr(f_info, 'shares', 0)
+        mkt_cap = getattr(f_info, 'market_cap', 0) if f_info is not None else 0
+        shares = getattr(f_info, 'shares', 0) if f_info is not None else 0
 
         fin_data = {
             "years": [], "revenue": [], "operating": [], "net": [], 
@@ -183,7 +221,7 @@ def get_stock_data(raw_ticker: str):
                     except: pass
             return [0] * len(df.columns) if df is not None and not df.empty else []
 
-        if not fin.empty:
+        if fin is not None and not fin.empty:
             cols = fin.columns[::-1] 
             fin_data["years"] = [str(c.year) for c in cols]
             rev = get_hist(fin, ['Total Revenue', 'Operating Revenue'])
@@ -215,7 +253,7 @@ def get_stock_data(raw_ticker: str):
                 if not v: fin_data[k] = [0] * len(cols)
         
         latest_fcf = fin_data["fcf"][-1] if fin_data["fcf"] and len(fin_data["fcf"]) > 0 and fin_data["fcf"][-1] != 0 else 0
-        dupont_metrics = calculate_dupont_analysis(fin, bs)
+        dupont_metrics = calculate_dupont_analysis(fin, bs) if isinstance(fin, pd.DataFrame) and isinstance(bs, pd.DataFrame) else {}
         risk_metrics = calculate_risk_profile(ticker)
         
         base_fcf_projections = [latest_fcf * ((1.15) ** i) for i in range(1, 6)] if latest_fcf > 0 else [0,0,0,0,0]
@@ -259,7 +297,7 @@ def get_stock_data(raw_ticker: str):
         
         ttm_net_income = 0
         ttm_revenue = 0
-        if not q_fin.empty:
+        if q_fin is not None and not q_fin.empty:
             q_net = get_hist(q_fin, ['Net Income', 'Net Income Common Stockholders', 'Net Profit'])
             q_rev = get_hist(q_fin, ['Total Revenue', 'Operating Revenue'])
             ttm_net_income = sum(q_net[-4:]) if len(q_net) >= 4 else sum(q_net)
@@ -269,7 +307,7 @@ def get_stock_data(raw_ticker: str):
             ttm_revenue = fin_data["revenue"][-1] if fin_data["revenue"] and len(fin_data["revenue"]) > 0 else 0
         
         total_equity = 0
-        if not bs.empty:
+        if bs is not None and not bs.empty:
             if 'Stockholders Equity' in bs.index:
                 total_equity = bs.loc['Stockholders Equity'].iloc[0]
             elif 'Total Equity Gross Minority Interest' in bs.index:
@@ -299,19 +337,19 @@ def get_stock_data(raw_ticker: str):
         fcf_yield_raw = (latest_fcf / final_mkt_cap) if final_mkt_cap and latest_fcf else None
         fcf_yield = f"{round(fcf_yield_raw * 100, 2)}%" if fcf_yield_raw else "N/A"
         
-        div_yield_raw = info.get("dividendYield", info.get("trailingAnnualDividendYield"))
+        div_yield_raw = info.get("dividendYield", info.get("trailingAnnualDividendYield")) if info else None
         div_yield = f"{round(div_yield_raw * 100, 2)}%" if div_yield_raw is not None else "N/A"
         
-        book_value = info.get("bookValue", fallback_bv)
-        fiftyTwoWeekHigh = info.get("fiftyTwoWeekHigh", current_price * 1.2)
-        fiftyTwoWeekLow = info.get("fiftyTwoWeekLow", current_price * 0.8)
+        book_value = info.get("bookValue", fallback_bv) if info else fallback_bv
+        fiftyTwoWeekHigh = info.get("fiftyTwoWeekHigh", current_price * 1.2) if info else current_price * 1.2
+        fiftyTwoWeekLow = info.get("fiftyTwoWeekLow", current_price * 0.8) if info else current_price * 0.8
 
-        actual_roe = info.get("returnOnEquity") if info.get("returnOnEquity") is not None else fallback_roe
-        actual_margin = info.get("profitMargins") if info.get("profitMargins") is not None else fallback_margin
-        actual_pe = info.get("trailingPE") if info.get("trailingPE") is not None else fallback_pe
-        actual_eps = info.get("trailingEps") if info.get("trailingEps") is not None else fallback_eps
-        actual_pb = info.get("priceToBook") if info.get("priceToBook") is not None else fallback_pb
-        actual_de = info.get("debtToEquity") if info.get("debtToEquity") is not None else fallback_de
+        actual_roe = info.get("returnOnEquity") if info and info.get("returnOnEquity") is not None else fallback_roe
+        actual_margin = info.get("profitMargins") if info and info.get("profitMargins") is not None else fallback_margin
+        actual_pe = info.get("trailingPE") if info and info.get("trailingPE") is not None else fallback_pe
+        actual_eps = info.get("trailingEps") if info and info.get("trailingEps") is not None else fallback_eps
+        actual_pb = info.get("priceToBook") if info and info.get("priceToBook") is not None else fallback_pb
+        actual_de = info.get("debtToEquity") if info and info.get("debtToEquity") is not None else fallback_de
 
         # --- SETHISCORE TRACKER ---
         score_breakdown = {}
@@ -335,12 +373,24 @@ def get_stock_data(raw_ticker: str):
         grade("P/B Ratio < 5", actual_pb and 0 < actual_pb < 5)
         grade("Pays a Dividend", div_yield_raw and div_yield_raw > 0)
 
-        daily_hist = stock.history(period="1y")
+        daily_hist = pd.DataFrame()
+        try:
+            daily_hist = stock.history(period="1y")
+        except Exception:
+            pass
+            
+        if daily_hist is None or daily_hist.empty:
+            try:
+                native_stock = yf.Ticker(ticker)
+                daily_hist = native_stock.history(period="1y")
+            except Exception:
+                pass
+
         rsi_14 = "N/A"
         stoch_k = "N/A"
         sma_200_pct = "N/A"
         
-        if not daily_hist.empty and len(daily_hist) >= 14:
+        if daily_hist is not None and not daily_hist.empty and len(daily_hist) >= 14:
             closes = daily_hist['Close']
             lows = daily_hist['Low']
             highs = daily_hist['High']
@@ -362,7 +412,7 @@ def get_stock_data(raw_ticker: str):
                 sma_200_pct = round(((current_price - sma_200) / sma_200) * 100, 2)
 
         dist_52w_high = round(((current_price - fiftyTwoWeekHigh) / fiftyTwoWeekHigh) * 100, 2) if fiftyTwoWeekHigh and fiftyTwoWeekHigh > 0 else "N/A"
-        short_float = info.get("shortPercentOfFloat")
+        short_float = info.get("shortPercentOfFloat") if info else None
         short_interest = f"{round(short_float * 100, 2)}%" if short_float else "N/A"
 
         next_earnings = "N/A"
@@ -380,8 +430,8 @@ def get_stock_data(raw_ticker: str):
             "pe": round(actual_pe, 2) if actual_pe else "N/A",
             "pb": round(actual_pb, 2) if actual_pb else "N/A",
             "eps": round(actual_eps, 2) if actual_eps else "N/A",
-            "forward_eps": round(info.get("forwardEps", 0), 2) if info.get("forwardEps") else "N/A",
-            "ev_ebitda": round(info.get("enterpriseToEbitda", 0), 2) if info.get("enterpriseToEbitda") else "N/A",
+            "forward_eps": round(info.get("forwardEps", 0), 2) if info and info.get("forwardEps") else "N/A",
+            "ev_ebitda": round(info.get("enterpriseToEbitda", 0), 2) if info and info.get("enterpriseToEbitda") else "N/A",
             "mkt_cap": format_mkt_cap(final_mkt_cap) if final_mkt_cap else "N/A",
             "fcf_yield": fcf_yield,
             "div_yield": div_yield,
@@ -391,7 +441,7 @@ def get_stock_data(raw_ticker: str):
             "book_value": book_value if book_value else 0,
             "fiftyTwoWeekHigh": fiftyTwoWeekHigh,
             "fiftyTwoWeekLow": fiftyTwoWeekLow,
-            "beta": round(info.get("beta", 0), 2) if info.get("beta") else "N/A",
+            "beta": round(info.get("beta", 0), 2) if info and info.get("beta") else "N/A",
             "short_interest": short_interest,
             "dist_52w_high": f"{dist_52w_high}%" if dist_52w_high != "N/A" else "N/A",
             "rsi_14": rsi_14,
@@ -401,11 +451,11 @@ def get_stock_data(raw_ticker: str):
             "next_dividend": next_dividend   
         }
 
-        raw_summary = info.get("longBusinessSummary", "Company profile not currently available.")
+        raw_summary = info.get("longBusinessSummary", "Company profile not currently available.") if info else "Company profile not currently available."
         sentences = raw_summary.split('. ')
         short_summary = '. '.join(sentences[:3]) + '.' if len(sentences) > 2 else raw_summary
 
-        industry = info.get('industry', 'Unknown')
+        industry = info.get('industry', 'Unknown') if info else 'Unknown'
         industry_map = {
             'Consumer Electronics': ['MSFT', 'GOOGL', 'META'],
             'Software - Infrastructure': ['AMZN', 'GOOGL', 'MSFT'],
@@ -440,12 +490,25 @@ def get_stock_data(raw_ticker: str):
 def get_chart_data(raw_ticker: str, period: str = "1y", interval: str = "1d"):
     try:
         ticker = resolve_ticker(raw_ticker)
-        # SAFE SESSION RESTORED HERE TOO
-        safe_sess = get_safe_session()
-        stock = yf.Ticker(ticker.upper(), session=safe_sess)
         
-        hist = stock.history(period=period, interval=interval)
-        if hist.empty: return {"dates": [], "opens": [], "highs": [], "lows": [], "closes": []}
+        hist = pd.DataFrame()
+        try:
+            safe_sess = get_safe_session()
+            stock = yf.Ticker(ticker.upper(), session=safe_sess)
+            hist = stock.history(period=period, interval=interval)
+        except Exception:
+            pass
+            
+        if hist is None or hist.empty:
+            try:
+                native_stock = yf.Ticker(ticker.upper())
+                hist = native_stock.history(period=period, interval=interval)
+            except Exception:
+                pass
+
+        if hist is None or hist.empty: 
+            return {"dates": [], "opens": [], "highs": [], "lows": [], "closes": []}
+            
         if period == "max": hist = hist.loc['2000':] 
         return {
             "dates": hist.index.strftime('%Y-%m-%d %H:%M:%S').tolist(),
