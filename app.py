@@ -3,15 +3,18 @@ from fastapi.middleware.cors import CORSMiddleware
 import yfinance as yf
 import requests
 import pandas as pd
-import numpy as np # INJECTED: Required for VaR and Volatility statistics
-import requests_cache # <-- ADD THIS NEW IMPORT
+import numpy as np 
 
-# --- RATE LIMIT SHIELD & MEMORY VAULT ---
-# This saves stock data for 15 minutes to prevent Yahoo from banning the Render server
-session = requests_cache.CachedSession('yfinance.cache', expire_after=900)
-
-# Disguise the server to look like a normal human using Google Chrome on Windows
-session.headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+# --- RATE LIMIT SHIELD (CRUMB-SAFE) ---
+# We use a persistent session to pool connections, but we DO NOT cache the security tokens.
+# The heavy User-Agent disguise prevents the "429 Too Many Requests" error.
+session = requests.Session()
+session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept": "*/*",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive"
+})
 
 app = FastAPI(title="SethiStock Data Engine")
 
@@ -26,7 +29,6 @@ app.add_middleware(
 def resolve_ticker(query: str):
     query = query.strip()
     try:
-        # Use our cached session here too!
         url = f"https://query2.finance.yahoo.com/v1/finance/search?q={query}&quotesCount=1&newsCount=0"
         res = session.get(url)
         if res.status_code == 200:
