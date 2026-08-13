@@ -1,6 +1,7 @@
-fastapi==0.104.1
-uvicorn==0.24.0
-yfinance>=0.2.40
-pandas==2.1.2
-requests
-google-generativeai
+fastapi==0.111.0
+uvicorn==0.30.1
+yfinance==0.2.40
+plotly==5.22.0
+pandas==2.2.2
+google-generativeai==0.7.1
+requests-cache==1.2.1
