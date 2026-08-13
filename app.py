@@ -4,6 +4,8 @@ import yfinance as yf
 import pandas as pd
 import numpy as np 
 import time
+import requests
+from bs4 import BeautifulSoup
 
 app = FastAPI(title="SethiStock Data Engine")
 
@@ -25,6 +27,77 @@ def resolve_ticker(query: str):
     except Exception:
         pass
     return query.upper()
+
+# ==========================================
+# --- NEW: FINVIZ HTML SCRAPER ENGINE ---
+# ==========================================
+
+def scrape_finviz_data(ticker: str):
+    """Surgically extracts Proprietary Stats and Insider Trading directly from Finviz"""
+    finviz_stats = {}
+    finviz_insiders = []
+    
+    try:
+        url = f"https://finviz.com/quote.ashx?t={ticker}"
+        # Heavily disguised browser headers to bypass Finviz bot-blocks
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Upgrade-Insecure-Requests": "1"
+        }
+        
+        response = requests.get(url, headers=headers, timeout=3)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # 1. Scrape the Missing Insights & Stats
+            try:
+                tables = soup.find_all('table', class_='snapshot-table2')
+                if tables:
+                    for row in tables[0].find_all('tr'):
+                        cols = row.find_all('td')
+                        for i in range(0, len(cols), 2):
+                            if i+1 < len(cols):
+                                key = cols[i].text.strip()
+                                val = cols[i+1].text.strip()
+                                finviz_stats[key] = val
+            except Exception:
+                pass
+                
+            # 2. Scrape the Missing Insider Trading Table
+            try:
+                insider_table = soup.find('table', class_='body-table')
+                if insider_table:
+                    rows = insider_table.find_all('tr')[1:] # Skip header
+                    for row in rows[:15]: # Grab top 15 trades
+                        cols = row.find_all('td')
+                        if len(cols) >= 9:
+                            name = cols[0].text.strip()
+                            position = cols[1].text.strip()
+                            transaction_text = cols[3].text.strip()
+                            shares_str = cols[5].text.strip().replace(',', '')
+                            value_str = cols[7].text.strip().replace(',', '')
+                            
+                            action = "Buy" if "Buy" in transaction_text else "Sell" if "Sale" in transaction_text else "Execute/Other"
+                            shares = float(shares_str) if shares_str.replace('.','').isdigit() else 0
+                            value = float(value_str) if value_str.replace('.','').isdigit() else 0
+                            
+                            if shares > 0: # Only append valid trades
+                                finviz_insiders.append({
+                                    "name": name,
+                                    "position": position,
+                                    "transaction": action,
+                                    "shares": shares,
+                                    "value": value
+                                })
+            except Exception:
+                pass
+                
+    except Exception:
+        pass
+        
+    return finviz_stats, finviz_insiders
 
 # ==========================================
 # --- QUANTITATIVE ENGINES ---
@@ -110,7 +183,7 @@ def get_stock_data(raw_ticker: str):
         f_info, fin, cf, bs, info = None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}
         q_fin = pd.DataFrame() 
         
-        # PURE NATIVE FETCH - Letting yfinance manage its own cookies and crumbs
+        # 1. NATIVE YFINANCE FETCH
         stock = yf.Ticker(ticker)
         
         try: f_info = stock.fast_info
@@ -139,12 +212,17 @@ def get_stock_data(raw_ticker: str):
         except Exception:
             pass
 
+        # 2. RUN THE FINVIZ SCRAPER TO FILL IN THE BLANKS
+        fv_stats, fv_insiders = scrape_finviz_data(ticker)
+
         # =================================================================
         # --- SECURE MATH ENGINE ---
         # =================================================================
         def safe_float(val, fallback=0.0):
             try:
-                if val is None or pd.isna(val): return float(fallback)
+                if val is None or pd.isna(val) or val == '-': return float(fallback)
+                if isinstance(val, str):
+                    val = val.replace(',', '').replace('%', '')
                 return float(val)
             except Exception:
                 return float(fallback)
@@ -233,38 +311,40 @@ def get_stock_data(raw_ticker: str):
         base_fcf_projections = [latest_fcf * ((1.15) ** i) for i in range(1, 6)] if latest_fcf > 0 else [0,0,0,0,0]
         sensitivity_matrix = generate_sensitivity_matrix(0.10, 15.0, base_fcf_projections, shares)
 
-        insider_list = []
-        try:
-            ins_df = stock.insider_transactions
-            if ins_df is not None and not ins_df.empty:
-                ins_df = ins_df.reset_index()
-                ins_df.columns = [str(c).strip() for c in ins_df.columns]
-                
-                name_col = next((c for c in ins_df.columns if 'insider' in str(c).lower() or 'name' in str(c).lower()), None)
-                pos_col = next((c for c in ins_df.columns if 'position' in str(c).lower() or 'title' in str(c).lower()), None)
-                shares_col = next((c for c in ins_df.columns if 'share' in str(c).lower()), None)
-                val_col = next((c for c in ins_df.columns if 'value' in str(c).lower()), None)
+        # Use Finviz Insiders if available, otherwise try Yahoo
+        insider_list = fv_insiders
+        if not insider_list:
+            try:
+                ins_df = stock.insider_transactions
+                if ins_df is not None and not ins_df.empty:
+                    ins_df = ins_df.reset_index()
+                    ins_df.columns = [str(c).strip() for c in ins_df.columns]
+                    
+                    name_col = next((c for c in ins_df.columns if 'insider' in str(c).lower() or 'name' in str(c).lower()), None)
+                    pos_col = next((c for c in ins_df.columns if 'position' in str(c).lower() or 'title' in str(c).lower()), None)
+                    shares_col = next((c for c in ins_df.columns if 'share' in str(c).lower()), None)
+                    val_col = next((c for c in ins_df.columns if 'value' in str(c).lower()), None)
 
-                for _, row in ins_df.head(15).iterrows():
-                    raw_action = str(row.get('Text', row.get('Transaction Text', row.get('Acquisition or Disposition', row.get('Transaction', ''))))).lower()
-                    if not raw_action or raw_action == 'nan':
-                        trans_col = next((c for c in ins_df.columns if 'text' in str(c).lower() or 'action' in str(c).lower() or 'transaction' in str(c).lower()), None)
-                        if trans_col: raw_action = str(row[trans_col]).lower()
+                    for _, row in ins_df.head(15).iterrows():
+                        raw_action = str(row.get('Text', row.get('Transaction Text', row.get('Acquisition or Disposition', row.get('Transaction', ''))))).lower()
+                        if not raw_action or raw_action == 'nan':
+                            trans_col = next((c for c in ins_df.columns if 'text' in str(c).lower() or 'action' in str(c).lower() or 'transaction' in str(c).lower()), None)
+                            if trans_col: raw_action = str(row[trans_col]).lower()
 
-                    if 'buy' in raw_action or 'purchase' in raw_action or raw_action.strip() == 'a': action = 'Buy'
-                    elif 'sell' in raw_action or 'sale' in raw_action or raw_action.strip() == 'd': action = 'Sell'
-                    elif 'grant' in raw_action or 'award' in raw_action or 'option' in raw_action: action = 'Grant'
-                    else: action = 'Execute/Other'
+                        if 'buy' in raw_action or 'purchase' in raw_action or raw_action.strip() == 'a': action = 'Buy'
+                        elif 'sell' in raw_action or 'sale' in raw_action or raw_action.strip() == 'd': action = 'Sell'
+                        elif 'grant' in raw_action or 'award' in raw_action or 'option' in raw_action: action = 'Grant'
+                        else: action = 'Execute/Other'
 
-                    insider_list.append({
-                        "name": str(row[name_col]) if name_col else "Executive",
-                        "position": str(row[pos_col]) if pos_col else "N/A",
-                        "transaction": action,
-                        "shares": safe_float(row[shares_col]),
-                        "value": safe_float(row[val_col])
-                    })
-        except Exception:
-            pass
+                        insider_list.append({
+                            "name": str(row[name_col]) if name_col else "Executive",
+                            "position": str(row[pos_col]) if pos_col else "N/A",
+                            "transaction": action,
+                            "shares": safe_float(row[shares_col]),
+                            "value": safe_float(row[val_col])
+                        })
+            except Exception:
+                pass
 
         # --- THE TTM FALLBACK ENGINE ---
         calc_shares = shares if shares > 0 else (fin_data["shares"][-1] if fin_data["shares"] and len(fin_data["shares"]) > 0 and fin_data["shares"][-1] > 0 else 1)
@@ -300,14 +380,9 @@ def get_stock_data(raw_ticker: str):
         
         fallback_debt = fin_data["debt"][-1] if fin_data["debt"] and len(fin_data["debt"]) > 0 else 0
         fallback_de = (fallback_debt / total_equity * 100) if total_equity > 0 else 0
-
         final_mkt_cap = mkt_cap if mkt_cap > 0 else fallback_mkt_cap
 
-        # =======================================================
-        # NEW: PROPRIETARY DATA MATHEMATICAL FALLBACKS
-        # =======================================================
-        
-        # 1. Manually Calculate EV/EBITDA
+        # --- ADVANCED MANUAL FALLBACKS ---
         try:
             cash_on_hand = fin_data["cash"][-1] if fin_data["cash"] and len(fin_data["cash"]) > 0 else 0
             ev = final_mkt_cap + fallback_debt - cash_on_hand
@@ -316,7 +391,6 @@ def get_stock_data(raw_ticker: str):
         except Exception:
             fallback_ev_ebitda = "N/A"
 
-        # 2. Manually Calculate 1-Year Dividend Yield
         fallback_div_yield = "N/A"
         try:
             divs = stock.dividends
@@ -328,7 +402,6 @@ def get_stock_data(raw_ticker: str):
         except Exception:
             pass
 
-        # 3. Manually Calculate Beta (1-Year Volatility vs S&P 500)
         fallback_beta = "N/A"
         try:
             spy_hist = yf.Ticker("SPY").history(period="1y")
@@ -343,8 +416,6 @@ def get_stock_data(raw_ticker: str):
         except Exception:
             pass
 
-        # =======================================================
-
         def format_mkt_cap(val):
             if val >= 1e12: return f"${val/1e12:.2f}T"
             if val >= 1e9: return f"${val/1e9:.2f}B"
@@ -354,7 +425,6 @@ def get_stock_data(raw_ticker: str):
         fcf_yield_raw = (latest_fcf / final_mkt_cap) if final_mkt_cap and latest_fcf else 0
         fcf_yield = f"{round(fcf_yield_raw * 100, 2)}%" if fcf_yield_raw != 0 else "N/A"
         
-        # Inject our calculated Div Yield if the API fails
         div_yield_raw = safe_float(info.get("dividendYield") if info else info.get("trailingAnnualDividendYield") if info else None)
         div_yield = f"{round(div_yield_raw * 100, 2)}%" if div_yield_raw > 0 else fallback_div_yield
         
@@ -423,26 +493,25 @@ def get_stock_data(raw_ticker: str):
                 sma_200_pct = round(((current_price - sma_200) / sma_200) * 100, 2)
 
         dist_52w_high = round(((current_price - fiftyTwoWeekHigh) / fiftyTwoWeekHigh) * 100, 2) if fiftyTwoWeekHigh and fiftyTwoWeekHigh > 0 else "N/A"
-        short_float = info.get("shortPercentOfFloat") if info else None
-        short_interest = f"{round(short_float * 100, 2)}%" if short_float else "N/A"
+        
+        # Merge Yahoo Info with Finviz Scrapes
+        finviz_short = fv_stats.get("Short Float", "N/A")
+        short_interest = finviz_short if finviz_short != "N/A" else (f"{round(info.get('shortPercentOfFloat') * 100, 2)}%" if info and info.get("shortPercentOfFloat") else "N/A")
 
-        next_earnings = "N/A"
-        next_dividend = "N/A"
-        try:
-            cal = stock.calendar
-            if isinstance(cal, dict) and 'Earnings Date' in cal:
-                raw_earnings = cal['Earnings Date']
-                if isinstance(raw_earnings, list) and len(raw_earnings) > 0:
-                    next_earnings = raw_earnings[0].strftime('%b %d, %Y')
-        except Exception:
-            pass 
+        finviz_fwd_eps = fv_stats.get("EPS next Y", "N/A")
+        forward_eps = finviz_fwd_eps if finviz_fwd_eps != "N/A" else (round(info.get("forwardEps", 0), 2) if info and info.get("forwardEps") else "N/A")
+
+        finviz_earnings = fv_stats.get("Earnings", "N/A")
+        next_earnings = finviz_earnings if finviz_earnings != "N/A" else "N/A"
+        
+        finviz_dividend = fv_stats.get("Dividend Ex-Date", "N/A")
+        next_dividend = finviz_dividend if finviz_dividend != "N/A" else "N/A"
 
         stats = {
             "pe": round(actual_pe, 2) if actual_pe else "N/A",
             "pb": round(actual_pb, 2) if actual_pb else "N/A",
             "eps": round(actual_eps, 2) if actual_eps else "N/A",
-            "forward_eps": round(info.get("forwardEps", 0), 2) if info and info.get("forwardEps") else "N/A",
-            # Inject our calculated EV/EBITDA and Beta here
+            "forward_eps": forward_eps,
             "ev_ebitda": round(info.get("enterpriseToEbitda", 0), 2) if info and info.get("enterpriseToEbitda") else fallback_ev_ebitda,
             "mkt_cap": format_mkt_cap(final_mkt_cap) if final_mkt_cap else "N/A",
             "fcf_yield": fcf_yield,
@@ -467,21 +536,11 @@ def get_stock_data(raw_ticker: str):
         sentences = raw_summary.split('. ')
         short_summary = '. '.join(sentences[:3]) + '.' if len(sentences) > 2 else raw_summary
 
-        # =======================================================
-        # NEW: HARDCODED PEER MATRIX (Bypasses the missing 'info' dict)
-        # =======================================================
         ticker_peers = {
-            'AAPL': ['MSFT', 'GOOGL', 'META'],
-            'MSFT': ['AAPL', 'GOOGL', 'AMZN'],
-            'TSLA': ['F', 'GM', 'RIVN'],
-            'NVDA': ['AMD', 'INTC', 'TSM'],
-            'AMZN': ['WMT', 'BABA', 'EBAY'],
-            'META': ['GOOGL', 'SNAP', 'PINS'],
-            'GOOGL': ['META', 'MSFT', 'AMZN'],
-            'NFLX': ['DIS', 'WBD', 'AMZN'],
-            'JPM': ['BAC', 'WFC', 'C'],
-            'V': ['MA', 'AXP', 'PYPL'],
-            'AMD': ['NVDA', 'INTC', 'QCOM']
+            'AAPL': ['MSFT', 'GOOGL', 'META'], 'MSFT': ['AAPL', 'GOOGL', 'AMZN'], 'TSLA': ['F', 'GM', 'RIVN'],
+            'NVDA': ['AMD', 'INTC', 'TSM'], 'AMZN': ['WMT', 'BABA', 'EBAY'], 'META': ['GOOGL', 'SNAP', 'PINS'],
+            'GOOGL': ['META', 'MSFT', 'AMZN'], 'NFLX': ['DIS', 'WBD', 'AMZN'], 'JPM': ['BAC', 'WFC', 'C'],
+            'V': ['MA', 'AXP', 'PYPL'], 'AMD': ['NVDA', 'INTC', 'QCOM']
         }
         peers = ticker_peers.get(ticker.upper(), ['SPY', 'QQQ', 'DIA'])
 
