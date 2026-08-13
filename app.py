@@ -112,10 +112,35 @@ def health_check():
 @app.get("/api/stock/{raw_ticker}")
 def get_stock_data(raw_ticker: str):
     try:
+        import time # Added for the sleep/retry timer
         ticker = resolve_ticker(raw_ticker)
-        # REMOVED the old get_session() here. Now using global cache!
         stock = yf.Ticker(ticker)
-        f_info = stock.fast_info
+        
+        # --- THE PERSISTENT RETRY ENGINE ---
+        # Yahoo Finance often silently drops data on the first ping. 
+        # This loop forces the server to keep trying up to 3 times before accepting "N/A"
+        for attempt in range(3):
+            f_info = stock.fast_info
+            fin = stock.financials
+            cf = stock.cashflow
+            bs = stock.balance_sheet
+            
+            # We moved the info fetch up here to validate it during the retry loop
+            info = {}
+            try:
+                fetched_info = stock.info 
+                if fetched_info:
+                    info = fetched_info  
+            except Exception:
+                pass
+                
+            # If we successfully grabbed the crucial data (not empty), break out of the loop immediately!
+            if not fin.empty and info:
+                break
+                
+            # If data is missing or blank, wait 1.5 seconds and ping Yahoo again
+            time.sleep(1.5)
+        # -----------------------------------
         
         current_price = getattr(f_info, 'last_price', 0)
         prev_close = getattr(f_info, 'previous_close', 0)
@@ -124,10 +149,6 @@ def get_stock_data(raw_ticker: str):
         mkt_cap = getattr(f_info, 'market_cap', 0)
         shares = getattr(f_info, 'shares', 0)
 
-        fin = stock.financials
-        cf = stock.cashflow
-        bs = stock.balance_sheet
-        
         fin_data = {
             "years": [], "revenue": [], "operating": [], "net": [], 
             "gross_margin": [], "op_margin": [], "net_margin": [],
@@ -222,14 +243,6 @@ def get_stock_data(raw_ticker: str):
         except Exception:
             pass
 
-        info = {}  
-        try:
-            fetched_info = stock.info 
-            if fetched_info:
-                info = fetched_info  
-        except Exception:
-            pass  
-
         def format_mkt_cap(val):
             if val >= 1e12: return f"${val/1e12:.2f}T"
             if val >= 1e9: return f"${val/1e9:.2f}B"
@@ -311,10 +324,10 @@ def get_stock_data(raw_ticker: str):
             # Fetch Next Dividend Date
             div_date = info.get("exDividendDate")
             if div_date:
-                from datetime import datetime # Ensure datetime is imported
+                from datetime import datetime
                 next_dividend = datetime.fromtimestamp(div_date).strftime('%b %d, %Y')
         except Exception:
-            pass # Silently fail and leave as "N/A" to prevent server crash
+            pass 
 
         stats = {
             "pe": round(info.get("trailingPE", 0), 2) if info.get("trailingPE") else "N/A",
@@ -371,23 +384,6 @@ def get_stock_data(raw_ticker: str):
             "dupont_analysis": dupont_metrics,           
             "risk_profile": risk_metrics,                
             "sensitivity_matrix": sensitivity_matrix     
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/chart/{raw_ticker}")
-def get_chart_data(raw_ticker: str, period: str = "1y", interval: str = "1d"):
-    try:
-        ticker = resolve_ticker(raw_ticker)
-        # REMOVED the old get_session() here too. Using global cache.
-        stock = yf.Ticker(ticker.upper())
-        hist = stock.history(period=period, interval=interval)
-        if hist.empty: return {"dates": [], "opens": [], "highs": [], "lows": [], "closes": []}
-        if period == "max": hist = hist.loc['2000':] 
-        return {
-            "dates": hist.index.strftime('%Y-%m-%d %H:%M:%S').tolist(),
-            "opens": hist['Open'].tolist(), "highs": hist['High'].tolist(),
-            "lows": hist['Low'].tolist(), "closes": hist['Close'].tolist()
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
