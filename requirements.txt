@@ -5,4 +5,3 @@ plotly==5.22.0
 pandas==2.2.2
 google-generativeai==0.7.1
 requests-cache==1.2.1
-cloudscraper>=1.2.71
