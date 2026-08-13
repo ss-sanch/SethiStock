@@ -258,22 +258,52 @@ def get_stock_data(raw_ticker: str):
         except Exception:
             pass
 
+        # ==========================================
+        # --- THE QUANT FALLBACK MATH ENGINE ---
+        # If Yahoo blocks the .info vault, we calculate the stats manually 
+        # using the raw SEC financial statements!
+        # ==========================================
+        
+        calc_shares = shares if shares > 0 else (fin_data["shares"][-1] if fin_data["shares"] and len(fin_data["shares"]) > 0 and fin_data["shares"][-1] > 0 else 1)
+        calc_net_income = fin_data["net"][-1] if fin_data["net"] and len(fin_data["net"]) > 0 else 0
+        
+        # 1. Manually extract Total Equity from Balance Sheet
+        total_equity = 0
+        if not bs.empty:
+            if 'Stockholders Equity' in bs.index:
+                total_equity = bs.loc['Stockholders Equity'].iloc[0]
+            elif 'Total Equity Gross Minority Interest' in bs.index:
+                total_equity = bs.loc['Total Equity Gross Minority Interest'].iloc[0]
+            elif 'Common Stock Equity' in bs.index:
+                total_equity = bs.loc['Common Stock Equity'].iloc[0]
+
+        # 2. Calculate EPS (Earnings Per Share)
+        fallback_eps = calc_net_income / calc_shares if calc_shares > 1 else 0
+        
+        # 3. Calculate P/E Ratio (Price to Earnings)
+        fallback_pe = current_price / fallback_eps if fallback_eps > 0 else 0
+        
+        # 4. Calculate Book Value & P/B Ratio
+        fallback_bv = total_equity / calc_shares if calc_shares > 1 else 0
+        fallback_pb = current_price / fallback_bv if fallback_bv > 0 else 0
+
+        # 5. Calculate Market Cap
+        fallback_mkt_cap = current_price * calc_shares if calc_shares > 1 else 0
+
         def format_mkt_cap(val):
             if val >= 1e12: return f"${val/1e12:.2f}T"
             if val >= 1e9: return f"${val/1e9:.2f}B"
             if val >= 1e6: return f"${val/1e6:.2f}M"
             return f"${val:,.0f}"
             
-        fcf_yield_raw = (latest_fcf / mkt_cap) if mkt_cap and latest_fcf else None
+        final_mkt_cap = mkt_cap if mkt_cap > 0 else fallback_mkt_cap
+        fcf_yield_raw = (latest_fcf / final_mkt_cap) if final_mkt_cap and latest_fcf else None
         fcf_yield = f"{round(fcf_yield_raw * 100, 2)}%" if fcf_yield_raw else "N/A"
         
         div_yield_raw = info.get("dividendYield")
         div_yield = f"{round(div_yield_raw * 100, 2)}%" if div_yield_raw is not None else "N/A"
         
-        book_value = info.get("bookValue")
-        if not book_value and info.get("priceToBook") and current_price:
-            book_value = current_price / info.get("priceToBook")
-        
+        book_value = info.get("bookValue", fallback_bv)
         fiftyTwoWeekHigh = info.get("fiftyTwoWeekHigh", current_price * 1.2)
         fiftyTwoWeekLow = info.get("fiftyTwoWeekLow", current_price * 0.8)
 
@@ -285,8 +315,8 @@ def get_stock_data(raw_ticker: str):
         if info.get("profitMargins") and info.get("profitMargins") > 0.10: score += 10
         if info.get("debtToEquity") and info.get("debtToEquity") < 100: score += 10
         if fcf_yield_raw and fcf_yield_raw > 0.05: score += 10
-        if info.get("trailingPE") and 0 < info.get("trailingPE") < 25: score += 10
-        if info.get("priceToBook") and 0 < info.get("priceToBook") < 5: score += 10
+        if info.get("trailingPE", fallback_pe) and 0 < info.get("trailingPE", fallback_pe) < 25: score += 10
+        if info.get("priceToBook", fallback_pb) and 0 < info.get("priceToBook", fallback_pb) < 5: score += 10
         if div_yield_raw and div_yield_raw > 0: score += 10
 
         daily_hist = stock.history(period="1y")
@@ -328,24 +358,20 @@ def get_stock_data(raw_ticker: str):
                 raw_earnings = cal['Earnings Date']
                 if isinstance(raw_earnings, list) and len(raw_earnings) > 0:
                     next_earnings = raw_earnings[0].strftime('%b %d, %Y')
-            
-            div_date = info.get("exDividendDate")
-            if div_date:
-                from datetime import datetime
-                next_dividend = datetime.fromtimestamp(div_date).strftime('%b %d, %Y')
         except Exception:
             pass 
 
+        # We actively pull the fallback math if Yahoo gives us N/A
         stats = {
-            "pe": round(info.get("trailingPE", 0), 2) if info.get("trailingPE") else "N/A",
-            "pb": round(info.get("priceToBook", 0), 2) if info.get("priceToBook") else "N/A",
-            "eps": round(info.get("trailingEps", 0), 2) if info.get("trailingEps") else "N/A",
+            "pe": round(info.get("trailingPE", fallback_pe), 2) if info.get("trailingPE", fallback_pe) else "N/A",
+            "pb": round(info.get("priceToBook", fallback_pb), 2) if info.get("priceToBook", fallback_pb) else "N/A",
+            "eps": round(info.get("trailingEps", fallback_eps), 2) if info.get("trailingEps", fallback_eps) else "N/A",
             "forward_eps": round(info.get("forwardEps", 0), 2) if info.get("forwardEps") else "N/A",
             "ev_ebitda": round(info.get("enterpriseToEbitda", 0), 2) if info.get("enterpriseToEbitda") else "N/A",
-            "mkt_cap": format_mkt_cap(mkt_cap) if mkt_cap else "N/A",
+            "mkt_cap": format_mkt_cap(final_mkt_cap) if final_mkt_cap else "N/A",
             "fcf_yield": fcf_yield,
             "div_yield": div_yield,
-            "roe": f"{round(info.get('returnOnEquity', 0) * 100, 2)}%" if info.get("returnOnEquity") else "N/A",
+            "roe": f"{round(info.get('returnOnEquity', (fallback_eps/fallback_bv if fallback_bv else 0)) * 100, 2)}%" if info.get("returnOnEquity") or fallback_bv else "N/A",
             "sethi_score": score,
             "book_value": book_value if book_value else 0,
             "fiftyTwoWeekHigh": fiftyTwoWeekHigh,
