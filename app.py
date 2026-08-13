@@ -109,24 +109,41 @@ def generate_sensitivity_matrix(base_wacc, base_exit_multiple, fcf_projections, 
 def health_check():
     return {"status": "SethiStock API is online."}
 
+def get_safe_session():
+    """Generates a heavily disguised browser session to bypass Yahoo's bot-detection"""
+    import requests
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Connection": "keep-alive",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Upgrade-Insecure-Requests": "1"
+    })
+    return session
+
 @app.get("/api/stock/{raw_ticker}")
 def get_stock_data(raw_ticker: str):
     try:
-        import time # Added for the sleep/retry timer
+        import time 
         ticker = resolve_ticker(raw_ticker)
-        stock = yf.Ticker(ticker)
         
-        # --- THE PERSISTENT RETRY ENGINE ---
-        # Yahoo Finance often silently drops data on the first ping. 
-        # This loop forces the server to keep trying up to 3 times before accepting "N/A"
+        # --- PERSISTENT RETRY ENGINE WITH SAFE SESSION ---
+        f_info, fin, cf, bs, info = None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}
+        
         for attempt in range(3):
+            # Apply the heavy disguise on EVERY attempt
+            safe_session = get_safe_session()
+            stock = yf.Ticker(ticker, session=safe_session)
+            
             f_info = stock.fast_info
             fin = stock.financials
             cf = stock.cashflow
             bs = stock.balance_sheet
             
-            # We moved the info fetch up here to validate it during the retry loop
-            info = {}
             try:
                 fetched_info = stock.info 
                 if fetched_info:
@@ -134,13 +151,12 @@ def get_stock_data(raw_ticker: str):
             except Exception:
                 pass
                 
-            # If we successfully grabbed the crucial data (not empty), break out of the loop immediately!
+            # If we successfully grabbed the crucial data, break out!
             if not fin.empty and info:
                 break
                 
-            # If data is missing or blank, wait 1.5 seconds and ping Yahoo again
-            time.sleep(1.5)
-        # -----------------------------------
+            time.sleep(1.5) # Wait before retry
+        # ------------------------------------------------
         
         current_price = getattr(f_info, 'last_price', 0)
         prev_close = getattr(f_info, 'previous_close', 0)
@@ -200,13 +216,12 @@ def get_stock_data(raw_ticker: str):
             for k, v in fin_data.items():
                 if not v: fin_data[k] = [0] * len(cols)
         
-        latest_fcf = fin_data["fcf"][-1] if fin_data["fcf"] and fin_data["fcf"][-1] != 0 else 0
+        latest_fcf = fin_data["fcf"][-1] if fin_data["fcf"] and len(fin_data["fcf"]) > 0 and fin_data["fcf"][-1] != 0 else 0
 
         # --- EXECUTE QUANTITATIVE ENGINES ---
         dupont_metrics = calculate_dupont_analysis(fin, bs)
         risk_metrics = calculate_risk_profile(ticker)
         
-        # Generating a default Base Sensitivity Matrix (Assuming 10% WACC, 15x Multiple, 15% Growth for 5 yrs)
         base_fcf_projections = [latest_fcf * ((1.15) ** i) for i in range(1, 6)] if latest_fcf > 0 else [0,0,0,0,0]
         sensitivity_matrix = generate_sensitivity_matrix(0.10, 15.0, base_fcf_projections, shares)
 
@@ -253,7 +268,7 @@ def get_stock_data(raw_ticker: str):
         fcf_yield = f"{round(fcf_yield_raw * 100, 2)}%" if fcf_yield_raw else "N/A"
         
         div_yield_raw = info.get("dividendYield")
-        div_yield = f"{round(div_yield_raw, 2)}%" if div_yield_raw is not None else "N/A"
+        div_yield = f"{round(div_yield_raw * 100, 2)}%" if div_yield_raw is not None else "N/A"
         
         book_value = info.get("bookValue")
         if not book_value and info.get("priceToBook") and current_price:
@@ -263,7 +278,7 @@ def get_stock_data(raw_ticker: str):
         fiftyTwoWeekLow = info.get("fiftyTwoWeekLow", current_price * 0.8)
 
         score = 0
-        if fin_data["net"] and fin_data["net"][-1] > 0: score += 10
+        if fin_data["net"] and len(fin_data["net"]) > 0 and fin_data["net"][-1] > 0: score += 10
         if len(fin_data["revenue"]) >= 2 and fin_data["revenue"][-1] > fin_data["revenue"][-2]: score += 10
         if latest_fcf > 0: score += 10
         if info.get("returnOnEquity") and info.get("returnOnEquity") > 0.15: score += 10
@@ -274,7 +289,6 @@ def get_stock_data(raw_ticker: str):
         if info.get("priceToBook") and 0 < info.get("priceToBook") < 5: score += 10
         if div_yield_raw and div_yield_raw > 0: score += 10
 
-        # --- NEW TECHNICAL & RISK MATH ENGINE ---
         daily_hist = stock.history(period="1y")
         rsi_14 = "N/A"
         stoch_k = "N/A"
@@ -285,7 +299,6 @@ def get_stock_data(raw_ticker: str):
             lows = daily_hist['Low']
             highs = daily_hist['High']
 
-            # 14-Day RSI
             delta = closes.diff()
             gain = delta.where(delta > 0, 0)
             loss = -delta.where(delta < 0, 0)
@@ -294,34 +307,28 @@ def get_stock_data(raw_ticker: str):
             rs = avg_gain / avg_loss
             rsi_14 = round((100 - (100 / (1 + rs))).iloc[-1], 2)
 
-            # 14-Day Stochastic
             low_14 = lows.rolling(14).min().iloc[-1]
             high_14 = highs.rolling(14).max().iloc[-1]
             stoch_k = round(100 * ((current_price - low_14) / (high_14 - low_14)), 2) if high_14 != low_14 else 50
 
-            # 200-Day SMA % Difference
             if len(daily_hist) >= 200:
                 sma_200 = closes.rolling(200).mean().iloc[-1]
                 sma_200_pct = round(((current_price - sma_200) / sma_200) * 100, 2)
 
-        # Distance from 52W High
         dist_52w_high = round(((current_price - fiftyTwoWeekHigh) / fiftyTwoWeekHigh) * 100, 2) if fiftyTwoWeekHigh and fiftyTwoWeekHigh > 0 else "N/A"
         
-        # Short Interest %
         short_float = info.get("shortPercentOfFloat")
         short_interest = f"{round(short_float * 100, 2)}%" if short_float else "N/A"
 
         next_earnings = "N/A"
         next_dividend = "N/A"
         try:
-            # yfinance sometimes returns calendar data as a dict, sometimes as a DataFrame
             cal = stock.calendar
             if isinstance(cal, dict) and 'Earnings Date' in cal:
                 raw_earnings = cal['Earnings Date']
                 if isinstance(raw_earnings, list) and len(raw_earnings) > 0:
                     next_earnings = raw_earnings[0].strftime('%b %d, %Y')
             
-            # Fetch Next Dividend Date
             div_date = info.get("exDividendDate")
             if div_date:
                 from datetime import datetime
@@ -384,6 +391,25 @@ def get_stock_data(raw_ticker: str):
             "dupont_analysis": dupont_metrics,           
             "risk_profile": risk_metrics,                
             "sensitivity_matrix": sensitivity_matrix     
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/chart/{raw_ticker}")
+def get_chart_data(raw_ticker: str, period: str = "1y", interval: str = "1d"):
+    try:
+        ticker = resolve_ticker(raw_ticker)
+        # Apply the heavy disguise to the chart data fetch to prevent empty returns!
+        safe_session = get_safe_session()
+        stock = yf.Ticker(ticker.upper(), session=safe_session)
+        
+        hist = stock.history(period=period, interval=interval)
+        if hist.empty: return {"dates": [], "opens": [], "highs": [], "lows": [], "closes": []}
+        if period == "max": hist = hist.loc['2000':] 
+        return {
+            "dates": hist.index.strftime('%Y-%m-%d %H:%M:%S').tolist(),
+            "opens": hist['Open'].tolist(), "highs": hist['High'].tolist(),
+            "lows": hist['Low'].tolist(), "closes": hist['Close'].tolist()
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
