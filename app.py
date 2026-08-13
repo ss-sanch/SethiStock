@@ -17,7 +17,6 @@ app.add_middleware(
 def resolve_ticker(query: str):
     query = query.strip()
     try:
-        # Use native yfinance to resolve the ticker safely
         ticker_obj = yf.Ticker(query)
         if ticker_obj.info and 'symbol' in ticker_obj.info:
             return ticker_obj.info['symbol']
@@ -32,12 +31,10 @@ def resolve_ticker(query: str):
 def calculate_dupont_analysis(income_stmt, balance_sheet):
     """Breaks down ROE into its 3 core fundamental drivers"""
     try:
-        # Utilizing fallback keys to account for Yahoo Finance indexing changes
         net_income = income_stmt.loc['Net Income'].iloc[0] if 'Net Income' in income_stmt.index else income_stmt.loc['Net Income Common Stockholders'].iloc[0]
         revenue = income_stmt.loc['Total Revenue'].iloc[0] if 'Total Revenue' in income_stmt.index else income_stmt.loc['Operating Revenue'].iloc[0]
         total_assets = balance_sheet.loc['Total Assets'].iloc[0]
         
-        # Safely find Equity
         if 'Stockholders Equity' in balance_sheet.index:
             total_equity = balance_sheet.loc['Stockholders Equity'].iloc[0]
         elif 'Total Equity Gross Minority Interest' in balance_sheet.index:
@@ -45,7 +42,6 @@ def calculate_dupont_analysis(income_stmt, balance_sheet):
         else:
             total_equity = balance_sheet.loc['Common Stock Equity'].iloc[0]
 
-        # The 3 Pillars of DuPont
         net_profit_margin = net_income / revenue
         asset_turnover = revenue / total_assets
         equity_multiplier = total_assets / total_equity
@@ -58,25 +54,26 @@ def calculate_dupont_analysis(income_stmt, balance_sheet):
             "equity_multiplier": round(equity_multiplier, 2),
             "calculated_roe": round(roe * 100, 2)
         }
-    except Exception as e:
+    except Exception:
         return {"error": "DuPont Data Unavailable"}
 
 def calculate_risk_profile(ticker_symbol):
     """Calculates 5-Year Historical Value at Risk (VaR) and Volatility"""
     try:
-        # FIXED: Added the session=session here so historical data is also cached!
-        stock = yf.Ticker(ticker_symbol, session=session)
+        # FIXED: Added proper call to get_safe_session to prevent NameError crashes
+        safe_sess = get_safe_session()
+        stock = yf.Ticker(ticker_symbol, session=safe_sess)
         hist = stock.history(period="5y")
         
         daily_returns = hist['Close'].pct_change().dropna()
-        var_95 = np.percentile(daily_returns, 5) # 5th percentile worst days
-        volatility = daily_returns.std() * np.sqrt(252) # Annualized
+        var_95 = np.percentile(daily_returns, 5) 
+        volatility = daily_returns.std() * np.sqrt(252) 
         
         return {
             "daily_var_95": round(var_95 * 100, 2),
             "annualized_volatility": round(volatility * 100, 2)
         }
-    except Exception as e:
+    except Exception:
         return {"error": "Risk Profile Unavailable"}
 
 def generate_sensitivity_matrix(base_wacc, base_exit_multiple, fcf_projections, shares_outstanding):
@@ -98,7 +95,7 @@ def generate_sensitivity_matrix(base_wacc, base_exit_multiple, fcf_projections, 
             matrix.append({f"WACC_{round(wacc*100, 1)}%": row})
             
         return matrix
-    except Exception as e:
+    except Exception:
         return []
 
 # ==========================================
@@ -110,18 +107,12 @@ def health_check():
     return {"status": "SethiStock API is online."}
 
 def get_safe_session():
-    """Generates a heavily disguised browser session to bypass Yahoo's bot-detection"""
+    """Generates a clean browser session to bypass Yahoo's bot-detection without triggering WAF blocks"""
     import requests
     session = requests.Session()
+    # FIXED: Removed aggressive headers that trigger Cloudflare/Yahoo cached blocks
     session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Connection": "keep-alive",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Upgrade-Insecure-Requests": "1"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     })
     return session
 
@@ -131,11 +122,9 @@ def get_stock_data(raw_ticker: str):
         import time 
         ticker = resolve_ticker(raw_ticker)
         
-        # --- PERSISTENT RETRY ENGINE WITH SAFE SESSION ---
         f_info, fin, cf, bs, info = None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}
         
         for attempt in range(3):
-            # Apply the heavy disguise on EVERY attempt
             safe_session = get_safe_session()
             stock = yf.Ticker(ticker, session=safe_session)
             
@@ -151,15 +140,20 @@ def get_stock_data(raw_ticker: str):
             except Exception:
                 pass
                 
-            # If we successfully grabbed the crucial data, break out!
-            if not fin.empty and info:
+            if not fin.empty:
                 break
                 
-            time.sleep(1.5) # Wait before retry
-        # ------------------------------------------------
+            time.sleep(1.5)
         
-        current_price = getattr(f_info, 'last_price', 0)
-        prev_close = getattr(f_info, 'previous_close', 0)
+        # FIXED: Bulletproof Live Pricing to fix the "Outdated Numbers" bug
+        recent_hist = stock.history(period="5d")
+        if not recent_hist.empty and len(recent_hist) >= 2:
+            current_price = float(recent_hist['Close'].iloc[-1])
+            prev_close = float(recent_hist['Close'].iloc[-2])
+        else:
+            current_price = getattr(f_info, 'last_price', 0)
+            prev_close = getattr(f_info, 'previous_close', 0)
+
         change = current_price - prev_close
         pct_change = (change / prev_close) * 100 if prev_close else 0
         mkt_cap = getattr(f_info, 'market_cap', 0)
@@ -218,7 +212,6 @@ def get_stock_data(raw_ticker: str):
         
         latest_fcf = fin_data["fcf"][-1] if fin_data["fcf"] and len(fin_data["fcf"]) > 0 and fin_data["fcf"][-1] != 0 else 0
 
-        # --- EXECUTE QUANTITATIVE ENGINES ---
         dupont_metrics = calculate_dupont_analysis(fin, bs)
         risk_metrics = calculate_risk_profile(ticker)
         
@@ -260,14 +253,12 @@ def get_stock_data(raw_ticker: str):
 
         # ==========================================
         # --- THE QUANT FALLBACK MATH ENGINE ---
-        # If Yahoo blocks the .info vault, we calculate the stats manually 
-        # using the raw SEC financial statements!
         # ==========================================
         
         calc_shares = shares if shares > 0 else (fin_data["shares"][-1] if fin_data["shares"] and len(fin_data["shares"]) > 0 and fin_data["shares"][-1] > 0 else 1)
         calc_net_income = fin_data["net"][-1] if fin_data["net"] and len(fin_data["net"]) > 0 else 0
+        calc_revenue = fin_data["revenue"][-1] if fin_data["revenue"] and len(fin_data["revenue"]) > 0 else 0
         
-        # 1. Manually extract Total Equity from Balance Sheet
         total_equity = 0
         if not bs.empty:
             if 'Stockholders Equity' in bs.index:
@@ -277,18 +268,15 @@ def get_stock_data(raw_ticker: str):
             elif 'Common Stock Equity' in bs.index:
                 total_equity = bs.loc['Common Stock Equity'].iloc[0]
 
-        # 2. Calculate EPS (Earnings Per Share)
         fallback_eps = calc_net_income / calc_shares if calc_shares > 1 else 0
-        
-        # 3. Calculate P/E Ratio (Price to Earnings)
         fallback_pe = current_price / fallback_eps if fallback_eps > 0 else 0
-        
-        # 4. Calculate Book Value & P/B Ratio
         fallback_bv = total_equity / calc_shares if calc_shares > 1 else 0
         fallback_pb = current_price / fallback_bv if fallback_bv > 0 else 0
-
-        # 5. Calculate Market Cap
         fallback_mkt_cap = current_price * calc_shares if calc_shares > 1 else 0
+        
+        # FIXED: Core Fallbacks for SethiScore
+        fallback_roe = (fallback_eps / fallback_bv) if fallback_bv > 0 else 0
+        fallback_margin = (calc_net_income / calc_revenue) if calc_revenue > 0 else 0
 
         def format_mkt_cap(val):
             if val >= 1e12: return f"${val/1e12:.2f}T"
@@ -300,23 +288,32 @@ def get_stock_data(raw_ticker: str):
         fcf_yield_raw = (latest_fcf / final_mkt_cap) if final_mkt_cap and latest_fcf else None
         fcf_yield = f"{round(fcf_yield_raw * 100, 2)}%" if fcf_yield_raw else "N/A"
         
-        div_yield_raw = info.get("dividendYield")
+        div_yield_raw = info.get("dividendYield", info.get("trailingAnnualDividendYield"))
         div_yield = f"{round(div_yield_raw * 100, 2)}%" if div_yield_raw is not None else "N/A"
         
         book_value = info.get("bookValue", fallback_bv)
         fiftyTwoWeekHigh = info.get("fiftyTwoWeekHigh", current_price * 1.2)
         fiftyTwoWeekLow = info.get("fiftyTwoWeekLow", current_price * 0.8)
 
+        # FIXED: Wire the SethiScore directly into the fallback math variables!
+        actual_roe = info.get("returnOnEquity") if info.get("returnOnEquity") is not None else fallback_roe
+        actual_margin = info.get("profitMargins") if info.get("profitMargins") is not None else fallback_margin
+        actual_pe = info.get("trailingPE") if info.get("trailingPE") is not None else fallback_pe
+        actual_pb = info.get("priceToBook") if info.get("priceToBook") is not None else fallback_pb
+
         score = 0
         if fin_data["net"] and len(fin_data["net"]) > 0 and fin_data["net"][-1] > 0: score += 10
         if len(fin_data["revenue"]) >= 2 and fin_data["revenue"][-1] > fin_data["revenue"][-2]: score += 10
         if latest_fcf > 0: score += 10
-        if info.get("returnOnEquity") and info.get("returnOnEquity") > 0.15: score += 10
-        if info.get("profitMargins") and info.get("profitMargins") > 0.10: score += 10
-        if info.get("debtToEquity") and info.get("debtToEquity") < 100: score += 10
+        if actual_roe and actual_roe > 0.15: score += 10
+        if actual_margin and actual_margin > 0.10: score += 10
+        
+        debt_equity = info.get("debtToEquity")
+        if debt_equity is not None and debt_equity < 100: score += 10
+        
         if fcf_yield_raw and fcf_yield_raw > 0.05: score += 10
-        if info.get("trailingPE", fallback_pe) and 0 < info.get("trailingPE", fallback_pe) < 25: score += 10
-        if info.get("priceToBook", fallback_pb) and 0 < info.get("priceToBook", fallback_pb) < 5: score += 10
+        if actual_pe and 0 < actual_pe < 25: score += 10
+        if actual_pb and 0 < actual_pb < 5: score += 10
         if div_yield_raw and div_yield_raw > 0: score += 10
 
         daily_hist = stock.history(period="1y")
@@ -361,17 +358,16 @@ def get_stock_data(raw_ticker: str):
         except Exception:
             pass 
 
-        # We actively pull the fallback math if Yahoo gives us N/A
         stats = {
-            "pe": round(info.get("trailingPE", fallback_pe), 2) if info.get("trailingPE", fallback_pe) else "N/A",
-            "pb": round(info.get("priceToBook", fallback_pb), 2) if info.get("priceToBook", fallback_pb) else "N/A",
+            "pe": round(actual_pe, 2) if actual_pe else "N/A",
+            "pb": round(actual_pb, 2) if actual_pb else "N/A",
             "eps": round(info.get("trailingEps", fallback_eps), 2) if info.get("trailingEps", fallback_eps) else "N/A",
             "forward_eps": round(info.get("forwardEps", 0), 2) if info.get("forwardEps") else "N/A",
             "ev_ebitda": round(info.get("enterpriseToEbitda", 0), 2) if info.get("enterpriseToEbitda") else "N/A",
             "mkt_cap": format_mkt_cap(final_mkt_cap) if final_mkt_cap else "N/A",
             "fcf_yield": fcf_yield,
             "div_yield": div_yield,
-            "roe": f"{round(info.get('returnOnEquity', (fallback_eps/fallback_bv if fallback_bv else 0)) * 100, 2)}%" if info.get("returnOnEquity") or fallback_bv else "N/A",
+            "roe": f"{round(actual_roe * 100, 2)}%" if actual_roe else "N/A",
             "sethi_score": score,
             "book_value": book_value if book_value else 0,
             "fiftyTwoWeekHigh": fiftyTwoWeekHigh,
@@ -414,7 +410,7 @@ def get_stock_data(raw_ticker: str):
             "shares": shares, "fcf": latest_fcf, "financials": fin_data, "stats": stats,
             "insiders": insider_list, "peers": peers,
             "summary": short_summary,
-            "dupont_analysis": dupont_metrics,           
+            "dupont_analysis": dupont_metrics,            
             "risk_profile": risk_metrics,                
             "sensitivity_matrix": sensitivity_matrix     
         }
@@ -425,7 +421,6 @@ def get_stock_data(raw_ticker: str):
 def get_chart_data(raw_ticker: str, period: str = "1y", interval: str = "1d"):
     try:
         ticker = resolve_ticker(raw_ticker)
-        # Apply the heavy disguise to the chart data fetch to prevent empty returns!
         safe_session = get_safe_session()
         stock = yf.Ticker(ticker.upper(), session=safe_session)
         
