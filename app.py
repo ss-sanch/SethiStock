@@ -1,20 +1,8 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import yfinance as yf
-import requests
 import pandas as pd
 import numpy as np 
-
-# --- RATE LIMIT SHIELD (CRUMB-SAFE) ---
-# We use a persistent session to pool connections, but we DO NOT cache the security tokens.
-# The heavy User-Agent disguise prevents the "429 Too Many Requests" error.
-session = requests.Session()
-session.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Accept": "*/*",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive"
-})
 
 app = FastAPI(title="SethiStock Data Engine")
 
@@ -29,12 +17,10 @@ app.add_middleware(
 def resolve_ticker(query: str):
     query = query.strip()
     try:
-        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={query}&quotesCount=1&newsCount=0"
-        res = session.get(url)
-        if res.status_code == 200:
-            data = res.json()
-            if 'quotes' in data and len(data['quotes']) > 0:
-                return data['quotes'][0]['symbol']
+        # Use native yfinance to resolve the ticker safely
+        ticker_obj = yf.Ticker(query)
+        if ticker_obj.info and 'symbol' in ticker_obj.info:
+            return ticker_obj.info['symbol']
     except Exception:
         pass
     return query.upper()
@@ -128,7 +114,7 @@ def get_stock_data(raw_ticker: str):
     try:
         ticker = resolve_ticker(raw_ticker)
         # REMOVED the old get_session() here. Now using global cache!
-        stock = yf.Ticker(ticker, session=session)
+        stock = yf.Ticker(ticker)
         f_info = stock.fast_info
         
         current_price = getattr(f_info, 'last_price', 0)
@@ -394,7 +380,7 @@ def get_chart_data(raw_ticker: str, period: str = "1y", interval: str = "1d"):
     try:
         ticker = resolve_ticker(raw_ticker)
         # REMOVED the old get_session() here too. Using global cache.
-        stock = yf.Ticker(ticker.upper(), session=session)
+        stock = yf.Ticker(ticker.upper())
         hist = stock.history(period=period, interval=interval)
         if hist.empty: return {"dates": [], "opens": [], "highs": [], "lows": [], "closes": []}
         if period == "max": hist = hist.loc['2000':] 
