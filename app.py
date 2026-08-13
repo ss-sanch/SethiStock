@@ -103,6 +103,7 @@ def generate_sensitivity_matrix(base_wacc, base_exit_multiple, fcf_projections, 
 # ==========================================
 
 @app.get("/")
+@app.head("/")
 def health_check():
     return {"status": "SethiStock API is online."}
 
