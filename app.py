@@ -6,6 +6,7 @@ import numpy as np
 import time
 import requests
 from bs4 import BeautifulSoup
+import urllib.parse
 
 app = FastAPI(title="SethiStock Data Engine")
 
@@ -20,12 +21,21 @@ app.add_middleware(
 def resolve_ticker(query: str):
     query = query.strip()
     try:
-        ticker_obj = yf.Ticker(query)
-        info_dict = getattr(ticker_obj, 'info', {})
-        if info_dict and 'symbol' in info_dict:
-            return info_dict['symbol']
-    except Exception:
+        # Ping Yahoo's lightweight search directory to translate names to tickers
+        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={urllib.parse.quote(query)}&quotesCount=1&newsCount=0"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        
+        res = requests.get(url, headers=headers, timeout=3)
+        data = res.json()
+        
+        # If it finds a match, return the official symbol (e.g., APPLE -> AAPL)
+        if 'quotes' in data and len(data['quotes']) > 0:
+            return data['quotes'][0]['symbol']
+    except Exception as e:
+        print(f"Ticker resolution failed: {e}")
         pass
+        
+    # If the search fails for any reason, fallback to exactly what the user typed
     return query.upper()
 
 @app.get("/autocomplete")
