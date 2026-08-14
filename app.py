@@ -28,6 +28,21 @@ def resolve_ticker(query: str):
         pass
     return query.upper()
 
+@app.get("/autocomplete")
+def autocomplete_ticker(q: str):
+    try:
+        import requests
+        # Instantly taps Yahoo's global search engine
+        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={q}&quotesCount=5&newsCount=0"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        res = requests.get(url, headers=headers)
+        quotes = res.json().get('quotes', [])
+        
+        # Filter for actual equities and clean up the data
+        results = [{"symbol": item["symbol"], "name": item.get("shortname", "Unknown")} for item in quotes if item.get("quoteType") in ["EQUITY", "ETF"]]
+        return {"results": results}
+    except Exception:
+        return {"results": []}
 # ==========================================
 # --- NEW: FINVIZ HTML SCRAPER ENGINE ---
 # ==========================================
