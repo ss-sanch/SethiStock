@@ -7,7 +7,42 @@ import time
 import requests
 from bs4 import BeautifulSoup
 import urllib.parse
+import os
+from pydantic import BaseModel
+from typing import Optional
+from datetime import datetime
 
+# --- SUPABASE TELEMETRY ENGINE ---
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
+ADMIN_SECRET = os.getenv("ADMIN_SECRET", "admin123")
+
+def log_telemetry_event(project: str, action: str, ticker: Optional[str] = None):
+    """Silently logs user interactions to Supabase without blocking requests."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/traffic_logs"
+        headers = {
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "return=minimal"
+        }
+        payload = {
+            "project": project,
+            "action": action,
+            "ticker": ticker.upper() if ticker else None
+        }
+        # Short timeout so it never slows down the user
+        requests.post(url, json=payload, headers=headers, timeout=2)
+    except Exception as e:
+        print(f"Telemetry log failed silently: {e}")
+
+class TelemetryPayload(BaseModel):
+    project: str
+    action: str
+    ticker: Optional[str] = None
 app = FastAPI(title="SethiStock Data Engine")
 
 app.add_middleware(
@@ -208,6 +243,7 @@ def health_check():
 @app.get("/api/stock/{raw_ticker}")
 def get_stock_data(raw_ticker: str):
     try:
+        log_telemetry_event(project="SethiStock", action="ticker_search", ticker=raw_ticker)
         ticker = resolve_ticker(raw_ticker)
         
         f_info, fin, cf, bs, info = None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}
@@ -611,6 +647,66 @@ def get_chart_data(raw_ticker: str, period: str = "1y", interval: str = "1d"):
             "dates": hist.index.strftime('%Y-%m-%d %H:%M:%S').tolist(),
             "opens": hist['Open'].tolist(), "highs": hist['High'].tolist(),
             "lows": hist['Low'].tolist(), "closes": hist['Close'].tolist()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# --- UNIVERSAL TELEMETRY PING ---
+@app.post("/api/telemetry/log")
+def log_event(data: TelemetryPayload):
+    """Receives page views and events from Sethiway Hub, SethiMacro, etc."""
+    log_telemetry_event(project=data.project, action=data.action, ticker=data.ticker)
+    return {"status": "recorded"}
+
+# --- SECURE ADMIN METRICS ENDPOINT ---
+@app.get("/api/admin/telemetry")
+def get_admin_metrics(secret: str):
+    """Secured analytics data for the admin command center."""
+    if secret != ADMIN_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized: Invalid admin credentials")
+    
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        raise HTTPException(status_code=500, detail="Supabase environment variables not configured")
+
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/traffic_logs?select=*&order=created_at.desc&limit=1000"
+        headers = {
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+        }
+        res = requests.get(url, headers=headers, timeout=5)
+        if res.status_code != 200:
+            raise HTTPException(status_code=500, detail="Failed to fetch logs from Supabase")
+        
+        logs = res.json()
+
+        # Compute Metrics
+        total_events = len(logs)
+        project_counts = {}
+        ticker_counts = {}
+        action_counts = {}
+
+        for log in logs:
+            proj = log.get("project", "Unknown")
+            project_counts[proj] = project_counts.get(proj, 0) + 1
+
+            act = log.get("action", "unknown")
+            action_counts[act] = action_counts.get(act, 0) + 1
+
+            tick = log.get("ticker")
+            if tick:
+                ticker_counts[tick] = ticker_counts.get(tick, 0) + 1
+
+        # Sort top searched tickers
+        sorted_tickers = sorted(ticker_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+        top_tickers = [{"ticker": k, "count": v} for k, v in sorted_tickers]
+
+        return {
+            "total_events": total_events,
+            "project_breakdown": project_counts,
+            "action_breakdown": action_counts,
+            "top_tickers": top_tickers,
+            "recent_logs": logs[:25]  # Last 25 live events
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
