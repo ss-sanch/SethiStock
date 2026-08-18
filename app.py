@@ -19,8 +19,11 @@ ADMIN_SECRET = os.getenv("ADMIN_SECRET", "admin123")
 
 def log_telemetry_event(project: str, action: str, ticker: Optional[str] = None):
     """Silently logs user interactions to Supabase without blocking requests."""
+    # LIFTING THE HOOD: Check if the keys actually loaded from the Render Vault
     if not SUPABASE_URL or not SUPABASE_KEY:
+        print("TELEMETRY BLOCKED: Missing SUPABASE_URL or SUPABASE_KEY in Render.")
         return
+        
     try:
         url = f"{SUPABASE_URL}/rest/v1/traffic_logs"
         headers = {
@@ -34,10 +37,17 @@ def log_telemetry_event(project: str, action: str, ticker: Optional[str] = None)
             "action": action,
             "ticker": ticker.upper() if ticker else None
         }
-        # Short timeout so it never slows down the user
-        requests.post(url, json=payload, headers=headers, timeout=2)
+        
+        # Capture the exact response from Supabase
+        res = requests.post(url, json=payload, headers=headers, timeout=5)
+        
+        # LIFTING THE HOOD: Print the exact status code and error message to Render Logs
+        print(f"SUPABASE STATUS: {res.status_code}")
+        if res.status_code >= 400:
+            print(f"SUPABASE REJECTION DETAILS: {res.text}")
+            
     except Exception as e:
-        print(f"Telemetry log failed silently: {e}")
+        print(f"Telemetry log physically crashed: {e}")
 
 class TelemetryPayload(BaseModel):
     project: str
