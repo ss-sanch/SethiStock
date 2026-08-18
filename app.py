@@ -19,13 +19,14 @@ ADMIN_SECRET = os.getenv("ADMIN_SECRET", "admin123")
 
 def log_telemetry_event(project: str, action: str, ticker: Optional[str] = None):
     """Silently logs user interactions to Supabase without blocking requests."""
-    # LIFTING THE HOOD: Check if the keys actually loaded from the Render Vault
     if not SUPABASE_URL or not SUPABASE_KEY:
-        print("TELEMETRY BLOCKED: Missing SUPABASE_URL or SUPABASE_KEY in Render.")
         return
         
     try:
-        url = f"{SUPABASE_URL}/rest/v1/traffic_logs"
+        # BULLETPROOF ROUTING: Automatically clean the URL if copied from the Data API page
+        clean_url = SUPABASE_URL.replace("/rest/v1", "").rstrip("/")
+        url = f"{clean_url}/rest/v1/traffic_logs"
+        
         headers = {
             "apikey": SUPABASE_KEY,
             "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -38,16 +39,11 @@ def log_telemetry_event(project: str, action: str, ticker: Optional[str] = None)
             "ticker": ticker.upper() if ticker else None
         }
         
-        # Capture the exact response from Supabase
-        res = requests.post(url, json=payload, headers=headers, timeout=5)
-        
-        # LIFTING THE HOOD: Print the exact status code and error message to Render Logs
-        print(f"SUPABASE STATUS: {res.status_code}")
-        if res.status_code >= 400:
-            print(f"SUPABASE REJECTION DETAILS: {res.text}")
+        # Fast 5-second timeout, dropping the log silently if it fails so the user never lags
+        requests.post(url, json=payload, headers=headers, timeout=5)
             
     except Exception as e:
-        print(f"Telemetry log physically crashed: {e}")
+        pass # Fail silently in production
 
 class TelemetryPayload(BaseModel):
     project: str
