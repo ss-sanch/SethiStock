@@ -18,12 +18,13 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 ADMIN_SECRET = os.getenv("ADMIN_SECRET", "admin123")
 
 def log_telemetry_event(project: str, action: str, ticker: Optional[str] = None):
-    """Silently logs user interactions to Supabase without blocking requests."""
+    """Logs interactions and loudly prints any errors to Render for debugging."""
     if not SUPABASE_URL or not SUPABASE_KEY:
+        print("TELEMETRY BLOCKED: Missing SUPABASE_URL or SUPABASE_KEY.")
         return
         
     try:
-        # BULLETPROOF ROUTING: Automatically clean the URL if copied from the Data API page
+        # Clean the URL and build the path
         clean_url = SUPABASE_URL.replace("/rest/v1", "").rstrip("/")
         url = f"{clean_url}/rest/v1/traffic_logs"
         
@@ -39,11 +40,19 @@ def log_telemetry_event(project: str, action: str, ticker: Optional[str] = None)
             "ticker": ticker.upper() if ticker else None
         }
         
-        # Fast 5-second timeout, dropping the log silently if it fails so the user never lags
-        requests.post(url, json=payload, headers=headers, timeout=5)
+        # Capture the response
+        res = requests.post(url, json=payload, headers=headers, timeout=5)
+        
+        # LIFTING THE HOOD: Print exactly what is happening to Render Logs
+        print(f"--- TELEMETRY DIAGNOSTICS ---")
+        print(f"PINGING URL: {url}")
+        print(f"SUPABASE STATUS: {res.status_code}")
+        if res.status_code >= 400:
+            print(f"SUPABASE ERROR: {res.text}")
+        print(f"-----------------------------")
             
     except Exception as e:
-        pass # Fail silently in production
+        print(f"TELEMETRY PHYSICALLY CRASHED: {e}")
 
 class TelemetryPayload(BaseModel):
     project: str
