@@ -258,7 +258,9 @@ def health_check():
 @app.get("/api/stock/{raw_ticker}")
 def get_stock_data(raw_ticker: str):
     try:
-        log_telemetry_event(project="SethiStock", action="ticker_search", ticker=raw_ticker)
+        if not is_peer:
+            log_telemetry_event(project="SethiStock", action="ticker_search", ticker=raw_ticker)
+            
         ticker = resolve_ticker(raw_ticker)
         
         f_info, fin, cf, bs, info = None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}
