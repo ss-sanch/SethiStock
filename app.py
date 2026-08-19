@@ -256,7 +256,7 @@ def health_check():
     return {"status": "SethiStock API is online."}
 
 @app.get("/api/stock/{raw_ticker}")
-def get_stock_data(raw_ticker: str):
+def get_stock_data(raw_ticker: str, is_peer: bool = False):
     try:
         if not is_peer:
             log_telemetry_event(project="SethiStock", action="ticker_search", ticker=raw_ticker)
