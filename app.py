@@ -686,14 +686,18 @@ def get_admin_metrics(secret: str):
         raise HTTPException(status_code=500, detail="Supabase environment variables not configured")
 
     try:
-        url = f"{SUPABASE_URL}/rest/v1/traffic_logs?select=*&order=created_at.desc&limit=1000"
+        # BULLETPROOF ROUTING: Clean the URL just like we did in the logging engine
+        clean_url = SUPABASE_URL.replace("/rest/v1", "").rstrip("/")
+        url = f"{clean_url}/rest/v1/traffic_logs?select=*&order=created_at.desc&limit=1000"
+        
         headers = {
             "apikey": SUPABASE_KEY,
             "Authorization": f"Bearer {SUPABASE_KEY}",
         }
         res = requests.get(url, headers=headers, timeout=5)
+        
         if res.status_code != 200:
-            raise HTTPException(status_code=500, detail="Failed to fetch logs from Supabase")
+            raise HTTPException(status_code=500, detail=f"Failed to fetch logs: {res.text}")
         
         logs = res.json()
 
