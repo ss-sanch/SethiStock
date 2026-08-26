@@ -953,3 +953,88 @@ def run_backtest(data: BacktestInput):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# ==========================================
+# SETHIQUANT: MONTE CARLO VaR (GBM)
+# ==========================================
+class VaRInput(BaseModel):
+    ticker: str
+    days_forward: int = 30
+    simulations: int = 10000
+
+@app.post("/api/quant/monte-carlo-var")
+def calculate_monte_carlo_var(data: VaRInput):
+    """
+    Monte Carlo Value at Risk Engine.
+    Uses Geometric Brownian Motion (GBM) to simulate 10,000 future price paths.
+    """
+    try:
+        ticker = data.ticker.strip().upper()
+        
+        # 1. Fetch 5 years of historical data for robust volatility modeling
+        hist = yf.Ticker(ticker).history(period="5y")
+        if hist.empty:
+            raise HTTPException(status_code=400, detail="Failed to retrieve market data.")
+            
+        closes = hist['Close'].dropna()
+        current_price = closes.iloc[-1]
+        
+        # 2. Calculate daily historical returns, drift, and volatility
+        daily_returns = closes.pct_change().dropna()
+        mu = daily_returns.mean()
+        sigma = daily_returns.std()
+        
+        # 3. Geometric Brownian Motion (GBM) Setup
+        # We run 10,000 simulations over the requested timeframe
+        simulations = data.simulations
+        days = data.days_forward
+        
+        import numpy as np
+        # Generate random normal shocks for the entire matrix
+        Z = np.random.normal(0, 1, (days, simulations))
+        
+        # Pre-allocate price matrix: Rows = Days, Columns = Simulations
+        price_paths = np.zeros((days, simulations))
+        price_paths[0] = current_price
+        
+        # 4. Run the Monte Carlo Simulation
+        for t in range(1, days):
+            # GBM Formula: S_t = S_{t-1} * exp((mu - (sigma^2 / 2)) + sigma * Z)
+            drift = mu - (0.5 * sigma**2)
+            shock = sigma * Z[t]
+            price_paths[t] = price_paths[t-1] * np.exp(drift + shock)
+            
+        # 5. Extract Final Prices and Calculate VaR
+        final_prices = price_paths[-1]
+        simulated_returns = (final_prices - current_price) / current_price
+        
+        # Calculate 95% and 99% Value at Risk (VaR)
+        var_95 = np.percentile(simulated_returns, 5)
+        var_99 = np.percentile(simulated_returns, 1)
+        
+        # Calculate Expected Shortfall (CVaR) - the average of the worst-case losses
+        cvar_95 = simulated_returns[simulated_returns <= var_95].mean()
+        cvar_99 = simulated_returns[simulated_returns <= var_99].mean()
+
+        # 6. Prepare Chart Data (Send a maximum of 50 paths to the frontend to prevent crashing the browser)
+        visual_paths = price_paths[:, :50].round(2).tolist()
+        
+        return {
+            "status": "success",
+            "results": {
+                "current_price": round(current_price, 2),
+                "kpis": {
+                    "var_95": round(var_95 * 100, 2),
+                    "var_99": round(var_99 * 100, 2),
+                    "cvar_95": round(cvar_95 * 100, 2),
+                    "cvar_99": round(cvar_99 * 100, 2)
+                },
+                "chart": {
+                    "paths": visual_paths,
+                    "days": list(range(1, days + 1))
+                }
+            }
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
