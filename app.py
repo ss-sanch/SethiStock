@@ -13,6 +13,7 @@ from typing import Optional
 from datetime import datetime
 import math
 from scipy.stats import norm
+from scipy.optimize import minimize
 
 # --- SUPABASE TELEMETRY ENGINE ---
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
@@ -790,5 +791,84 @@ def calculate_black_scholes(data: BlackScholesInput):
                 }
             }
         }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==========================================
+# SETHIQUANT: MARKOWITZ PORTFOLIO OPTIMIZER
+# ==========================================
+class MarkowitzInput(BaseModel):
+    tickers: list[str]
+    risk_free_rate: float = 0.05  # Default 5%
+
+@app.post("/api/quant/markowitz")
+def optimize_portfolio(data: MarkowitzInput):
+    """
+    Modern Portfolio Theory (MPT) Optimizer.
+    Uses SLSQP optimization to find the exact asset weights that maximize the Sharpe Ratio.
+    """
+    try:
+        # 1. Clean and cap inputs to prevent server overload
+        tickers = [t.strip().upper() for t in data.tickers if t.strip()][:5]
+        if len(tickers) < 2:
+            raise HTTPException(status_code=400, detail="Please provide at least 2 tickers to optimize.")
+
+        # 2. Fetch 2 Years of historical pricing data
+        prices = yf.download(tickers, period="2y", interval="1d")["Close"]
+        if prices.empty:
+            raise HTTPException(status_code=400, detail="Failed to retrieve market data. Check ticker symbols.")
+            
+        # Drop columns with entirely missing data, then drop NaN rows
+        prices = prices.dropna(axis=1, how='all').dropna()
+        valid_tickers = list(prices.columns)
+        
+        if len(valid_tickers) < 2:
+            raise HTTPException(status_code=400, detail="Not enough valid historical data for optimization.")
+
+        # 3. Calculate Daily Returns, Mean Annual Returns, and the Covariance Matrix
+        returns = prices.pct_change().dropna()
+        mean_returns = returns.mean() * 252
+        cov_matrix = returns.cov() * 252
+        num_assets = len(valid_tickers)
+
+        # 4. Objective Function: We want to Maximize Sharpe, which means Minimizing Negative Sharpe
+        def negative_sharpe(weights):
+            p_ret = np.sum(mean_returns * weights)
+            p_vol = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
+            return -(p_ret - data.risk_free_rate) / p_vol
+
+        # 5. Optimization Constraints & Bounds
+        # Constraint: All weights must sum exactly to 1.0 (100%)
+        constraints = ({'type': 'eq', 'fun': lambda w: np.sum(w) - 1})
+        # Bounds: No short selling, asset weights must be between 0 and 1
+        bounds = tuple((0, 1) for _ in range(num_assets))
+        # Initial Guess: Equal weighting for all assets
+        init_guess = num_assets * [1. / num_assets]
+
+        # 6. Execute SLSQP Minimizer
+        opt_results = minimize(negative_sharpe, init_guess, method='SLSQP', bounds=bounds, constraints=constraints)
+
+        if not opt_results.success:
+            raise HTTPException(status_code=500, detail="Optimization algorithm failed to converge.")
+
+        # 7. Extract and Format Results
+        opt_weights = opt_results.x
+        opt_ret = np.sum(mean_returns * opt_weights)
+        opt_vol = np.sqrt(np.dot(opt_weights.T, np.dot(cov_matrix, opt_weights)))
+        opt_sharpe = (opt_ret - data.risk_free_rate) / opt_vol
+
+        # Map the optimal weights back to their respective tickers
+        weight_allocation = {valid_tickers[i]: round(opt_weights[i] * 100, 2) for i in range(num_assets)}
+
+        return {
+            "status": "success",
+            "results": {
+                "expected_annual_return": round(opt_ret * 100, 2),
+                "expected_annual_volatility": round(opt_vol * 100, 2),
+                "max_sharpe_ratio": round(opt_sharpe, 2),
+                "optimal_weights": weight_allocation
+            }
+        }
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
