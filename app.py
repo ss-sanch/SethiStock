@@ -11,6 +11,8 @@ import os
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
+import math
+from scipy.stats import norm
 
 # --- SUPABASE TELEMETRY ENGINE ---
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
@@ -726,6 +728,67 @@ def get_admin_metrics(secret: str):
             "action_breakdown": action_counts,
             "top_tickers": top_tickers,
             "recent_logs": logs[:25]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==========================================
+# SETHIQUANT: BLACK-SCHOLES OPTIONS ENGINE
+# ==========================================
+class BlackScholesInput(BaseModel):
+    S: float      # Underlying Asset Price
+    K: float      # Strike Price
+    T: float      # Time to Expiry (in years)
+    r: float      # Risk-Free Interest Rate (decimal, e.g., 0.05 for 5%)
+    sigma: float  # Implied Volatility (decimal, e.g., 0.20 for 20%)
+    option_type: str = "call" 
+
+@app.post("/api/quant/black-scholes")
+def calculate_black_scholes(data: BlackScholesInput):
+    """
+    Deterministic Options Pricing Engine.
+    Calculates theoretical price and Greeks using the Black-Scholes-Merton model.
+    """
+    try:
+        S, K, T, r, sigma = data.S, data.K, data.T, data.r, data.sigma
+        
+        # Edge Case Firewall
+        if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+            raise HTTPException(status_code=400, detail="Invalid inputs for Black-Scholes calculus.")
+
+        # Core Probability Variables
+        d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+        d2 = d1 - sigma * math.sqrt(T)
+
+        N_d1 = norm.cdf(d1)
+        N_d2 = norm.cdf(d2)
+        N_prime_d1 = norm.pdf(d1)
+
+        # 1. Calculate Option Price & Theta
+        if data.option_type.lower() == "call":
+            price = S * N_d1 - K * math.exp(-r * T) * N_d2
+            delta = N_d1
+            theta = (- (S * N_prime_d1 * sigma) / (2 * math.sqrt(T)) - r * K * math.exp(-r * T) * N_d2) / 365
+        else: # Put Option
+            price = K * math.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
+            delta = N_d1 - 1
+            theta = (- (S * N_prime_d1 * sigma) / (2 * math.sqrt(T)) + r * K * math.exp(-r * T) * norm.cdf(-d2)) / 365
+
+        # 2. Calculate Gamma and Vega
+        gamma = N_prime_d1 / (S * sigma * math.sqrt(T))
+        vega = (S * math.sqrt(T) * N_prime_d1) / 100 
+
+        return {
+            "status": "success",
+            "results": {
+                "theoretical_price": round(price, 4),
+                "greeks": {
+                    "delta": round(delta, 4),
+                    "gamma": round(gamma, 4),
+                    "theta": round(theta, 4),
+                    "vega": round(vega, 4)
+                }
+            }
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
