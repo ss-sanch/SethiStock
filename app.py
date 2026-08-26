@@ -1038,3 +1038,83 @@ def calculate_monte_carlo_var(data: VaRInput):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# ==========================================
+# SETHIQUANT: BINOMIAL OPTIONS PRICING (AMERICAN)
+# ==========================================
+class BinomialInput(BaseModel):
+    S: float      # Underlying Price
+    K: float      # Strike Price
+    T: float      # Time to Expiry (in years)
+    r: float      # Risk-Free Rate
+    sigma: float  # Implied Volatility
+    N: int = 100  # Number of Binomial Steps
+    option_type: str = "call"
+
+@app.post("/api/quant/binomial-american")
+def calculate_binomial_american(data: BinomialInput):
+    """
+    Cox-Ross-Rubinstein (CRR) Binomial Tree.
+    Prices American options by building a lattice and checking for early exercise at every node.
+    """
+    try:
+        import numpy as np
+        import math
+        
+        S, K, T, r, sigma = data.S, data.K, data.T, data.r, data.sigma
+        N = data.N
+        
+        # Edge Case Firewall
+        if T <= 0 or sigma <= 0 or S <= 0 or K <= 0 or N <= 0:
+            raise HTTPException(status_code=400, detail="Invalid inputs for Binomial calculus.")
+            
+        # Hard cap steps at 1000 to prevent server CPU timeouts on Render
+        N = min(N, 1000)
+        
+        # 1. Calculate CRR Lattice Parameters
+        dt = T / N
+        u = math.exp(sigma * math.sqrt(dt))
+        d = 1 / u
+        p = (math.exp(r * dt) - d) / (u - d)
+        discount_factor = math.exp(-r * dt)
+        
+        # 2. Initialize Asset Prices at Maturity (Time Step N)
+        # S_T = S * u^j * d^(N-j) where j is the number of up-steps
+        prices = np.zeros(N + 1)
+        for j in range(N + 1):
+            prices[j] = S * (u ** j) * (d ** (N - j))
+            
+        # 3. Initialize Option Values at Maturity
+        values = np.zeros(N + 1)
+        for j in range(N + 1):
+            if data.option_type.lower() == "call":
+                values[j] = max(0, prices[j] - K)
+            else: # Put Option
+                values[j] = max(0, K - prices[j])
+                
+        # 4. Step Backwards Through the Tree (Dynamic Programming)
+        for i in range(N - 1, -1, -1):
+            for j in range(i + 1):
+                # Calculate the Continuation Value (holding the option)
+                continuation = discount_factor * (p * values[j + 1] + (1 - p) * values[j])
+                
+                # Calculate the Intrinsic Value at this specific node (early exercise)
+                current_price = S * (u ** j) * (d ** (i - j))
+                if data.option_type.lower() == "call":
+                    exercise = current_price - K
+                else:
+                    exercise = K - current_price
+                    
+                # The American Premium: We take the absolute maximum of holding vs exercising early
+                values[j] = max(exercise, continuation)
+                
+        return {
+            "status": "success",
+            "parameters": {"steps": N, "dt": round(dt, 4)},
+            "results": {
+                "american_price": round(values[0], 4)
+            }
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
