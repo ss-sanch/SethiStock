@@ -50,6 +50,8 @@ def log_telemetry_event(project: str, action: str, ticker: Optional[str] = None,
     except Exception as e:
         pass # Fail silently in production
 
+app = FastAPI(title="SethiStock Data Engine") # <--- THIS IS THE MISSING LINE!
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], 
