@@ -744,6 +744,19 @@ class BlackScholesInput(BaseModel):
     sigma: float  # Implied Volatility (decimal, e.g., 0.20 for 20%)
     option_type: str = "call" 
 
+@app.get("/api/quant/risk-free-rate")
+def get_risk_free_rate():
+    """Fetches the live US 10-Year Treasury Yield to peg the Risk-Free Rate"""
+    try:
+        # ^TNX is the ticker for the CBOE 10-Year Treasury Yield
+        tnx = yf.Ticker("^TNX").history(period="5d")
+        if not tnx.empty:
+            last_yield = float(tnx['Close'].iloc[-1])
+            return {"status": "success", "rate": round(last_yield, 2)}
+    except Exception:
+        pass
+    return {"status": "fallback", "rate": 4.60}
+
 @app.post("/api/quant/black-scholes")
 def calculate_black_scholes(data: BlackScholesInput):
     """
