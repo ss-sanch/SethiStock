@@ -872,3 +872,84 @@ def optimize_portfolio(data: MarkowitzInput):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# ==========================================
+# SETHIQUANT: ALGORITHMIC BACKTESTER
+# ==========================================
+class BacktestInput(BaseModel):
+    ticker: str
+    short_window: int = 50
+    long_window: int = 200
+    period: str = "5y"
+
+@app.post("/api/quant/backtest")
+def run_backtest(data: BacktestInput):
+    """
+    Algorithmic Backtesting Engine (SMA Crossover).
+    Simulates trading performance over historical data to generate an equity curve.
+    """
+    try:
+        ticker = data.ticker.strip().upper()
+        
+        # 1. Safely fetch historical data
+        hist = yf.Ticker(ticker).history(period=data.period)
+        if hist.empty:
+            raise HTTPException(status_code=400, detail="Failed to retrieve market data. Check ticker symbol.")
+            
+        close_prices = hist['Close'].dropna()
+        if len(close_prices) < data.long_window:
+            raise HTTPException(status_code=400, detail="Not enough historical data to calculate moving averages.")
+
+        # 2. Compute Simple Moving Averages (SMAs)
+        sma_short = close_prices.rolling(window=data.short_window).mean()
+        sma_long = close_prices.rolling(window=data.long_window).mean()
+
+        # 3. Generate Trading Signals (1 = Long, 0 = Cash)
+        # Shifted by 1 day to prevent Look-Ahead Bias (you trade on the close, return is realised next day)
+        import numpy as np
+        signals = np.where(sma_short > sma_long, 1, 0)
+        import pandas as pd
+        signals = pd.Series(signals, index=close_prices.index).shift(1).fillna(0)
+
+        # 4. Calculate Returns
+        daily_returns = close_prices.pct_change().fillna(0)
+        strategy_returns = daily_returns * signals
+
+        # 5. Build Equity Curves (Base 100)
+        buy_hold_equity = (1 + daily_returns).cumprod() * 100
+        strategy_equity = (1 + strategy_returns).cumprod() * 100
+
+        # 6. Calculate Key Performance Indicators (KPIs)
+        total_return = (strategy_equity.iloc[-1] / strategy_equity.iloc[0]) - 1
+        bh_return = (buy_hold_equity.iloc[-1] / buy_hold_equity.iloc[0]) - 1
+
+        # Max Drawdown
+        rolling_max = strategy_equity.cummax()
+        drawdown = (strategy_equity - rolling_max) / rolling_max
+        max_drawdown = drawdown.min()
+
+        # Annualised Volatility
+        annual_vol = strategy_returns.std() * np.sqrt(252)
+
+        # Format dates for Plotly
+        dates = close_prices.index.strftime('%Y-%m-%d').tolist()
+
+        return {
+            "status": "success",
+            "results": {
+                "kpis": {
+                    "total_return": round(total_return * 100, 2),
+                    "buy_hold_return": round(bh_return * 100, 2),
+                    "max_drawdown": round(max_drawdown * 100, 2),
+                    "annualised_volatility": round(annual_vol * 100, 2)
+                },
+                "chart": {
+                    "dates": dates,
+                    "strategy_equity": strategy_equity.round(2).tolist(),
+                    "buy_hold_equity": buy_hold_equity.round(2).tolist()
+                }
+            }
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
