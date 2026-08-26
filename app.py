@@ -17,14 +17,18 @@ SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 ADMIN_SECRET = os.getenv("ADMIN_SECRET", "admin123")
 
-def log_telemetry_event(project: str, action: str, ticker: Optional[str] = None):
-    """Logs interactions and loudly prints any errors to Render for debugging."""
+class TelemetryPayload(BaseModel):
+    project: str
+    action: str
+    ticker: Optional[str] = None
+    visitor_id: Optional[str] = None # <-- NEW: Accept the anonymous ID
+
+def log_telemetry_event(project: str, action: str, ticker: Optional[str] = None, visitor_id: Optional[str] = None):
+    """Silently logs user interactions to Supabase without blocking requests."""
     if not SUPABASE_URL or not SUPABASE_KEY:
-        print("TELEMETRY BLOCKED: Missing SUPABASE_URL or SUPABASE_KEY.")
         return
         
     try:
-        # Clean the URL and build the path
         clean_url = SUPABASE_URL.replace("/rest/v1", "").rstrip("/")
         url = f"{clean_url}/rest/v1/traffic_logs"
         
@@ -37,28 +41,14 @@ def log_telemetry_event(project: str, action: str, ticker: Optional[str] = None)
         payload = {
             "project": project,
             "action": action,
-            "ticker": ticker.upper() if ticker else None
+            "ticker": ticker.upper() if ticker else None,
+            "visitor_id": visitor_id # <-- NEW: Pass to the database
         }
         
-        # Capture the response
-        res = requests.post(url, json=payload, headers=headers, timeout=5)
-        
-        # LIFTING THE HOOD: Print exactly what is happening to Render Logs
-        print(f"--- TELEMETRY DIAGNOSTICS ---")
-        print(f"PINGING URL: {url}")
-        print(f"SUPABASE STATUS: {res.status_code}")
-        if res.status_code >= 400:
-            print(f"SUPABASE ERROR: {res.text}")
-        print(f"-----------------------------")
+        requests.post(url, json=payload, headers=headers, timeout=5)
             
     except Exception as e:
-        print(f"TELEMETRY PHYSICALLY CRASHED: {e}")
-
-class TelemetryPayload(BaseModel):
-    project: str
-    action: str
-    ticker: Optional[str] = None
-app = FastAPI(title="SethiStock Data Engine")
+        pass # Fail silently in production
 
 app.add_middleware(
     CORSMiddleware,
@@ -672,7 +662,7 @@ def get_chart_data(raw_ticker: str, period: str = "1y", interval: str = "1d"):
 @app.post("/api/telemetry/log")
 def log_event(data: TelemetryPayload):
     """Receives page views and events from Sethiway Hub, SethiMacro, etc."""
-    log_telemetry_event(project=data.project, action=data.action, ticker=data.ticker)
+    log_telemetry_event(project=data.project, action=data.action, ticker=data.ticker, visitor_id=data.visitor_id)
     return {"status": "recorded"}
 
 # --- SECURE ADMIN METRICS ENDPOINT ---
@@ -706,6 +696,7 @@ def get_admin_metrics(secret: str):
         project_counts = {}
         ticker_counts = {}
         action_counts = {}
+        unique_visitors = set()
 
         for log in logs:
             proj = log.get("project", "Unknown")
@@ -717,6 +708,10 @@ def get_admin_metrics(secret: str):
             tick = log.get("ticker")
             if tick:
                 ticker_counts[tick] = ticker_counts.get(tick, 0) + 1
+                
+            vid = log.get("visitor_id") # <-- NEW: Capture the ID
+            if vid:
+                unique_visitors.add(vid)
 
         # Sort top searched tickers
         sorted_tickers = sorted(ticker_counts.items(), key=lambda x: x[1], reverse=True)[:10]
@@ -724,10 +719,11 @@ def get_admin_metrics(secret: str):
 
         return {
             "total_events": total_events,
+            "unique_visitors": len(unique_visitors), # <-- NEW: Return the unique count
             "project_breakdown": project_counts,
             "action_breakdown": action_counts,
             "top_tickers": top_tickers,
-            "recent_logs": logs[:25]  # Last 25 live events
+            "recent_logs": logs[:25]
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
