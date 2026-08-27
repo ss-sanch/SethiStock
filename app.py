@@ -681,27 +681,27 @@ def get_admin_metrics(secret: str):
         raise HTTPException(status_code=500, detail="Supabase environment variables not configured")
 
     try:
-        # BULLETPROOF ROUTING: Clean the URL just like we did in the logging engine
         clean_url = SUPABASE_URL.replace("/rest/v1", "").rstrip("/")
-        url = f"{clean_url}/rest/v1/traffic_logs?select=*&order=created_at.desc&limit=1000"
-        
         headers = {
             "apikey": SUPABASE_KEY,
             "Authorization": f"Bearer {SUPABASE_KEY}",
         }
-        res = requests.get(url, headers=headers, timeout=5)
         
-        if res.status_code != 200:
-            raise HTTPException(status_code=500, detail=f"Failed to fetch logs: {res.text}")
-        
-        logs = res.json()
+        # 1. Fetch Traffic Logs
+        url_traffic = f"{clean_url}/rest/v1/traffic_logs?select=*&order=created_at.desc&limit=1000"
+        res_traffic = requests.get(url_traffic, headers=headers, timeout=5)
+        logs = res_traffic.json() if res_traffic.status_code == 200 else []
 
-        # Compute Metrics
+        # 2. Fetch Markowitz Telemetry Logs
+        url_mkw = f"{clean_url}/rest/v1/markowitz_telemetry?select=*&order=timestamp.desc&limit=50"
+        res_mkw = requests.get(url_mkw, headers=headers, timeout=5)
+        mkw_logs = res_mkw.json() if res_mkw.status_code == 200 else []
+
+        # 3. Compute Traffic Metrics
         total_events = len(logs)
         project_counts = {}
         ticker_counts = {}
         action_counts = {}
-        unique_visitors = set()
 
         for log in logs:
             proj = log.get("project", "Unknown")
@@ -713,26 +713,20 @@ def get_admin_metrics(secret: str):
             tick = log.get("ticker")
             if tick:
                 ticker_counts[tick] = ticker_counts.get(tick, 0) + 1
-                
-            vid = log.get("visitor_id") # <-- NEW: Capture the ID
-            if vid:
-                unique_visitors.add(vid)
 
-        # Sort top searched tickers
         sorted_tickers = sorted(ticker_counts.items(), key=lambda x: x[1], reverse=True)[:10]
         top_tickers = [{"ticker": k, "count": v} for k, v in sorted_tickers]
 
         return {
             "total_events": total_events,
-            "unique_visitors": len(unique_visitors), # <-- NEW: Return the unique count
             "project_breakdown": project_counts,
             "action_breakdown": action_counts,
             "top_tickers": top_tickers,
-            "recent_logs": logs[:25]
+            "recent_logs": logs[:25],
+            "markowitz_logs": mkw_logs
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 # ==========================================
 # SETHIQUANT: BLACK-SCHOLES OPTIONS ENGINE
 # ==========================================
