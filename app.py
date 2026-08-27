@@ -891,38 +891,85 @@ def optimize_portfolio(data: MarkowitzInput):
 # ==========================================
 class BacktestInput(BaseModel):
     ticker: str
+    strategy: str = "sma_crossover"
     short_window: int = 50
     long_window: int = 200
+    bb_window: int = 20
+    bb_std: float = 2.0
     period: str = "5y"
 
 @app.post("/api/quant/backtest")
 def run_backtest(data: BacktestInput):
     """
-    Algorithmic Backtesting Engine (SMA Crossover).
-    Simulates trading performance over historical data to generate an equity curve.
+    Algorithmic Backtesting Engine.
+    Dynamically routes historical data into Trend Following or Mean Reversion pipelines.
     """
     try:
+        import numpy as np
+        import pandas as pd
+        
         ticker = data.ticker.strip().upper()
         
-        # 1. Safely fetch historical data
-        hist = yf.Ticker(ticker).history(period=data.period)
-        if hist.empty:
+        # 1. Armored Data Fetch (Hybrid Fetcher to prevent Yahoo Finance crashes)
+        hist = pd.DataFrame()
+        try:
+            safe_sess = get_safe_session()
+            stock = yf.Ticker(ticker, session=safe_sess)
+            hist = stock.history(period=data.period)
+        except Exception:
+            pass
+            
+        if hist is None or hist.empty:
+            try:
+                native_stock = yf.Ticker(ticker)
+                hist = native_stock.history(period=data.period)
+            except Exception:
+                pass
+                
+        if hist is None or hist.empty:
             raise HTTPException(status_code=400, detail="Failed to retrieve market data. Check ticker symbol.")
             
         close_prices = hist['Close'].dropna()
-        if len(close_prices) < data.long_window:
-            raise HTTPException(status_code=400, detail="Not enough historical data to calculate moving averages.")
-
-        # 2. Compute Simple Moving Averages (SMAs)
-        sma_short = close_prices.rolling(window=data.short_window).mean()
-        sma_long = close_prices.rolling(window=data.long_window).mean()
-
-        # 3. Generate Trading Signals (1 = Long, 0 = Cash)
-        # Shifted by 1 day to prevent Look-Ahead Bias (you trade on the close, return is realised next day)
-        import numpy as np
-        signals = np.where(sma_short > sma_long, 1, 0)
-        import pandas as pd
-        signals = pd.Series(signals, index=close_prices.index).shift(1).fillna(0)
+        signals = pd.Series(index=close_prices.index, data=0.0)
+        
+        # ========================================
+        # STRATEGY 1: SMA Crossover (Trend Following)
+        # ========================================
+        if data.strategy == "sma_crossover":
+            if len(close_prices) < data.long_window:
+                raise HTTPException(status_code=400, detail="Not enough historical data for SMA calculation.")
+                
+            sma_short = close_prices.rolling(window=data.short_window).mean()
+            sma_long = close_prices.rolling(window=data.long_window).mean()
+            
+            raw_signals = np.where(sma_short > sma_long, 1.0, 0.0)
+            # Shift by 1 day to strictly eliminate look-ahead bias
+            signals = pd.Series(raw_signals, index=close_prices.index).shift(1).fillna(0)
+            
+        # ========================================
+        # STRATEGY 2: Bollinger Bands (Mean Reversion)
+        # ========================================
+        elif data.strategy == "bollinger_bands":
+            if len(close_prices) < data.bb_window:
+                raise HTTPException(status_code=400, detail="Not enough historical data for Bollinger Bands.")
+                
+            sma = close_prices.rolling(window=data.bb_window).mean()
+            std = close_prices.rolling(window=data.bb_window).std()
+            lower_band = sma - (data.bb_std * std)
+            upper_band = sma + (data.bb_std * std)
+            
+            # Mathematical Logic: Buy when statistically oversold, Sell when overbought
+            raw_signals = pd.Series(index=close_prices.index, data=np.nan)
+            raw_signals[close_prices < lower_band] = 1.0  # Buy Signal
+            raw_signals[close_prices > upper_band] = 0.0  # Sell Signal (Go to cash)
+            
+            # Forward-fill the active position to hold between signals, fill beginning with 0
+            signals = raw_signals.ffill().fillna(0)
+            # Shift by 1 day to strictly eliminate look-ahead bias
+            signals = signals.shift(1).fillna(0)
+            
+        else:
+            raise HTTPException(status_code=400, detail="Invalid algorithmic strategy selected.")
 
         # 4. Calculate Returns
         daily_returns = close_prices.pct_change().fillna(0)
@@ -941,11 +988,8 @@ def run_backtest(data: BacktestInput):
         drawdown = (strategy_equity - rolling_max) / rolling_max
         max_drawdown = drawdown.min()
 
-        # Annualised Volatility
+        # Annualised Volatility (Strict UK English convention enforced)
         annual_vol = strategy_returns.std() * np.sqrt(252)
-
-        # Format dates for Plotly
-        dates = close_prices.index.strftime('%Y-%m-%d').tolist()
 
         return {
             "status": "success",
@@ -957,7 +1001,7 @@ def run_backtest(data: BacktestInput):
                     "annualised_volatility": round(annual_vol * 100, 2)
                 },
                 "chart": {
-                    "dates": dates,
+                    "dates": close_prices.index.strftime('%Y-%m-%d').tolist(),
                     "strategy_equity": strategy_equity.round(2).tolist(),
                     "buy_hold_equity": buy_hold_equity.round(2).tolist()
                 }
