@@ -910,13 +910,16 @@ def generate_markowitz_rationale(data: MarkowitzAIInput):
         model = genai.GenerativeModel('gemini-2.5-flash')
         
         prompt = f"""
-        You are a quantitative portfolio manager. The Markowitz Efficient Frontier algorithm has just calculated the optimal Tangency Portfolio for a client with the following asset weights: {data.allocation}. 
-        The portfolio has an Expected Annual Return of {data.expected_return}% and an Annualised Volatility of {data.volatility}%.
+        You are a quantitative portfolio manager. The Markowitz algorithm just calculated the Tangency Portfolio for a client: {data.allocation}.
+        Expected Annual Return: {data.expected_return}%. Annualised Volatility: {data.volatility}%.
         
-        Write a highly professional, 3-bullet-point synthesis explaining the mathematical rationale behind this allocation. Focus on modern portfolio theory, covariance, risk-adjusted returns, and volatility minimisation. Use UK English spelling.
+        Write a professional, 3-bullet-point synthesis explaining this allocation. Use UK English.
         
-        Return STRICTLY as a raw JSON array of 3 strings. Do not use markdown blocks.
-        Example: ["Bullet 1", "Bullet 2", "Bullet 3"]
+        - Bullet 1 (The Catalyst): Explain exactly WHY the specific heavily weighted companies were chosen over the excluded ones. Reference real-world market dominance, recent financial momentum, or structural advantages of the winning tickers.
+        - Bullet 2 (The Math): Explain the covariance and correlation dynamics. Why do these specific assets balance each other out to minimize overall portfolio drawdown risk?
+        - Bullet 3 (The Verdict): Summarize the risk-adjusted return (Sharpe Ratio) efficiency of this exact weighting.
+        
+        Return STRICTLY as a raw JSON array of 3 strings. Example: ["Bullet 1", "Bullet 2", "Bullet 3"]
         """
         
         response = model.generate_content(prompt)
