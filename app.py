@@ -907,7 +907,7 @@ def generate_markowitz_rationale(data: MarkowitzAIInput):
             raise ValueError("Missing API Key")
             
         genai.configure(api_key=GOOGLE_API_KEY)
-        model = genai.GenerativeModel('gemini-2.5-flash')
+        model = genai.GenerativeModel('gemini-3-flash')
         
         prompt = f"""
         You are a quantitative portfolio manager. The Markowitz algorithm just calculated the Tangency Portfolio for a client: {data.allocation}.
@@ -938,7 +938,7 @@ def generate_markowitz_rationale(data: MarkowitzAIInput):
             "bullets": [
                 "The algorithm maximised the Sharpe Ratio by overweighting assets with superior risk-adjusted historical returns.",
                 "Capital was dynamically allocated to minimise the overarching covariance matrix, reducing total portfolio drawdown risk.",
-                "AI generation is currently experiencing high API traffic. Displaying deterministic baseline rationale."
+                "Full AI Synthesis is currently experiencing high API traffic. Please try again in a minute."
             ]
         }
 
