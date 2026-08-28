@@ -890,7 +890,7 @@ class MarkowitzAIInput(BaseModel):
 
 @app.post("/api/quant/markowitz-ai")
 def generate_markowitz_rationale(data: MarkowitzAIInput):
-    """Generates a 3-bullet quantitative synthesis using the Next-Gen GenAI SDK."""
+    """Generates a 3-bullet quantitative synthesis with an automatic 503 fallback."""
     try:
         from google import genai
         from google.genai import types
@@ -901,7 +901,6 @@ def generate_markowitz_rationale(data: MarkowitzAIInput):
         if not GOOGLE_API_KEY:
             raise ValueError("Missing GOOGLE_API_KEY in Render environment")
             
-        # Initialize the modern SDK
         client = genai.Client(api_key=GOOGLE_API_KEY)
         
         prompt = f"""
@@ -917,14 +916,23 @@ def generate_markowitz_rationale(data: MarkowitzAIInput):
         Return STRICTLY as a raw JSON array of 3 strings. Do not use markdown blocks. Example: ["Bullet 1", "Bullet 2", "Bullet 3"]
         """
         
-        # Configure generation settings
         config = types.GenerateContentConfig(temperature=0.3)
         
-        response = client.models.generate_content(
-            model='gemini-3.7-flash',
-            contents=prompt,
-            config=config
-        )
+        try:
+            # Primary attempt using the flagship 3.7 model
+            response = client.models.generate_content(
+                model='gemini-3.7-flash',
+                contents=prompt,
+                config=config
+            )
+        except Exception as model_error:
+            # Instantly catch the 503 Overload and reroute to the stable backup
+            print(f"3.7-flash overloaded ({model_error}), falling back to 3.6-flash...")
+            response = client.models.generate_content(
+                model='gemini-3.6-flash',
+                contents=prompt,
+                config=config
+            )
         
         # BULLETPROOF JSON PARSER
         text_response = response.text.replace("```json", "").replace("```", "").strip()
