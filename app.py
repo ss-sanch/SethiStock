@@ -890,9 +890,10 @@ class MarkowitzAIInput(BaseModel):
 
 @app.post("/api/quant/markowitz-ai")
 def generate_markowitz_rationale(data: MarkowitzAIInput):
-    """Generates a 3-bullet quantitative synthesis of the optimal weights."""
+    """Generates a 3-bullet quantitative synthesis using the Next-Gen GenAI SDK."""
     try:
-        import google.generativeai as genai
+        from google import genai
+        from google.genai import types
         import json
         import os
         
@@ -900,10 +901,8 @@ def generate_markowitz_rationale(data: MarkowitzAIInput):
         if not GOOGLE_API_KEY:
             raise ValueError("Missing GOOGLE_API_KEY in Render environment")
             
-        genai.configure(api_key=GOOGLE_API_KEY)
-        
-        # Upgraded to the state-of-the-art 2026 Flash architecture
-        model = genai.GenerativeModel('gemini-3.7-flash')
+        # Initialize the modern SDK
+        client = genai.Client(api_key=GOOGLE_API_KEY)
         
         prompt = f"""
         You are a quantitative portfolio manager. The Markowitz algorithm just calculated the Tangency Portfolio: {data.allocation}.
@@ -918,12 +917,19 @@ def generate_markowitz_rationale(data: MarkowitzAIInput):
         Return STRICTLY as a raw JSON array of 3 strings. Do not use markdown blocks. Example: ["Bullet 1", "Bullet 2", "Bullet 3"]
         """
         
-        response = model.generate_content(prompt)
+        # Configure generation settings
+        config = types.GenerateContentConfig(temperature=0.3)
         
-        # BULLETPROOF JSON PARSER: Aggressively strips all markdown fences and whitespace
+        response = client.models.generate_content(
+            model='gemini-3.7-flash',
+            contents=prompt,
+            config=config
+        )
+        
+        # BULLETPROOF JSON PARSER
         text_response = response.text.replace("```json", "").replace("```", "").strip()
-            
         bullets = json.loads(text_response)
+        
         return {"status": "success", "bullets": bullets}
         
     except Exception as e:
@@ -933,7 +939,7 @@ def generate_markowitz_rationale(data: MarkowitzAIInput):
             "bullets": [
                 "The algorithm maximised the Sharpe Ratio by overweighting assets with superior risk-adjusted historical returns.",
                 "Capital was dynamically allocated to minimise the overarching covariance matrix, reducing total portfolio drawdown risk.",
-                f"SYSTEM ALERT: AI generation failed. Log: {str(e)[:60]}"
+                f"SYSTEM ALERT: AI generation failed. Log: {str(e)[:80]}"
             ]
         }
 
