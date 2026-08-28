@@ -898,41 +898,42 @@ def generate_markowitz_rationale(data: MarkowitzAIInput):
         
         GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
         if not GOOGLE_API_KEY:
-            raise ValueError("Missing API Key")
+            raise ValueError("Missing GOOGLE_API_KEY in Render environment")
             
         genai.configure(api_key=GOOGLE_API_KEY)
-        model = genai.GenerativeModel('gemini-3-flash')
+        
+        # Upgraded to the state-of-the-art 2026 Flash architecture
+        model = genai.GenerativeModel('gemini-3.7-flash')
         
         prompt = f"""
-        You are a quantitative portfolio manager. The Markowitz algorithm just calculated the Tangency Portfolio for a client: {data.allocation}.
+        You are a quantitative portfolio manager. The Markowitz algorithm just calculated the Tangency Portfolio: {data.allocation}.
         Expected Annual Return: {data.expected_return}%. Annualised Volatility: {data.volatility}%.
         
-        Write a professional, 3-bullet-point synthesis explaining this allocation. Use UK English.
+        Write a highly professional, 3-bullet-point synthesis explaining this allocation. Use UK English.
         
-        - Bullet 1 (The Catalyst): Explain exactly WHY the specific heavily weighted companies were chosen over the excluded ones. Reference real-world market dominance, recent financial momentum, or structural advantages of the winning tickers.
-        - Bullet 2 (The Math): Explain the covariance and correlation dynamics. Why do these specific assets balance each other out to minimize overall portfolio drawdown risk?
+        - Bullet 1 (The Catalyst): Explain exactly WHY the specific heavily weighted companies were chosen over the excluded ones. Reference real-world market dominance, recent financial momentum, or structural sector advantages.
+        - Bullet 2 (The Math): Explain the correlation dynamics. Why do these specific assets balance each other out to minimize overall portfolio drawdown risk?
         - Bullet 3 (The Verdict): Summarize the risk-adjusted return (Sharpe Ratio) efficiency of this exact weighting.
         
-        Return STRICTLY as a raw JSON array of 3 strings. Example: ["Bullet 1", "Bullet 2", "Bullet 3"]
+        Return STRICTLY as a raw JSON array of 3 strings. Do not use markdown blocks. Example: ["Bullet 1", "Bullet 2", "Bullet 3"]
         """
         
         response = model.generate_content(prompt)
-        text_response = response.text.strip()
         
-        if text_response.startswith("```json"):
-            text_response = text_response[7:-3].strip()
+        # BULLETPROOF JSON PARSER: Aggressively strips all markdown fences and whitespace
+        text_response = response.text.replace("```json", "").replace("```", "").strip()
             
         bullets = json.loads(text_response)
         return {"status": "success", "bullets": bullets}
         
     except Exception as e:
-        # Fallback to prevent 429 Quota crashes
+        print(f"MARKOWITZ AI CRASH: {e}")
         return {
             "status": "success", 
             "bullets": [
                 "The algorithm maximised the Sharpe Ratio by overweighting assets with superior risk-adjusted historical returns.",
                 "Capital was dynamically allocated to minimise the overarching covariance matrix, reducing total portfolio drawdown risk.",
-                "Full AI Synthesis is currently experiencing high API traffic. Please try again in a minute."
+                f"SYSTEM ALERT: AI generation failed. Log: {str(e)[:60]}"
             ]
         }
 
