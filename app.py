@@ -14,6 +14,7 @@ from datetime import datetime
 import math
 from scipy.stats import norm
 from scipy.optimize import minimize
+import market_risk_lab
 
 # --- SUPABASE TELEMETRY ENGINE ---
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
@@ -61,6 +62,7 @@ app.add_middleware(
     allow_credentials=False, 
     allow_methods=["*"],
     allow_headers=["*"],
+    app.include_router(market_risk_lab.router),
 )
 
 def resolve_ticker(query: str):
