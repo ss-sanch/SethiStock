@@ -62,8 +62,9 @@ app.add_middleware(
     allow_credentials=False, 
     allow_methods=["*"],
     allow_headers=["*"],
-    app.include_router(market_risk_lab.router),
 )
+
+app.include_router(market_risk_lab.router)
 
 def resolve_ticker(query: str):
     query = query.strip()
