@@ -36,6 +36,7 @@ create table if not exists public.portfolio_transactions (
     price numeric(24,8) not null check (price >= 0),
     fees numeric(18,4) not null default 0 check (fees >= 0),
     currency text not null default 'USD',
+    fx_rate_to_base numeric(20,10) check (fx_rate_to_base > 0),
     note text,
     created_at timestamptz not null default now()
 );
@@ -48,6 +49,7 @@ create table if not exists public.portfolio_benchmarks (
     portfolio_id uuid not null references public.portfolios(id) on delete cascade,
     symbol text not null,
     label text not null,
+    currency text not null default 'GBP',
     is_primary boolean not null default false,
     display_order integer not null default 0,
     created_at timestamptz not null default now(),
@@ -83,8 +85,6 @@ create table if not exists public.portfolio_daily_values (
     primary key (portfolio_id, value_date)
 );
 
--- Public website access is read-only. Writes should later go through the
--- authenticated FastAPI admin endpoints, never directly from public HTML.
 alter table public.portfolios enable row level security;
 alter table public.instruments enable row level security;
 alter table public.portfolio_transactions enable row level security;
@@ -92,9 +92,9 @@ alter table public.portfolio_benchmarks enable row level security;
 alter table public.portfolio_journal_entries enable row level security;
 alter table public.portfolio_daily_values enable row level security;
 
--- These policies are intentionally conservative. If the server uses a
--- service-role key they are bypassed server-side. Do not expose that key in
--- frontend code.
+-- Public website access is read-only. Writes should later go through
+-- authenticated FastAPI admin endpoints. A server-side service-role key may
+-- bypass RLS; never expose that key in frontend code.
 
 -- Example portfolio setup (run only after choosing the actual S&P 500 ETF):
 -- insert into public.portfolios
@@ -106,3 +106,5 @@ alter table public.portfolio_daily_values enable row level security;
 --
 -- The inception date may be 1 Jan 2026 even though the initial ETF purchase
 -- should use the first tradable market session and its actual execution price.
+-- For foreign-currency trades, fx_rate_to_base stores the execution-date rate
+-- used to translate the cash movement into the portfolio base currency.
