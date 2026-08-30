@@ -2,9 +2,8 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date, datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
-import numpy as np
 import pandas as pd
 import requests
 import yfinance as yf
@@ -13,9 +12,6 @@ from fastapi import APIRouter, HTTPException, Query
 
 router = APIRouter(prefix="/api/portfolio", tags=["SethiPortfolio"])
 
-
-# Supabase settings are injected by app.py so SethiPortfolio can reuse the
-# existing Render/Supabase configuration without duplicating secrets.
 SUPABASE_URL = ""
 SUPABASE_KEY = ""
 
@@ -71,7 +67,7 @@ def _transactions(portfolio_id: str) -> List[Dict[str, Any]]:
     return _supabase_get(
         "portfolio_transactions",
         {
-            "select": "id,trade_date,side,quantity,price,fees,currency,note,instruments(id,symbol,name,asset_type,currency)",
+            "select": "id,trade_date,side,quantity,price,fees,currency,fx_rate_to_base,note,instruments(id,symbol,name,asset_type,currency)",
             "portfolio_id": f"eq.{portfolio_id}",
             "order": "trade_date.asc,created_at.asc",
         },
@@ -82,7 +78,7 @@ def _benchmarks(portfolio_id: str) -> List[Dict[str, Any]]:
     return _supabase_get(
         "portfolio_benchmarks",
         {
-            "select": "symbol,label,is_primary,display_order",
+            "select": "symbol,label,currency,is_primary,display_order",
             "portfolio_id": f"eq.{portfolio_id}",
             "order": "display_order.asc",
         },
@@ -102,62 +98,24 @@ def _journal(portfolio_id: str, limit: int = 20) -> List[Dict[str, Any]]:
     )
 
 
-def _signed_quantity(txn: Dict[str, Any]) -> float:
-    qty = float(txn.get("quantity") or 0.0)
-    return qty if str(txn.get("side", "")).upper() == "BUY" else -qty
+def _fx_symbol(currency: str, base_currency: str) -> str | None:
+    currency = (currency or base_currency).upper()
+    base_currency = base_currency.upper()
+    return None if currency == base_currency else f"{currency}{base_currency}=X"
 
 
-def _derive_book(transactions: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    """Derive open quantities and weighted-average cost from immutable trades."""
-    book: Dict[str, Dict[str, Any]] = {}
-
-    for txn in transactions:
-        instrument = txn.get("instruments") or {}
-        symbol = instrument.get("symbol")
-        if not symbol:
-            continue
-
-        side = str(txn.get("side", "")).upper()
-        qty = float(txn.get("quantity") or 0.0)
-        price = float(txn.get("price") or 0.0)
-        if qty <= 0 or price < 0:
-            continue
-
-        item = book.setdefault(
-            symbol,
-            {
-                "symbol": symbol,
-                "name": instrument.get("name") or symbol,
-                "asset_type": instrument.get("asset_type") or "equity",
-                "currency": instrument.get("currency") or txn.get("currency") or "USD",
-                "quantity": 0.0,
-                "cost_basis": 0.0,
-                "realised_pnl": 0.0,
-            },
-        )
-
-        if side == "BUY":
-            item["cost_basis"] += qty * price
-            item["quantity"] += qty
-        elif side == "SELL":
-            if qty > item["quantity"] + 1e-9:
-                raise HTTPException(status_code=500, detail=f"Transaction history sells more {symbol} than held.")
-            avg_cost = item["cost_basis"] / item["quantity"] if item["quantity"] else 0.0
-            item["realised_pnl"] += qty * (price - avg_cost)
-            item["quantity"] -= qty
-            item["cost_basis"] -= qty * avg_cost
-            if abs(item["quantity"]) < 1e-9:
-                item["quantity"] = 0.0
-                item["cost_basis"] = 0.0
-
-    return book
-
-
-def _latest_prices(symbols: List[str]) -> Dict[str, float]:
+def _latest_market_data(symbols: List[str]) -> Dict[str, float]:
     if not symbols:
         return {}
     try:
-        data = yf.download(symbols, period="5d", interval="1d", auto_adjust=True, progress=False, group_by="column")
+        data = yf.download(
+            symbols,
+            period="5d",
+            interval="1d",
+            auto_adjust=True,
+            progress=False,
+            group_by="column",
+        )
         if data.empty:
             return {}
         closes = data["Close"] if "Close" in data else data
@@ -172,47 +130,125 @@ def _latest_prices(symbols: List[str]) -> Dict[str, float]:
         return {}
 
 
-def _holdings_snapshot(portfolio: Dict[str, Any], transactions: List[Dict[str, Any]]) -> Dict[str, Any]:
-    book = _derive_book(transactions)
-    open_symbols = [symbol for symbol, item in book.items() if item["quantity"] > 0]
-    prices = _latest_prices(open_symbols)
+def _trade_fx(txn: Dict[str, Any], base_currency: str) -> float:
+    currency = ((txn.get("instruments") or {}).get("currency") or txn.get("currency") or base_currency).upper()
+    if currency == base_currency.upper():
+        return 1.0
+    stored = txn.get("fx_rate_to_base")
+    if stored is None:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Foreign-currency transaction {txn.get('id')} is missing fx_rate_to_base.",
+        )
+    return float(stored)
 
-    initial_capital = float(portfolio.get("initial_capital") or 0.0)
-    cash = initial_capital
+
+def _derive_book(transactions: List[Dict[str, Any]], base_currency: str) -> Dict[str, Dict[str, Any]]:
+    """Derive open quantities and weighted-average base-currency cost from immutable trades."""
+    book: Dict[str, Dict[str, Any]] = {}
+
+    for txn in transactions:
+        instrument = txn.get("instruments") or {}
+        symbol = instrument.get("symbol")
+        if not symbol:
+            continue
+
+        side = str(txn.get("side", "")).upper()
+        qty = float(txn.get("quantity") or 0.0)
+        price = float(txn.get("price") or 0.0)
+        fees = float(txn.get("fees") or 0.0)
+        if qty <= 0 or price < 0:
+            continue
+
+        fx = _trade_fx(txn, base_currency)
+        item = book.setdefault(
+            symbol,
+            {
+                "symbol": symbol,
+                "name": instrument.get("name") or symbol,
+                "asset_type": instrument.get("asset_type") or "equity",
+                "currency": (instrument.get("currency") or txn.get("currency") or base_currency).upper(),
+                "quantity": 0.0,
+                "local_cost_basis": 0.0,
+                "base_cost_basis": 0.0,
+                "realised_pnl_base": 0.0,
+            },
+        )
+
+        if side == "BUY":
+            item["quantity"] += qty
+            item["local_cost_basis"] += qty * price
+            item["base_cost_basis"] += (qty * price + fees) * fx
+        elif side == "SELL":
+            if qty > item["quantity"] + 1e-9:
+                raise HTTPException(status_code=500, detail=f"Transaction history sells more {symbol} than held.")
+            avg_local = item["local_cost_basis"] / item["quantity"] if item["quantity"] else 0.0
+            avg_base = item["base_cost_basis"] / item["quantity"] if item["quantity"] else 0.0
+            proceeds_base = (qty * price - fees) * fx
+            item["realised_pnl_base"] += proceeds_base - qty * avg_base
+            item["quantity"] -= qty
+            item["local_cost_basis"] -= qty * avg_local
+            item["base_cost_basis"] -= qty * avg_base
+            if abs(item["quantity"]) < 1e-9:
+                item["quantity"] = 0.0
+                item["local_cost_basis"] = 0.0
+                item["base_cost_basis"] = 0.0
+
+    return book
+
+
+def _holdings_snapshot(portfolio: Dict[str, Any], transactions: List[Dict[str, Any]]) -> Dict[str, Any]:
+    base_currency = str(portfolio.get("base_currency") or "GBP").upper()
+    book = _derive_book(transactions, base_currency)
+    open_items = [item for item in book.values() if item["quantity"] > 0]
+
+    market_symbols = [item["symbol"] for item in open_items]
+    fx_symbols = [
+        fx for fx in {_fx_symbol(item["currency"], base_currency) for item in open_items}
+        if fx is not None
+    ]
+    latest = _latest_market_data(list(dict.fromkeys(market_symbols + fx_symbols)))
+
+    cash = float(portfolio.get("initial_capital") or 0.0)
     for txn in transactions:
         qty = float(txn.get("quantity") or 0.0)
         price = float(txn.get("price") or 0.0)
         fees = float(txn.get("fees") or 0.0)
-        if str(txn.get("side", "")).upper() == "BUY":
-            cash -= qty * price + fees
-        else:
-            cash += qty * price - fees
+        fx = _trade_fx(txn, base_currency)
+        cash_move = (qty * price + fees) * fx if str(txn.get("side", "")).upper() == "BUY" else -(qty * price - fees) * fx
+        cash -= cash_move
 
     holdings: List[Dict[str, Any]] = []
     invested_value = 0.0
-    for symbol in open_symbols:
-        item = book[symbol]
-        current_price = prices.get(symbol)
-        if current_price is None:
+    for item in open_items:
+        local_price = latest.get(item["symbol"])
+        if local_price is None:
             continue
-        market_value = item["quantity"] * current_price
-        avg_cost = item["cost_basis"] / item["quantity"] if item["quantity"] else 0.0
-        unrealised_pnl = market_value - item["cost_basis"]
+        fx_symbol = _fx_symbol(item["currency"], base_currency)
+        current_fx = 1.0 if fx_symbol is None else latest.get(fx_symbol)
+        if current_fx is None:
+            continue
+
+        market_value_base = item["quantity"] * local_price * current_fx
+        avg_cost_local = item["local_cost_basis"] / item["quantity"] if item["quantity"] else 0.0
+        unrealised_base = market_value_base - item["base_cost_basis"]
         holdings.append(
             {
-                "symbol": symbol,
+                "symbol": item["symbol"],
                 "name": item["name"],
                 "asset_type": item["asset_type"],
+                "currency": item["currency"],
                 "quantity": round(item["quantity"], 6),
-                "average_cost": round(avg_cost, 4),
-                "current_price": round(current_price, 4),
-                "market_value": round(market_value, 2),
-                "unrealised_pnl": round(unrealised_pnl, 2),
-                "unrealised_return_pct": round((unrealised_pnl / item["cost_basis"] * 100) if item["cost_basis"] else 0.0, 2),
-                "realised_pnl": round(item["realised_pnl"], 2),
+                "average_cost": round(avg_cost_local, 4),
+                "current_price": round(local_price, 4),
+                "current_fx_to_base": round(float(current_fx), 6),
+                "market_value": round(market_value_base, 2),
+                "unrealised_pnl": round(unrealised_base, 2),
+                "unrealised_return_pct": round((unrealised_base / item["base_cost_basis"] * 100) if item["base_cost_basis"] else 0.0, 2),
+                "realised_pnl": round(item["realised_pnl_base"], 2),
             }
         )
-        invested_value += market_value
+        invested_value += market_value_base
 
     total_value = cash + invested_value
     for holding in holdings:
@@ -220,6 +256,7 @@ def _holdings_snapshot(portfolio: Dict[str, Any], transactions: List[Dict[str, A
 
     holdings.sort(key=lambda row: row["market_value"], reverse=True)
     return {
+        "base_currency": base_currency,
         "portfolio_value": round(total_value, 2),
         "cash": round(cash, 2),
         "cash_weight_pct": round((cash / total_value * 100) if total_value else 0.0, 2),
@@ -245,29 +282,48 @@ def _download_adjusted_close(symbols: List[str], start: str) -> pd.DataFrame:
     return closes.sort_index().ffill()
 
 
+def _series_fx(closes: pd.DataFrame, currency: str, base_currency: str, index: pd.Index) -> pd.Series:
+    fx_symbol = _fx_symbol(currency, base_currency)
+    if fx_symbol is None:
+        return pd.Series(1.0, index=index)
+    if fx_symbol not in closes.columns:
+        raise HTTPException(status_code=502, detail=f"Historical FX series {fx_symbol} is unavailable.")
+    return closes[fx_symbol].reindex(index).ffill().bfill()
+
+
 def _performance_history(
     portfolio: Dict[str, Any],
     transactions: List[Dict[str, Any]],
     benchmarks: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    portfolio_symbols = sorted({(txn.get("instruments") or {}).get("symbol") for txn in transactions if (txn.get("instruments") or {}).get("symbol")})
+    base_currency = str(portfolio.get("base_currency") or "GBP").upper()
+    symbol_currency: Dict[str, str] = {}
+    for txn in transactions:
+        instrument = txn.get("instruments") or {}
+        symbol = instrument.get("symbol")
+        if symbol:
+            symbol_currency[symbol] = (instrument.get("currency") or txn.get("currency") or base_currency).upper()
+
+    benchmark_currency = {row["symbol"]: (row.get("currency") or base_currency).upper() for row in benchmarks}
+    portfolio_symbols = sorted(symbol_currency)
     benchmark_symbols = [row["symbol"] for row in benchmarks]
-    symbols = list(dict.fromkeys(portfolio_symbols + benchmark_symbols))
-    if not symbols:
+    currencies = set(symbol_currency.values()) | set(benchmark_currency.values())
+    fx_symbols = [fx for fx in {_fx_symbol(currency, base_currency) for currency in currencies} if fx]
+    download_symbols = list(dict.fromkeys(portfolio_symbols + benchmark_symbols + fx_symbols))
+    if not download_symbols:
         return {"dates": [], "portfolio": [], "benchmarks": {}}
 
     inception = str(portfolio["inception_date"])
-    closes = _download_adjusted_close(symbols, inception)
+    closes = _download_adjusted_close(download_symbols, inception)
     trading_dates = closes.index
-    initial_capital = float(portfolio.get("initial_capital") or 0.0)
 
     txns_by_date: Dict[date, List[Dict[str, Any]]] = defaultdict(list)
     for txn in transactions:
         txns_by_date[pd.Timestamp(txn["trade_date"]).date()].append(txn)
 
     quantities = defaultdict(float)
-    cash = initial_capital
-    values: List[float] = []
+    cash = float(portfolio.get("initial_capital") or 0.0)
+    nav_values: List[float] = []
     out_dates: List[str] = []
 
     for ts in trading_dates:
@@ -279,46 +335,49 @@ def _performance_history(
             qty = float(txn.get("quantity") or 0.0)
             price = float(txn.get("price") or 0.0)
             fees = float(txn.get("fees") or 0.0)
+            fx = _trade_fx(txn, base_currency)
             if str(txn.get("side", "")).upper() == "BUY":
                 quantities[symbol] += qty
-                cash -= qty * price + fees
+                cash -= (qty * price + fees) * fx
             else:
                 quantities[symbol] -= qty
-                cash += qty * price - fees
+                cash += (qty * price - fees) * fx
 
         nav = cash
         for symbol, qty in quantities.items():
-            if qty and symbol in closes.columns and pd.notna(closes.loc[ts, symbol]):
-                nav += qty * float(closes.loc[ts, symbol])
-        out_dates.append(ts.strftime("%Y-%m-%d"))
-        values.append(float(nav))
+            if not qty or symbol not in closes.columns or pd.isna(closes.loc[ts, symbol]):
+                continue
+            fx_series = _series_fx(closes, symbol_currency.get(symbol, base_currency), base_currency, trading_dates)
+            nav += qty * float(closes.loc[ts, symbol]) * float(fx_series.loc[ts])
 
-    if not values or values[0] == 0:
-        portfolio_index = []
-    else:
-        portfolio_index = [round(100.0 * value / values[0], 4) for value in values]
+        out_dates.append(ts.strftime("%Y-%m-%d"))
+        nav_values.append(float(nav))
+
+    portfolio_index = [] if not nav_values or nav_values[0] == 0 else [round(100.0 * value / nav_values[0], 4) for value in nav_values]
 
     benchmark_data: Dict[str, Any] = {}
     for row in benchmarks:
         symbol = row["symbol"]
         if symbol not in closes.columns:
             continue
-        series = closes[symbol].dropna()
-        if series.empty:
+        fx_series = _series_fx(closes, benchmark_currency[symbol], base_currency, trading_dates)
+        base_series = closes[symbol].reindex(trading_dates).ffill() * fx_series
+        valid = base_series.dropna()
+        if valid.empty:
             continue
-        first = float(series.iloc[0])
-        aligned = closes[symbol].reindex(trading_dates).ffill()
+        first = float(valid.iloc[0])
         benchmark_data[symbol] = {
             "label": row.get("label") or symbol,
             "is_primary": bool(row.get("is_primary")),
-            "values": [round(100.0 * float(v) / first, 4) if pd.notna(v) else None for v in aligned],
+            "values": [round(100.0 * float(v) / first, 4) if pd.notna(v) else None for v in base_series],
         }
 
     return {
         "dates": out_dates,
         "portfolio": portfolio_index,
         "benchmarks": benchmark_data,
-        "method": "transaction_reconstructed_nav",
+        "base_currency": base_currency,
+        "method": "transaction_reconstructed_nav_with_fx",
         "inception_date": inception,
     }
 
@@ -340,20 +399,17 @@ def list_public_portfolios() -> Dict[str, Any]:
 def get_portfolio(slug: str) -> Dict[str, Any]:
     portfolio = _portfolio(slug)
     transactions = _transactions(portfolio["id"])
-    snapshot = _holdings_snapshot(portfolio, transactions)
-    benchmarks = _benchmarks(portfolio["id"])
     return {
         "portfolio": {k: v for k, v in portfolio.items() if k != "id"},
-        "snapshot": snapshot,
-        "benchmarks": benchmarks,
+        "snapshot": _holdings_snapshot(portfolio, transactions),
+        "benchmarks": _benchmarks(portfolio["id"]),
     }
 
 
 @router.get("/{slug}/transactions")
 def get_transactions(slug: str) -> Dict[str, Any]:
     portfolio = _portfolio(slug)
-    rows = _transactions(portfolio["id"])
-    return {"transactions": rows}
+    return {"transactions": _transactions(portfolio["id"])}
 
 
 @router.get("/{slug}/journal")
