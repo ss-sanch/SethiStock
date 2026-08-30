@@ -15,6 +15,7 @@ import math
 from scipy.stats import norm
 from scipy.optimize import minimize
 import market_risk_lab
+import sethiportfolio
 
 # --- SUPABASE TELEMETRY ENGINE ---
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
@@ -65,6 +66,8 @@ app.add_middleware(
 )
 
 app.include_router(market_risk_lab.router)
+sethiportfolio.configure_supabase(SUPABASE_URL, SUPABASE_KEY)
+app.include_router(sethiportfolio.router)
 
 def resolve_ticker(query: str):
     query = query.strip()
