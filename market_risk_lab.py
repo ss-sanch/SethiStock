@@ -17,6 +17,7 @@ import pandas as pd
 import yfinance as yf
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
+from scipy.stats import norm
 
 
 router = APIRouter(prefix="/api/quant/risk", tags=["Market Risk Lab"])
@@ -79,7 +80,6 @@ def _download_prices(tickers: List[str], lookback: str) -> pd.DataFrame:
             raise HTTPException(status_code=400, detail="Close prices unavailable.")
         prices = raw["Close"].copy()
     else:
-        # Defensive fallback for a single-column yfinance response.
         prices = raw[["Close"]].copy()
         prices.columns = tickers[:1]
 
@@ -110,7 +110,6 @@ def _loss_metrics(returns: np.ndarray, confidence: float, portfolio_value: float
     tail = returns[returns <= threshold_return]
     es_return = float(tail.mean()) if tail.size else threshold_return
 
-    # Present VaR and ES as positive loss magnitudes.
     var_loss = max(0.0, -threshold_return * portfolio_value)
     es_loss = max(0.0, -es_return * portfolio_value)
 
@@ -133,7 +132,6 @@ def _historical_horizon_returns(
     if horizon_days == 1:
         return portfolio_daily.dropna().to_numpy()
 
-    # Rolling realised portfolio return over the requested horizon.
     horizon_returns = (
         (1.0 + portfolio_daily)
         .rolling(horizon_days)
@@ -152,8 +150,6 @@ def _monte_carlo_returns(
 ) -> np.ndarray:
     mu = asset_log_returns.mean().to_numpy(dtype=float)
     cov = asset_log_returns.cov().to_numpy(dtype=float)
-
-    # Small diagonal jitter protects Cholesky/eigendecomposition from numerical noise.
     cov = cov + np.eye(cov.shape[0]) * 1e-12
     rng = np.random.default_rng(seed)
 
@@ -167,17 +163,88 @@ def _monte_carlo_returns(
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Monte Carlo simulation failed: {exc}")
 
-    # Convert each simulated asset's cumulative log return into a simple return,
-    # then revalue the fixed-weight portfolio at the horizon.
     cumulative_asset_log_returns = shocks.sum(axis=1)
     cumulative_asset_simple_returns = np.exp(cumulative_asset_log_returns) - 1.0
     portfolio_returns = cumulative_asset_simple_returns @ weights
     return portfolio_returns
 
 
+def _parametric_risk_attribution(
+    asset_simple_returns: pd.DataFrame,
+    tickers: List[str],
+    weights: np.ndarray,
+    portfolio_value: float,
+    confidence: float,
+    horizon_days: int,
+):
+    """Euler decomposition of delta-normal VaR across dollar exposures.
+
+    The covariance matrix is scaled linearly with the requested horizon. For a
+    linear equity portfolio, VaR is homogeneous in exposures, so Euler's theorem
+    gives an additive allocation: portfolio VaR equals the sum of Component VaR.
+    """
+    daily_cov = asset_simple_returns.cov().to_numpy(dtype=float)
+    horizon_cov = daily_cov * float(horizon_days)
+    exposures = weights * float(portfolio_value)
+
+    portfolio_variance = float(exposures @ horizon_cov @ exposures)
+    portfolio_sigma = float(np.sqrt(max(portfolio_variance, 0.0)))
+    z_score = float(norm.ppf(confidence))
+
+    if not np.isfinite(portfolio_sigma) or portfolio_sigma <= 0:
+        raise HTTPException(status_code=500, detail="Unable to decompose portfolio risk.")
+
+    portfolio_var = z_score * portfolio_sigma
+    covariance_with_portfolio = horizon_cov @ exposures
+    marginal_var_per_pound = z_score * covariance_with_portfolio / portfolio_sigma
+    component_var = exposures * marginal_var_per_pound
+
+    standalone_sigma = np.sqrt(np.clip(np.diag(horizon_cov), 0.0, None))
+    standalone_var = z_score * np.abs(exposures) * standalone_sigma
+    standalone_total = float(standalone_var.sum())
+    diversification_benefit = max(0.0, standalone_total - portfolio_var)
+    diversification_pct = (
+        (diversification_benefit / standalone_total) * 100.0
+        if standalone_total > 0
+        else 0.0
+    )
+
+    components = []
+    for i, ticker in enumerate(tickers):
+        contribution_pct = (
+            float(component_var[i] / portfolio_var * 100.0)
+            if portfolio_var > 0
+            else 0.0
+        )
+        components.append(
+            {
+                "ticker": ticker,
+                "weight_pct": round(float(weights[i]) * 100.0, 2),
+                "exposure": round(float(exposures[i]), 2),
+                "standalone_var": round(float(standalone_var[i]), 2),
+                "marginal_var_per_1000": round(float(marginal_var_per_pound[i]) * 1000.0, 2),
+                "component_var": round(float(component_var[i]), 2),
+                "contribution_pct": round(contribution_pct, 2),
+            }
+        )
+
+    return {
+        "method": "variance_covariance_euler",
+        "label": "Parametric Euler VaR",
+        "confidence": confidence,
+        "horizon_days": horizon_days,
+        "portfolio_var": round(float(portfolio_var), 2),
+        "sum_component_var": round(float(component_var.sum()), 2),
+        "standalone_var_sum": round(standalone_total, 2),
+        "diversification_benefit": round(diversification_benefit, 2),
+        "diversification_pct": round(diversification_pct, 2),
+        "components": components,
+    }
+
+
 @router.post("/portfolio")
 def calculate_portfolio_risk(data: PortfolioRiskInput):
-    """Compare Historical VaR and correlated Monte Carlo VaR for a portfolio."""
+    """Compare Historical and Monte Carlo VaR, with parametric risk attribution."""
     tickers, weights = _clean_input(data)
     prices = _download_prices(tickers, data.lookback)
 
@@ -199,11 +266,18 @@ def calculate_portfolio_risk(data: PortfolioRiskInput):
 
     historical = _loss_metrics(historical_returns, data.confidence, data.portfolio_value)
     monte_carlo = _loss_metrics(mc_returns, data.confidence, data.portfolio_value)
+    attribution = _parametric_risk_attribution(
+        simple_returns,
+        tickers,
+        weights,
+        data.portfolio_value,
+        data.confidence,
+        data.horizon_days,
+    )
 
     correlation = simple_returns.corr().round(4)
     latest_prices = prices.iloc[-1]
 
-    # Return a bounded sample for Plotly rather than all 10k observations.
     sample_count = min(1500, len(mc_returns))
     sample_idx = np.linspace(0, len(mc_returns) - 1, sample_count, dtype=int)
     mc_pnl_sample = (mc_returns[sample_idx] * data.portfolio_value).round(2).tolist()
@@ -228,6 +302,7 @@ def calculate_portfolio_risk(data: PortfolioRiskInput):
             "historical": historical,
             "monte_carlo": monte_carlo,
         },
+        "attribution": attribution,
         "diagnostics": {
             "historical_observations": int(len(historical_returns)),
             "simulations": int(data.simulations),
