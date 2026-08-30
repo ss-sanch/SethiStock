@@ -73,9 +73,6 @@ create table if not exists public.portfolio_journal_entries (
     unique(portfolio_id, slug)
 );
 
--- Optional cache for later. The API currently reconstructs NAV directly from
--- immutable transactions; this table can store precomputed daily values once
--- the portfolio grows or scheduled refreshes are added.
 create table if not exists public.portfolio_daily_values (
     portfolio_id uuid not null references public.portfolios(id) on delete cascade,
     value_date date not null,
@@ -92,9 +89,52 @@ alter table public.portfolio_benchmarks enable row level security;
 alter table public.portfolio_journal_entries enable row level security;
 alter table public.portfolio_daily_values enable row level security;
 
--- Public website access is read-only. Writes should later go through
--- authenticated FastAPI admin endpoints. A server-side service-role key may
--- bypass RLS; never expose that key in frontend code.
+-- Read-only public policies. No INSERT/UPDATE/DELETE policies are created here.
+-- Phase 2B will add authenticated server-side admin writes separately.
+drop policy if exists "Read public portfolios" on public.portfolios;
+create policy "Read public portfolios"
+    on public.portfolios for select
+    using (is_public = true);
+
+drop policy if exists "Read instruments" on public.instruments;
+create policy "Read instruments"
+    on public.instruments for select
+    using (true);
+
+drop policy if exists "Read public portfolio transactions" on public.portfolio_transactions;
+create policy "Read public portfolio transactions"
+    on public.portfolio_transactions for select
+    using (exists (
+        select 1 from public.portfolios p
+        where p.id = portfolio_transactions.portfolio_id and p.is_public = true
+    ));
+
+drop policy if exists "Read public portfolio benchmarks" on public.portfolio_benchmarks;
+create policy "Read public portfolio benchmarks"
+    on public.portfolio_benchmarks for select
+    using (exists (
+        select 1 from public.portfolios p
+        where p.id = portfolio_benchmarks.portfolio_id and p.is_public = true
+    ));
+
+drop policy if exists "Read published portfolio journal" on public.portfolio_journal_entries;
+create policy "Read published portfolio journal"
+    on public.portfolio_journal_entries for select
+    using (
+        is_published = true
+        and exists (
+            select 1 from public.portfolios p
+            where p.id = portfolio_journal_entries.portfolio_id and p.is_public = true
+        )
+    );
+
+drop policy if exists "Read public portfolio daily values" on public.portfolio_daily_values;
+create policy "Read public portfolio daily values"
+    on public.portfolio_daily_values for select
+    using (exists (
+        select 1 from public.portfolios p
+        where p.id = portfolio_daily_values.portfolio_id and p.is_public = true
+    ));
 
 -- Example portfolio setup (run only after choosing the actual S&P 500 ETF):
 -- insert into public.portfolios
