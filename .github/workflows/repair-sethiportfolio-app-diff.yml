@@ -1,0 +1,28 @@
+name: Repair SethiPortfolio app diff
+on:
+  push:
+    branches:
+      - feature/sethiportfolio-data-v1
+    paths:
+      - scripts/repair_sethiportfolio_app_diff.py
+      - .github/workflows/repair-sethiportfolio-app-diff.yml
+permissions:
+  contents: write
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/sethiportfolio-data-v1
+          fetch-depth: 0
+      - run: git fetch origin main
+      - run: python scripts/repair_sethiportfolio_app_diff.py
+      - run: python -m py_compile app.py sethiportfolio.py market_risk_lab.py
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.py
+          git diff --cached --quiet && exit 0
+          git commit -m "Repair SethiPortfolio app wiring diff [skip ci]"
+          git push origin HEAD:feature/sethiportfolio-data-v1
