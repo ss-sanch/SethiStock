@@ -32,9 +32,15 @@ class OptionPosition(BaseModel):
     multiplier: int = Field(default=100, ge=1, le=1000)
 
 
+class StressScenarioInput(BaseModel):
+    equity_shock_pct: float = Field(ge=-80.0, le=80.0)
+    vol_shock_points: float = Field(ge=-100.0, le=200.0)
+
+
 class PortfolioRiskInput(BaseModel):
     positions: List[PortfolioPosition]
     options: List[OptionPosition] = Field(default_factory=list)
+    custom_stress: StressScenarioInput | None = None
     portfolio_value: float = Field(default=100000.0, gt=0)
     confidence: float = Field(default=0.99, ge=0.90, lt=1.0)
     horizon_days: int = Field(default=10, ge=1, le=60)
@@ -253,6 +259,67 @@ def _derivatives_summary(options_inventory):
     }
 
 
+def _stress_test_suite(equity_tickers, weights, portfolio_value, option_inventory, rate, custom_stress=None):
+    """Instantaneous scenario shocks with full Black-Scholes option revaluation.
+
+    Equity positions are shocked linearly by market value. Options are repriced at
+    shocked spot and implied volatility, avoiding local-Greeks extrapolation for
+    large stress moves.
+    """
+    scenarios = [
+        {"name": "Severe Sell-off", "equity_shock_pct": -20.0, "vol_shock_points": 20.0},
+        {"name": "Risk-off", "equity_shock_pct": -10.0, "vol_shock_points": 10.0},
+        {"name": "Volatility Spike", "equity_shock_pct": 0.0, "vol_shock_points": 15.0},
+        {"name": "Relief Rally", "equity_shock_pct": 10.0, "vol_shock_points": -5.0},
+    ]
+    if custom_stress is not None:
+        scenarios.append({
+            "name": "Custom",
+            "equity_shock_pct": float(custom_stress.equity_shock_pct),
+            "vol_shock_points": float(custom_stress.vol_shock_points),
+        })
+
+    rows = []
+    for scenario in scenarios:
+        shock = scenario["equity_shock_pct"] / 100.0
+        vol_points = scenario["vol_shock_points"]
+        equity_pnl = float(portfolio_value * shock)
+        options_pnl = 0.0
+
+        for option in option_inventory:
+            shocked_spot = max(0.01, option["spot"] * (1.0 + shock))
+            shocked_vol = float(np.clip(option["implied_vol"] + vol_points / 100.0, 0.01, 3.0))
+            shocked = _bs_price_greeks(
+                shocked_spot,
+                option["strike"],
+                option["days_to_expiry"] / 365.0,
+                rate,
+                shocked_vol,
+                option["option_type"],
+            )
+            options_pnl += (shocked["price"] - option["price"]) * option["units"]
+
+        total_pnl = equity_pnl + options_pnl
+        rows.append({
+            "name": scenario["name"],
+            "equity_shock_pct": round(scenario["equity_shock_pct"], 2),
+            "vol_shock_points": round(vol_points, 2),
+            "equity_pnl": round(equity_pnl, 2),
+            "options_pnl": round(options_pnl, 2),
+            "total_pnl": round(total_pnl, 2),
+            "total_pnl_pct": round((total_pnl / portfolio_value) * 100.0, 2),
+        })
+
+    worst = min(rows, key=lambda row: row["total_pnl"]) if rows else None
+    return {
+        "method": "full_revaluation",
+        "scope": "equity_plus_options",
+        "scenarios": rows,
+        "worst_scenario": worst["name"] if worst else None,
+        "worst_pnl": worst["total_pnl"] if worst else 0.0,
+    }
+
+
 def _parametric_risk_attribution(asset_simple_returns, tickers, weights, portfolio_value, confidence, horizon_days):
     daily_cov = asset_simple_returns[tickers].cov().to_numpy(dtype=float)
     horizon_cov = daily_cov * float(horizon_days)
@@ -305,6 +372,14 @@ def calculate_portfolio_risk(data: PortfolioRiskInput):
     monte_carlo = _loss_metrics(mc_returns, data.confidence, data.portfolio_value)
     attribution = _parametric_risk_attribution(simple_returns, equity_tickers, weights, data.portfolio_value, data.confidence, data.horizon_days)
     derivatives = _derivatives_summary(option_inventory)
+    stress_testing = _stress_test_suite(
+        equity_tickers,
+        weights,
+        data.portfolio_value,
+        option_inventory,
+        data.risk_free_rate,
+        data.custom_stress,
+    )
     correlation = simple_returns[risk_tickers].corr().round(4)
 
     sample_count = min(1500, len(mc_pnl))
@@ -317,6 +392,7 @@ def calculate_portfolio_risk(data: PortfolioRiskInput):
         "models": {"historical": historical, "monte_carlo": monte_carlo},
         "attribution": attribution,
         "derivatives": derivatives,
+        "stress_testing": stress_testing,
         "diagnostics": {"historical_observations": int(len(historical_returns)), "simulations": int(data.simulations), "correlation_matrix": {row: {col: float(correlation.loc[row, col]) for col in risk_tickers} for row in risk_tickers}},
         "distribution": {"monte_carlo_pnl_sample": mc_pnl_sample, "var_threshold_loss": monte_carlo["var_loss"], "expected_shortfall_loss": monte_carlo["expected_shortfall_loss"]},
     }
