@@ -3,6 +3,7 @@ from pathlib import Path
 p = Path('market_risk_lab.py')
 s = p.read_text(encoding='utf-8')
 
+# Phase 3: full-revaluation stress testing.
 # 1. Add optional custom stress payload.
 marker = '''class PortfolioRiskInput(BaseModel):\n    positions: List[PortfolioPosition]\n    options: List[OptionPosition] = Field(default_factory=list)'''
 replacement = '''class StressScenarioInput(BaseModel):\n    equity_shock_pct: float = Field(ge=-80.0, le=80.0)\n    vol_shock_points: float = Field(ge=-100.0, le=200.0)\n\n\nclass PortfolioRiskInput(BaseModel):\n    positions: List[PortfolioPosition]\n    options: List[OptionPosition] = Field(default_factory=list)\n    custom_stress: StressScenarioInput | None = None'''
