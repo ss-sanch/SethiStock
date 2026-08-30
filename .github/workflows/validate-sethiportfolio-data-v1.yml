@@ -1,0 +1,17 @@
+name: Validate SethiPortfolio data v1
+on:
+  push:
+    branches:
+      - feature/sethiportfolio-data-v1
+    paths:
+      - sethiportfolio.py
+      - app.py
+      - .github/workflows/validate-sethiportfolio-data-v1.yml
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/sethiportfolio-data-v1
+      - run: python -m py_compile app.py sethiportfolio.py market_risk_lab.py
