@@ -5,6 +5,7 @@ on:
       - feature/mrl-derivatives-risk
     paths:
       - market_risk_lab.py
+      - .github/workflows/validate-mrl-derivatives.yml
 permissions:
   contents: read
 jobs:
