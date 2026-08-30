@@ -12,7 +12,7 @@ import pandas as pd
 import yfinance as yf
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
-from scipy.stats import norm
+from scipy.stats import chi2, norm
 
 router = APIRouter(prefix="/api/quant/risk", tags=["Market Risk Lab"])
 
@@ -320,6 +320,119 @@ def _stress_test_suite(equity_tickers, weights, portfolio_value, option_inventor
     }
 
 
+def _kupiec_unconditional_coverage_test(breaches: int, observations: int, expected_exception_prob: float):
+    """Kupiec (1995) proportion-of-failures test for VaR exception frequency."""
+    if observations <= 0:
+        return {"lr_stat": 0.0, "p_value": 1.0, "status": "insufficient_data"}
+
+    x = int(breaches)
+    n = int(observations)
+    p = float(np.clip(expected_exception_prob, 1e-9, 1.0 - 1e-9))
+    phat = float(np.clip(x / n, 1e-9, 1.0 - 1e-9))
+
+    log_l0 = (n - x) * np.log(1.0 - p) + x * np.log(p)
+    log_l1 = (n - x) * np.log(1.0 - phat) + x * np.log(phat)
+    lr_stat = max(0.0, -2.0 * (log_l0 - log_l1))
+    p_value = float(chi2.sf(lr_stat, df=1))
+    return {
+        "lr_stat": round(float(lr_stat), 4),
+        "p_value": round(p_value, 4),
+        "status": "pass" if p_value >= 0.05 else "review",
+    }
+
+
+def _rolling_var_backtest(asset_simple_returns, tickers, weights, portfolio_value, confidence):
+    """Backtest rolling one-day equity VaR forecasts against next-day realised P&L.
+
+    Validation deliberately uses non-overlapping one-day outcomes. The estimation
+    window is up to 250 observations, with a 125-observation minimum when the
+    selected lookback is shorter. Options are excluded because historical IV and
+    time-varying contract state are not reconstructed by this educational engine.
+    """
+    portfolio_returns = pd.Series(
+        asset_simple_returns[tickers].to_numpy(dtype=float) @ weights,
+        index=asset_simple_returns.index,
+    ).dropna()
+
+    n_returns = len(portfolio_returns)
+    if n_returns < 150:
+        return {
+            "available": False,
+            "reason": "At least 150 daily equity-return observations are required for rolling validation.",
+            "scope": "equity_book_only",
+        }
+
+    estimation_window = min(250, max(125, n_returns // 2))
+    max_test_observations = 250
+    start = max(estimation_window, n_returns - max_test_observations)
+    z_score = float(norm.ppf(confidence))
+    expected_prob = 1.0 - float(confidence)
+
+    dates = []
+    realised_pnl = []
+    hist_var = []
+    param_var = []
+    hist_breach = []
+    param_breach = []
+
+    values = portfolio_returns.to_numpy(dtype=float)
+    idx = portfolio_returns.index
+    for i in range(start, n_returns):
+        window = values[i - estimation_window:i]
+        realised = float(values[i] * portfolio_value)
+
+        hist_q = float(np.quantile(window, expected_prob))
+        historical_var_loss = max(0.0, -hist_q * portfolio_value)
+
+        mu = float(np.mean(window))
+        sigma = float(np.std(window, ddof=1))
+        parametric_var_loss = max(0.0, (z_score * sigma - mu) * portfolio_value)
+
+        dates.append(pd.Timestamp(idx[i]).strftime('%Y-%m-%d'))
+        realised_pnl.append(round(realised, 2))
+        hist_var.append(round(historical_var_loss, 2))
+        param_var.append(round(parametric_var_loss, 2))
+        hist_breach.append(bool(realised < -historical_var_loss))
+        param_breach.append(bool(realised < -parametric_var_loss))
+
+    observations = len(dates)
+    expected_breaches = observations * expected_prob
+
+    def _model_summary(name, var_series, breach_flags):
+        breaches = int(sum(breach_flags))
+        breach_rate = (breaches / observations * 100.0) if observations else 0.0
+        kupiec = _kupiec_unconditional_coverage_test(breaches, observations, expected_prob)
+        return {
+            "name": name,
+            "breaches": breaches,
+            "expected_breaches": round(expected_breaches, 2),
+            "breach_rate_pct": round(breach_rate, 2),
+            "expected_breach_rate_pct": round(expected_prob * 100.0, 2),
+            "average_var_loss": round(float(np.mean(var_series)), 2) if var_series else 0.0,
+            "kupiec": kupiec,
+        }
+
+    return {
+        "available": True,
+        "method": "rolling_one_day_var_backtest",
+        "scope": "equity_book_only",
+        "confidence": float(confidence),
+        "horizon_days": 1,
+        "estimation_window": int(estimation_window),
+        "observations": int(observations),
+        "historical": _model_summary("Historical VaR", hist_var, hist_breach),
+        "parametric": _model_summary("Parametric VaR", param_var, param_breach),
+        "series": {
+            "dates": dates,
+            "realised_pnl": realised_pnl,
+            "historical_var": hist_var,
+            "parametric_var": param_var,
+            "historical_breach": hist_breach,
+            "parametric_breach": param_breach,
+        },
+    }
+
+
 def _parametric_risk_attribution(asset_simple_returns, tickers, weights, portfolio_value, confidence, horizon_days):
     daily_cov = asset_simple_returns[tickers].cov().to_numpy(dtype=float)
     horizon_cov = daily_cov * float(horizon_days)
@@ -380,6 +493,13 @@ def calculate_portfolio_risk(data: PortfolioRiskInput):
         data.risk_free_rate,
         data.custom_stress,
     )
+    validation = _rolling_var_backtest(
+        simple_returns,
+        equity_tickers,
+        weights,
+        data.portfolio_value,
+        data.confidence,
+    )
     correlation = simple_returns[risk_tickers].corr().round(4)
 
     sample_count = min(1500, len(mc_pnl))
@@ -393,6 +513,7 @@ def calculate_portfolio_risk(data: PortfolioRiskInput):
         "attribution": attribution,
         "derivatives": derivatives,
         "stress_testing": stress_testing,
+        "validation": validation,
         "diagnostics": {"historical_observations": int(len(historical_returns)), "simulations": int(data.simulations), "correlation_matrix": {row: {col: float(correlation.loc[row, col]) for col in risk_tickers} for row in risk_tickers}},
         "distribution": {"monte_carlo_pnl_sample": mc_pnl_sample, "var_threshold_loss": monte_carlo["var_loss"], "expected_shortfall_loss": monte_carlo["expected_shortfall_loss"]},
     }
