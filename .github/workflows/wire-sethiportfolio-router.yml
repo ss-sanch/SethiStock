@@ -1,0 +1,26 @@
+name: Wire SethiPortfolio router
+on:
+  push:
+    branches:
+      - feature/sethiportfolio-data-v1
+    paths:
+      - scripts/wire_sethiportfolio_router.py
+      - .github/workflows/wire-sethiportfolio-router.yml
+permissions:
+  contents: write
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/sethiportfolio-data-v1
+      - run: python scripts/wire_sethiportfolio_router.py
+      - run: python -m py_compile app.py sethiportfolio.py market_risk_lab.py
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.py
+          git diff --cached --quiet && exit 0
+          git commit -m "Wire SethiPortfolio API router [skip ci]"
+          git push origin HEAD:feature/sethiportfolio-data-v1
