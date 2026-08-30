@@ -34,7 +34,7 @@ class OptionPosition(BaseModel):
 
 class PortfolioRiskInput(BaseModel):
     positions: List[PortfolioPosition]
-    options: List[OptionPosition] = []
+    options: List[OptionPosition] = Field(default_factory=list)
     portfolio_value: float = Field(default=100000.0, gt=0)
     confidence: float = Field(default=0.99, ge=0.90, lt=1.0)
     horizon_days: int = Field(default=10, ge=1, le=60)
@@ -129,6 +129,28 @@ def _loss_metrics(returns: np.ndarray, confidence: float, portfolio_value: float
         "var_loss": round(max(0.0, -threshold_return * portfolio_value), 2),
         "expected_shortfall_loss": round(max(0.0, -es_return * portfolio_value), 2),
     }
+
+
+def _historical_horizon_returns(asset_simple_returns: pd.DataFrame, weights: np.ndarray, horizon_days: int) -> np.ndarray:
+    portfolio_daily = asset_simple_returns.to_numpy() @ weights
+    portfolio_daily = pd.Series(portfolio_daily, index=asset_simple_returns.index)
+    if horizon_days == 1:
+        return portfolio_daily.dropna().to_numpy()
+    horizon_returns = (1.0 + portfolio_daily).rolling(horizon_days).apply(np.prod, raw=True) - 1.0
+    return horizon_returns.dropna().to_numpy()
+
+
+def _equity_monte_carlo_returns(asset_log_returns: pd.DataFrame, weights: np.ndarray, horizon_days: int, simulations: int, seed: int) -> np.ndarray:
+    mu = asset_log_returns.mean().to_numpy(dtype=float)
+    cov = asset_log_returns.cov().to_numpy(dtype=float) + np.eye(asset_log_returns.shape[1]) * 1e-12
+    rng = np.random.default_rng(seed)
+    try:
+        shocks = rng.multivariate_normal(mean=mu, cov=cov, size=(simulations, horizon_days), check_valid="warn")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Monte Carlo simulation failed: {exc}")
+    cumulative_log_returns = shocks.sum(axis=1)
+    cumulative_simple_returns = np.exp(cumulative_log_returns) - 1.0
+    return cumulative_simple_returns @ weights
 
 
 def _bs_price_greeks(spot, strike, time_years, rate, sigma, option_type):
@@ -266,13 +288,18 @@ def calculate_portfolio_risk(data: PortfolioRiskInput):
     latest_prices = prices.iloc[-1]
     option_inventory = _option_inventory(options, latest_prices, data.risk_free_rate)
 
-    hist_asset_returns, hist_dvol = _historical_factor_scenarios(simple_returns, data.horizon_days)
-    historical_pnl = _portfolio_pnl_from_scenarios(hist_asset_returns[risk_tickers].to_numpy(dtype=float), hist_dvol[risk_tickers].to_numpy(dtype=float), risk_tickers, equity_tickers, weights, data.portfolio_value, option_inventory, data.horizon_days)
-    historical_returns = historical_pnl / data.portfolio_value
+    if option_inventory:
+        hist_asset_returns, hist_dvol = _historical_factor_scenarios(simple_returns, data.horizon_days)
+        historical_pnl = _portfolio_pnl_from_scenarios(hist_asset_returns[risk_tickers].to_numpy(dtype=float), hist_dvol[risk_tickers].to_numpy(dtype=float), risk_tickers, equity_tickers, weights, data.portfolio_value, option_inventory, data.horizon_days)
+        historical_returns = historical_pnl / data.portfolio_value
 
-    mc_asset_returns, mc_dvol = _joint_monte_carlo_scenarios(simple_returns[risk_tickers], log_returns[risk_tickers], data.horizon_days, data.simulations, data.seed)
-    mc_pnl = _portfolio_pnl_from_scenarios(mc_asset_returns, mc_dvol, risk_tickers, equity_tickers, weights, data.portfolio_value, option_inventory, data.horizon_days)
-    mc_returns = mc_pnl / data.portfolio_value
+        mc_asset_returns, mc_dvol = _joint_monte_carlo_scenarios(simple_returns[risk_tickers], log_returns[risk_tickers], data.horizon_days, data.simulations, data.seed)
+        mc_pnl = _portfolio_pnl_from_scenarios(mc_asset_returns, mc_dvol, risk_tickers, equity_tickers, weights, data.portfolio_value, option_inventory, data.horizon_days)
+        mc_returns = mc_pnl / data.portfolio_value
+    else:
+        historical_returns = _historical_horizon_returns(simple_returns[equity_tickers], weights, data.horizon_days)
+        mc_returns = _equity_monte_carlo_returns(log_returns[equity_tickers], weights, data.horizon_days, data.simulations, data.seed)
+        mc_pnl = mc_returns * data.portfolio_value
 
     historical = _loss_metrics(historical_returns, data.confidence, data.portfolio_value)
     monte_carlo = _loss_metrics(mc_returns, data.confidence, data.portfolio_value)
