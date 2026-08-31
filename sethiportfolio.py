@@ -279,7 +279,9 @@ def _download_adjusted_close(symbols: List[str], start: str) -> pd.DataFrame:
     closes = data["Close"] if "Close" in data else data
     if isinstance(closes, pd.Series):
         closes = closes.to_frame(name=symbols[0])
-    return closes.sort_index().ffill()
+    # Keep the raw market calendar here. Individual valuation series are
+    # forward-filled only after the portfolio valuation calendar is chosen.
+    return closes.sort_index()
 
 
 def _series_fx(closes: pd.DataFrame, currency: str, base_currency: str, index: pd.Index) -> pd.Series:
@@ -315,7 +317,15 @@ def _performance_history(
 
     inception = str(portfolio["inception_date"])
     closes = _download_adjusted_close(download_symbols, inception)
-    trading_dates = closes.index
+
+    # Drive NAV dates from actual portfolio-security sessions rather than the
+    # union of US benchmarks, London securities and FX calendars. This avoids
+    # synthetic flat points caused solely by another market being open.
+    available_portfolio_symbols = [symbol for symbol in portfolio_symbols if symbol in closes.columns]
+    if available_portfolio_symbols:
+        trading_dates = closes[available_portfolio_symbols].dropna(how="all").index
+    else:
+        trading_dates = closes.dropna(how="all").index
 
     txns_by_date: Dict[date, List[Dict[str, Any]]] = defaultdict(list)
     for txn in transactions:
@@ -345,15 +355,23 @@ def _performance_history(
 
         nav = cash
         for symbol, qty in quantities.items():
-            if not qty or symbol not in closes.columns or pd.isna(closes.loc[ts, symbol]):
+            if not qty or symbol not in closes.columns:
+                continue
+            price_series = closes[symbol].reindex(trading_dates).ffill()
+            if pd.isna(price_series.loc[ts]):
                 continue
             fx_series = _series_fx(closes, symbol_currency.get(symbol, base_currency), base_currency, trading_dates)
-            nav += qty * float(closes.loc[ts, symbol]) * float(fx_series.loc[ts])
+            nav += qty * float(price_series.loc[ts]) * float(fx_series.loc[ts])
 
         out_dates.append(ts.strftime("%Y-%m-%d"))
         nav_values.append(float(nav))
 
-    portfolio_index = [] if not nav_values or nav_values[0] == 0 else [round(100.0 * value / nav_values[0], 4) for value in nav_values]
+    initial_capital = float(portfolio.get("initial_capital") or 0.0)
+    portfolio_index = (
+        []
+        if not nav_values or initial_capital == 0
+        else [round(100.0 * value / initial_capital, 4) for value in nav_values]
+    )
 
     benchmark_data: Dict[str, Any] = {}
     for row in benchmarks:
@@ -377,7 +395,7 @@ def _performance_history(
         "portfolio": portfolio_index,
         "benchmarks": benchmark_data,
         "base_currency": base_currency,
-        "method": "transaction_reconstructed_nav_with_fx",
+        "method": "transaction_reconstructed_nav_with_fx_initial_capital_base",
         "inception_date": inception,
     }
 
