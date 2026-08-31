@@ -1,0 +1,33 @@
+name: Temporary SethiStock research router integration
+
+on:
+  push:
+    branches:
+      - feature/sethistock-research-labs
+    paths:
+      - .github/workflows/temp-stock-research-router.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: feature/sethistock-research-labs
+          fetch-depth: 0
+
+      - name: Mount SethiStock research router
+        run: python scripts/patch_stock_research_router.py
+
+      - name: Commit integration and remove temporary patch files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.py
+          git rm scripts/patch_stock_research_router.py .github/workflows/temp-stock-research-router.yml
+          git commit -m "Mount SethiStock research API [skip ci]"
+          git push origin feature/sethistock-research-labs
