@@ -717,6 +717,7 @@ def update_journal_entry(
     existing = _supabase_get(
         "portfolio_journal_entries",
         {"select": "id,published_at", "id": f"eq.{journal_id}", "portfolio_id": f"eq.{portfolio['id']}", "limit": "1"},
+        admin=True,
     )
     if not existing:
         raise HTTPException(status_code=404, detail="Journal entry not found in this portfolio.")
@@ -757,6 +758,7 @@ def delete_journal_entry(
     existing = _supabase_get(
         "portfolio_journal_entries",
         {"select": "id,title", "id": f"eq.{journal_id}", "portfolio_id": f"eq.{portfolio['id']}", "limit": "1"},
+        admin=True,
     )
     if not existing:
         raise HTTPException(status_code=404, detail="Journal entry not found in this portfolio.")
