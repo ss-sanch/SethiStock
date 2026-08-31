@@ -134,8 +134,8 @@ def _build_earnings_events(stock, prices):
         if not baseline_close or not reaction_close:
             continue
 
-        five_day_pos = min(reaction_pos + 4, len(prices) - 1)
-        five_day_close = _safe_float(prices["Close"].iloc[five_day_pos])
+        five_day_pos = reaction_pos + 4
+        five_day_close = _safe_float(prices["Close"].iloc[five_day_pos]) if five_day_pos < len(prices) else None
         move_1d = ((reaction_close / baseline_close) - 1.0) * 100.0
         move_5d = ((five_day_close / baseline_close) - 1.0) * 100.0 if five_day_close else None
 
