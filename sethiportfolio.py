@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 import re
@@ -568,6 +568,83 @@ def _cash_balance(portfolio: Dict[str, Any], transactions: List[Dict[str, Any]])
         else:
             cash += (qty * price - fees) * fx
     return cash
+
+
+@router.get("/admin/{slug}/instrument-lookup")
+def admin_instrument_lookup(
+    slug: str,
+    symbol: str = Query(..., min_length=1, max_length=32),
+    trade_date: date = Query(...),
+    x_admin_secret: Optional[str] = Header(default=None, alias="X-Admin-Secret"),
+) -> Dict[str, Any]:
+    _require_admin(x_admin_secret)
+    portfolio = _portfolio(slug)
+    resolved_symbol = symbol.strip().upper()
+    if trade_date > date.today():
+        raise HTTPException(status_code=400, detail="Trade date cannot be in the future.")
+
+    existing = _find_instrument(resolved_symbol)
+    ticker = yf.Ticker(resolved_symbol)
+    start = trade_date - timedelta(days=10)
+    end = trade_date + timedelta(days=1)
+    try:
+        history = ticker.history(start=start.isoformat(), end=end.isoformat(), auto_adjust=False)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Market data lookup failed for {resolved_symbol}: {exc}") from exc
+    if history is None or history.empty or "Close" not in history:
+        raise HTTPException(status_code=404, detail=f"Ticker {resolved_symbol} could not be verified from market data.")
+
+    closes = history["Close"].dropna()
+    if closes.empty:
+        raise HTTPException(status_code=404, detail=f"Ticker {resolved_symbol} has no usable close around {trade_date.isoformat()}.")
+    eligible = closes[closes.index.date <= trade_date]
+    if eligible.empty:
+        raise HTTPException(status_code=404, detail=f"No market close is available on or before {trade_date.isoformat()} for {resolved_symbol}.")
+    price_ts = eligible.index[-1]
+    raw_price = float(eligible.iloc[-1])
+
+    info: Dict[str, Any] = {}
+    try:
+        info = ticker.get_info() or {}
+    except Exception:
+        info = {}
+    raw_currency = str(info.get("currency") or (existing or {}).get("currency") or portfolio.get("base_currency") or "GBP")
+    currency_upper = raw_currency.upper()
+    price_scale = 0.01 if currency_upper in {"GBP", "GBX"} and raw_currency != "GBP" else 1.0
+    # Yahoo commonly reports London equities in GBp/GBX (pence). Store portfolio transaction prices in GBP.
+    if raw_currency in {"GBp", "GBX", "GBX"}:
+        normalized_currency = "GBP"
+        price_scale = 0.01
+    else:
+        normalized_currency = currency_upper
+        price_scale = 1.0
+    price = raw_price * price_scale
+
+    name = (existing or {}).get("name") or info.get("longName") or info.get("shortName") or resolved_symbol
+    exchange = info.get("fullExchangeName") or info.get("exchange") or None
+    quote_type = str(info.get("quoteType") or (existing or {}).get("asset_type") or "equity").lower()
+
+    transactions = _transactions(portfolio["id"])
+    book = _derive_book(transactions, str(portfolio.get("base_currency") or "GBP").upper())
+    held_quantity = float((book.get(resolved_symbol) or {}).get("quantity") or 0.0)
+
+    return {
+        "verified": True,
+        "symbol": resolved_symbol,
+        "name": name,
+        "exchange": exchange,
+        "asset_type": quote_type,
+        "currency": normalized_currency,
+        "raw_currency": raw_currency,
+        "reference_close": round(price, 6),
+        "raw_reference_close": round(raw_price, 6),
+        "requested_date": trade_date.isoformat(),
+        "price_date": price_ts.date().isoformat(),
+        "used_previous_session": price_ts.date() != trade_date,
+        "price_scale_applied": price_scale,
+        "held_quantity": held_quantity,
+        "source": "Yahoo Finance via yfinance",
+    }
 
 
 @router.get("/admin/health")
