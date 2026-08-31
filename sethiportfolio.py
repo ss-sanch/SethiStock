@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
+from uuid import uuid4
 import re
 
 import pandas as pd
@@ -527,6 +528,23 @@ class AdminTransactionCorrectionPayload(BaseModel):
     reason: str = Field(min_length=3, max_length=500)
 
 
+class AdminActiveAllocationPayload(BaseModel):
+    trade_date: date
+    funding_symbol: str = Field(min_length=1, max_length=32)
+    funding_quantity: float = Field(gt=0)
+    funding_price: float = Field(ge=0)
+    funding_fees: float = Field(default=0, ge=0)
+    target_symbol: str = Field(min_length=1, max_length=32)
+    target_name: str = Field(min_length=1, max_length=160)
+    target_asset_type: str = Field(default="equity", min_length=1, max_length=40)
+    target_currency: str = Field(default="GBP", min_length=3, max_length=3)
+    target_quantity: float = Field(gt=0)
+    target_price: float = Field(ge=0)
+    target_fees: float = Field(default=0, ge=0)
+    target_fx_rate_to_base: Optional[float] = Field(default=None, gt=0)
+    reason: str = Field(min_length=3, max_length=1000)
+
+
 def _slugify(value: str) -> str:
     cleaned = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
     return cleaned[:180] or "journal-entry"
@@ -608,6 +626,122 @@ def create_transaction(slug: str, payload: AdminTransactionPayload, x_admin_secr
         "note": payload.note,
     })
     return {"transaction": row}
+
+
+@router.post("/admin/{slug}/active-allocation")
+def create_active_allocation(
+    slug: str,
+    payload: AdminActiveAllocationPayload,
+    x_admin_secret: Optional[str] = Header(default=None, alias="X-Admin-Secret"),
+) -> Dict[str, Any]:
+    _require_admin(x_admin_secret)
+    portfolio = _portfolio(slug)
+    base_currency = str(portfolio.get("base_currency") or "GBP").upper()
+    transactions = _transactions(portfolio["id"])
+
+    funding_symbol = payload.funding_symbol.strip().upper()
+    target_symbol = payload.target_symbol.strip().upper()
+    if funding_symbol == target_symbol:
+        raise HTTPException(status_code=400, detail="Funding and target symbols must be different for an active allocation.")
+
+    funding_instrument = _find_instrument(funding_symbol)
+    if not funding_instrument:
+        raise HTTPException(status_code=404, detail=f"Funding instrument {funding_symbol} was not found.")
+    funding_currency = str(funding_instrument.get("currency") or base_currency).upper()
+    funding_fx = 1.0 if funding_currency == base_currency else None
+    if funding_fx is None:
+        raise HTTPException(status_code=400, detail=f"Funding instrument {funding_symbol} is not base-currency denominated; active-allocation funding FX is not yet supported.")
+
+    target_currency = payload.target_currency.strip().upper()
+    target_fx = 1.0 if target_currency == base_currency else payload.target_fx_rate_to_base
+    if target_fx is None:
+        raise HTTPException(status_code=400, detail=f"target_fx_rate_to_base is required for {target_currency} purchases in a {base_currency} portfolio.")
+
+    existing_target = _find_instrument(target_symbol)
+    if existing_target and str(existing_target.get("currency") or "").upper() != target_currency:
+        raise HTTPException(status_code=400, detail=f"{target_symbol} already exists with currency {existing_target.get('currency')}.")
+
+    book = _derive_book(transactions, base_currency)
+    held = float((book.get(funding_symbol) or {}).get("quantity") or 0.0)
+    if payload.funding_quantity > held + 1e-9:
+        raise HTTPException(status_code=400, detail=f"Cannot sell {payload.funding_quantity:g} {funding_symbol}; only {held:g} held.")
+
+    decision_id = uuid4().hex[:12]
+    reason = payload.reason.strip()
+    target_for_validation = existing_target or {
+        "id": "pending-target",
+        "symbol": target_symbol,
+        "name": payload.target_name.strip(),
+        "asset_type": payload.target_asset_type.strip().lower(),
+        "currency": target_currency,
+    }
+    funding_row = {
+        "portfolio_id": portfolio["id"],
+        "instrument_id": funding_instrument["id"],
+        "trade_date": payload.trade_date.isoformat(),
+        "side": "SELL",
+        "quantity": payload.funding_quantity,
+        "price": payload.funding_price,
+        "fees": payload.funding_fees,
+        "currency": funding_currency,
+        "fx_rate_to_base": funding_fx,
+        "note": f"ALLOCATION {decision_id} FUNDING: {reason}",
+    }
+    target_row = {
+        "portfolio_id": portfolio["id"],
+        "instrument_id": target_for_validation["id"],
+        "trade_date": payload.trade_date.isoformat(),
+        "side": "BUY",
+        "quantity": payload.target_quantity,
+        "price": payload.target_price,
+        "fees": payload.target_fees,
+        "currency": target_currency,
+        "fx_rate_to_base": float(target_fx),
+        "note": f"ALLOCATION {decision_id} TARGET: {reason}",
+    }
+
+    candidate = list(transactions)
+    funding_validation = dict(funding_row)
+    target_validation = dict(target_row)
+    funding_validation["instruments"] = funding_instrument
+    target_validation["instruments"] = target_for_validation
+    trade_date = payload.trade_date.isoformat()
+    insert_at = max([i for i, txn in enumerate(candidate) if txn.get("trade_date") <= trade_date], default=-1) + 1
+    candidate[insert_at:insert_at] = [funding_validation, target_validation]
+    _derive_book(candidate, base_currency)
+
+    cash = float(portfolio.get("initial_capital") or 0.0)
+    for txn in candidate:
+        qty = float(txn.get("quantity") or 0.0)
+        price = float(txn.get("price") or 0.0)
+        fees = float(txn.get("fees") or 0.0)
+        fx = _trade_fx(txn, base_currency)
+        if str(txn.get("side") or "").upper() == "BUY":
+            cash -= (qty * price + fees) * fx
+        else:
+            cash += (qty * price - fees) * fx
+        if cash < -0.01:
+            raise HTTPException(status_code=400, detail=f"Active allocation would create negative historical cash ({cash:.2f} {base_currency}).")
+
+    target_instrument = existing_target
+    if not target_instrument:
+        target_instrument = _supabase_post("instruments", {
+            "symbol": target_symbol,
+            "name": payload.target_name.strip(),
+            "asset_type": payload.target_asset_type.strip().lower(),
+            "currency": target_currency,
+        })
+    target_row["instrument_id"] = target_instrument["id"]
+
+    rows = _supabase_post_many("portfolio_transactions", [funding_row, target_row])
+    if len(rows) != 2:
+        raise HTTPException(status_code=502, detail="Active allocation did not return both transaction rows.")
+    return {
+        "decision_id": decision_id,
+        "funding_transaction": rows[0],
+        "target_transaction": rows[1],
+        "base_currency": base_currency,
+    }
 
 
 @router.get("/admin/{slug}/journal")
