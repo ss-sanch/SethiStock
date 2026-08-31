@@ -20,7 +20,8 @@ import sethiportfolio
 # --- SUPABASE TELEMETRY ENGINE ---
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
-ADMIN_SECRET = os.getenv("ADMIN_SECRET", "admin123")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
+ADMIN_SECRET = os.getenv("ADMIN_SECRET", "")
 
 class TelemetryPayload(BaseModel):
     project: str
@@ -66,7 +67,7 @@ app.add_middleware(
 )
 
 app.include_router(market_risk_lab.router)
-sethiportfolio.configure_supabase(SUPABASE_URL, SUPABASE_KEY)
+sethiportfolio.configure_supabase(SUPABASE_URL, SUPABASE_KEY, SUPABASE_SERVICE_KEY, ADMIN_SECRET)
 app.include_router(sethiportfolio.router)
 
 def resolve_ticker(query: str):
