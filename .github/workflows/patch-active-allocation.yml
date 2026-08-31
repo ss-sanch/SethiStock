@@ -1,0 +1,25 @@
+name: Patch active allocation
+on:
+  push:
+    branches: [feature/sethiportfolio-active-allocation]
+    paths:
+      - scripts/patch_active_allocation.py
+      - .github/workflows/patch-active-allocation.yml
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/sethiportfolio-active-allocation
+      - run: python scripts/patch_active_allocation.py
+      - run: python -m py_compile sethiportfolio.py
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add sethiportfolio.py
+          git diff --cached --quiet && exit 0
+          git commit -m "Add atomic SethiPortfolio active allocation endpoint [skip ci]"
+          git push origin HEAD:feature/sethiportfolio-active-allocation
