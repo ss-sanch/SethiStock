@@ -625,8 +625,31 @@ def admin_instrument_lookup(
     quote_type = str(info.get("quoteType") or (existing or {}).get("asset_type") or "equity").lower()
 
     transactions = _transactions(portfolio["id"])
-    book = _derive_book(transactions, str(portfolio.get("base_currency") or "GBP").upper())
+    base_currency = str(portfolio.get("base_currency") or "GBP").upper()
+    book = _derive_book(transactions, base_currency)
     held_quantity = float((book.get(resolved_symbol) or {}).get("quantity") or 0.0)
+
+    fx_rate_to_base = 1.0
+    fx_price_date = trade_date
+    fx_used_previous_session = False
+    fx_source_symbol = None
+    if normalized_currency != base_currency:
+        fx_source_symbol = _fx_symbol(normalized_currency, base_currency)
+        fx_ticker = yf.Ticker(fx_source_symbol)
+        try:
+            fx_history = fx_ticker.history(start=start.isoformat(), end=end.isoformat(), auto_adjust=False)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"FX lookup failed for {normalized_currency}/{base_currency}: {exc}") from exc
+        if fx_history is None or fx_history.empty or "Close" not in fx_history:
+            raise HTTPException(status_code=404, detail=f"No FX reference rate is available for {normalized_currency}/{base_currency} around {trade_date.isoformat()}.")
+        fx_closes = fx_history["Close"].dropna()
+        fx_eligible = fx_closes[fx_closes.index.date <= trade_date]
+        if fx_eligible.empty:
+            raise HTTPException(status_code=404, detail=f"No FX reference rate is available on or before {trade_date.isoformat()} for {normalized_currency}/{base_currency}.")
+        fx_ts = fx_eligible.index[-1]
+        fx_rate_to_base = float(fx_eligible.iloc[-1])
+        fx_price_date = fx_ts.date()
+        fx_used_previous_session = fx_price_date != trade_date
 
     return {
         "verified": True,
@@ -643,6 +666,11 @@ def admin_instrument_lookup(
         "used_previous_session": price_ts.date() != trade_date,
         "price_scale_applied": price_scale,
         "held_quantity": held_quantity,
+        "fx_rate_to_base": round(fx_rate_to_base, 8),
+        "fx_base_currency": base_currency,
+        "fx_price_date": fx_price_date.isoformat(),
+        "fx_used_previous_session": fx_used_previous_session,
+        "fx_source_symbol": fx_source_symbol,
         "source": "Yahoo Finance via yfinance",
     }
 
