@@ -69,6 +69,63 @@ def _supabase_post(table: str, payload: Dict[str, Any], params: Optional[Dict[st
 
 
 
+def _supabase_post_many(table: str, payload: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    try:
+        headers = _headers(write=True)
+        headers["Prefer"] = "return=representation"
+        response = requests.post(
+            f"{SUPABASE_URL}/rest/v1/{table}",
+            headers=headers,
+            json=payload,
+            timeout=12,
+        )
+        if response.status_code >= 400:
+            raise HTTPException(status_code=502, detail=f"Portfolio write failed: {response.text[:300]}")
+        return response.json() if response.content else []
+    except HTTPException:
+        raise
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"Portfolio write service unavailable: {exc}") from exc
+
+
+def _supabase_patch(table: str, params: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        headers = _headers(write=True)
+        headers["Prefer"] = "return=representation"
+        response = requests.patch(
+            f"{SUPABASE_URL}/rest/v1/{table}",
+            headers=headers,
+            params=params,
+            json=payload,
+            timeout=12,
+        )
+        if response.status_code >= 400:
+            raise HTTPException(status_code=502, detail=f"Portfolio update failed: {response.text[:300]}")
+        rows = response.json() if response.content else []
+        return rows[0] if isinstance(rows, list) and rows else {}
+    except HTTPException:
+        raise
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"Portfolio update service unavailable: {exc}") from exc
+
+
+def _supabase_delete(table: str, params: Dict[str, Any]) -> None:
+    try:
+        headers = _headers(write=True)
+        response = requests.delete(
+            f"{SUPABASE_URL}/rest/v1/{table}",
+            headers=headers,
+            params=params,
+            timeout=12,
+        )
+        if response.status_code >= 400:
+            raise HTTPException(status_code=502, detail=f"Portfolio delete failed: {response.text[:300]}")
+    except HTTPException:
+        raise
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"Portfolio delete service unavailable: {exc}") from exc
+
+
 def _supabase_get(table: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
     try:
         response = requests.get(
@@ -462,6 +519,14 @@ class AdminJournalPayload(BaseModel):
     is_published: bool = True
 
 
+class AdminTransactionCorrectionPayload(BaseModel):
+    quantity: float = Field(gt=0)
+    price: float = Field(ge=0)
+    fees: float = Field(default=0, ge=0)
+    fx_rate_to_base: Optional[float] = Field(default=None, gt=0)
+    reason: str = Field(min_length=3, max_length=500)
+
+
 def _slugify(value: str) -> str:
     cleaned = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
     return cleaned[:180] or "journal-entry"
@@ -543,6 +608,159 @@ def create_transaction(slug: str, payload: AdminTransactionPayload, x_admin_secr
         "note": payload.note,
     })
     return {"transaction": row}
+
+
+@router.get("/admin/{slug}/journal")
+def get_admin_journal(slug: str, x_admin_secret: Optional[str] = Header(default=None, alias="X-Admin-Secret")) -> Dict[str, Any]:
+    _require_admin(x_admin_secret)
+    portfolio = _portfolio(slug)
+    rows = _supabase_get(
+        "portfolio_journal_entries",
+        {
+            "select": "id,slug,title,summary,body,category,effective_date,published_at,related_transaction_id,is_published,created_at,updated_at",
+            "portfolio_id": f"eq.{portfolio['id']}",
+            "order": "effective_date.desc,created_at.desc",
+            "limit": "100",
+        },
+    )
+    return {"journal": rows}
+
+
+@router.post("/admin/{slug}/transaction/{transaction_id}/correct")
+def correct_transaction(
+    slug: str,
+    transaction_id: str,
+    payload: AdminTransactionCorrectionPayload,
+    x_admin_secret: Optional[str] = Header(default=None, alias="X-Admin-Secret"),
+) -> Dict[str, Any]:
+    _require_admin(x_admin_secret)
+    portfolio = _portfolio(slug)
+    transactions = _transactions(portfolio["id"])
+    original = next((txn for txn in transactions if txn.get("id") == transaction_id), None)
+    if not original:
+        raise HTTPException(status_code=404, detail="Transaction not found in this portfolio.")
+
+    instrument = original.get("instruments") or {}
+    if not instrument.get("id") or not instrument.get("symbol"):
+        raise HTTPException(status_code=500, detail="Original transaction instrument is unavailable.")
+    base_currency = str(portfolio.get("base_currency") or "GBP").upper()
+    currency = str(instrument.get("currency") or original.get("currency") or base_currency).upper()
+    fx = 1.0 if currency == base_currency else payload.fx_rate_to_base
+    if fx is None:
+        raise HTTPException(status_code=400, detail=f"fx_rate_to_base is required for {currency} corrections in a {base_currency} portfolio.")
+
+    original_side = str(original.get("side") or "").upper()
+    reverse_side = "SELL" if original_side == "BUY" else "BUY"
+    reason = payload.reason.strip()
+    reversal = {
+        "portfolio_id": portfolio["id"],
+        "instrument_id": instrument["id"],
+        "trade_date": original["trade_date"],
+        "side": reverse_side,
+        "quantity": float(original.get("quantity") or 0),
+        "price": float(original.get("price") or 0),
+        "fees": float(original.get("fees") or 0),
+        "currency": currency,
+        "fx_rate_to_base": float(original.get("fx_rate_to_base") or 1.0),
+        "note": f"REVERSAL of {transaction_id}: {reason}",
+    }
+    replacement = {
+        "portfolio_id": portfolio["id"],
+        "instrument_id": instrument["id"],
+        "trade_date": original["trade_date"],
+        "side": original_side,
+        "quantity": payload.quantity,
+        "price": payload.price,
+        "fees": payload.fees,
+        "currency": currency,
+        "fx_rate_to_base": float(fx),
+        "note": f"CORRECTION of {transaction_id}: {reason}",
+    }
+
+    # Validate the reconstructed ledger before writing either row. New rows have
+    # the same trade date and are appended after the original for that date.
+    candidate = list(transactions)
+    reversal_for_validation = dict(reversal)
+    replacement_for_validation = dict(replacement)
+    reversal_for_validation["instruments"] = instrument
+    replacement_for_validation["instruments"] = instrument
+    insert_at = max(i for i, txn in enumerate(candidate) if txn.get("trade_date") <= original["trade_date"]) + 1
+    candidate[insert_at:insert_at] = [reversal_for_validation, replacement_for_validation]
+    _derive_book(candidate, base_currency)
+    cash = float(portfolio.get("initial_capital") or 0.0)
+    for txn in candidate:
+        qty = float(txn.get("quantity") or 0.0)
+        price = float(txn.get("price") or 0.0)
+        fees = float(txn.get("fees") or 0.0)
+        txn_fx = _trade_fx(txn, base_currency)
+        if str(txn.get("side") or "").upper() == "BUY":
+            cash -= (qty * price + fees) * txn_fx
+        else:
+            cash += (qty * price - fees) * txn_fx
+        if cash < -0.01:
+            raise HTTPException(status_code=400, detail=f"Correction would create negative historical cash ({cash:.2f} {base_currency}).")
+
+    rows = _supabase_post_many("portfolio_transactions", [reversal, replacement])
+    return {"correction": rows, "original_transaction_id": transaction_id}
+
+
+@router.patch("/admin/{slug}/journal/{journal_id}")
+def update_journal_entry(
+    slug: str,
+    journal_id: str,
+    payload: AdminJournalPayload,
+    x_admin_secret: Optional[str] = Header(default=None, alias="X-Admin-Secret"),
+) -> Dict[str, Any]:
+    _require_admin(x_admin_secret)
+    portfolio = _portfolio(slug)
+    existing = _supabase_get(
+        "portfolio_journal_entries",
+        {"select": "id,published_at", "id": f"eq.{journal_id}", "portfolio_id": f"eq.{portfolio['id']}", "limit": "1"},
+    )
+    if not existing:
+        raise HTTPException(status_code=404, detail="Journal entry not found in this portfolio.")
+    if payload.related_transaction_id and not any(txn.get("id") == payload.related_transaction_id for txn in _transactions(portfolio["id"])):
+        raise HTTPException(status_code=400, detail="related_transaction_id does not belong to this portfolio.")
+    published_at = existing[0].get("published_at")
+    if payload.is_published and not published_at:
+        published_at = datetime.utcnow().isoformat() + "Z"
+    if not payload.is_published:
+        published_at = None
+    row = _supabase_patch(
+        "portfolio_journal_entries",
+        {"id": f"eq.{journal_id}", "portfolio_id": f"eq.{portfolio['id']}"},
+        {
+            "slug": _slugify(payload.slug or payload.title),
+            "title": payload.title.strip(),
+            "summary": payload.summary.strip(),
+            "body": payload.body.strip(),
+            "category": payload.category.strip(),
+            "effective_date": payload.effective_date.isoformat(),
+            "published_at": published_at,
+            "related_transaction_id": payload.related_transaction_id,
+            "is_published": payload.is_published,
+            "updated_at": datetime.utcnow().isoformat() + "Z",
+        },
+    )
+    return {"journal": row}
+
+
+@router.delete("/admin/{slug}/journal/{journal_id}")
+def delete_journal_entry(
+    slug: str,
+    journal_id: str,
+    x_admin_secret: Optional[str] = Header(default=None, alias="X-Admin-Secret"),
+) -> Dict[str, Any]:
+    _require_admin(x_admin_secret)
+    portfolio = _portfolio(slug)
+    existing = _supabase_get(
+        "portfolio_journal_entries",
+        {"select": "id,title", "id": f"eq.{journal_id}", "portfolio_id": f"eq.{portfolio['id']}", "limit": "1"},
+    )
+    if not existing:
+        raise HTTPException(status_code=404, detail="Journal entry not found in this portfolio.")
+    _supabase_delete("portfolio_journal_entries", {"id": f"eq.{journal_id}", "portfolio_id": f"eq.{portfolio['id']}"})
+    return {"deleted": True, "journal_id": journal_id, "title": existing[0].get("title")}
 
 
 @router.post("/admin/{slug}/journal")
