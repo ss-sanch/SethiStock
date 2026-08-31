@@ -126,11 +126,11 @@ def _supabase_delete(table: str, params: Dict[str, Any]) -> None:
         raise HTTPException(status_code=502, detail=f"Portfolio delete service unavailable: {exc}") from exc
 
 
-def _supabase_get(table: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _supabase_get(table: str, params: Dict[str, Any], admin: bool = False) -> List[Dict[str, Any]]:
     try:
         response = requests.get(
             f"{SUPABASE_URL}/rest/v1/{table}",
-            headers=_headers(),
+            headers=_headers(write=admin),
             params=params,
             timeout=12,
         )
@@ -622,6 +622,7 @@ def get_admin_journal(slug: str, x_admin_secret: Optional[str] = Header(default=
             "order": "effective_date.desc,created_at.desc",
             "limit": "100",
         },
+        admin=True,
     )
     return {"journal": rows}
 
