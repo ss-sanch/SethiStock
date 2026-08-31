@@ -2,34 +2,71 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date, datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+import re
 
 import pandas as pd
 import requests
 import yfinance as yf
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Header
+from pydantic import BaseModel, Field
 
 
 router = APIRouter(prefix="/api/portfolio", tags=["SethiPortfolio"])
 
 SUPABASE_URL = ""
 SUPABASE_KEY = ""
+SUPABASE_SERVICE_KEY = ""
+ADMIN_SECRET = ""
 
 
-def configure_supabase(url: str, key: str) -> None:
-    global SUPABASE_URL, SUPABASE_KEY
+def configure_supabase(url: str, key: str, service_key: str = "", admin_secret: str = "") -> None:
+    global SUPABASE_URL, SUPABASE_KEY, SUPABASE_SERVICE_KEY, ADMIN_SECRET
     SUPABASE_URL = (url or "").replace("/rest/v1", "").rstrip("/")
     SUPABASE_KEY = key or ""
+    SUPABASE_SERVICE_KEY = service_key or ""
+    ADMIN_SECRET = admin_secret or ""
 
 
-def _headers() -> Dict[str, str]:
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        raise HTTPException(status_code=503, detail="SethiPortfolio database is not configured yet.")
+def _headers(write: bool = False) -> Dict[str, str]:
+    key = SUPABASE_SERVICE_KEY if write else SUPABASE_KEY
+    if not SUPABASE_URL or not key:
+        detail = "SethiPortfolio write service is not configured yet." if write else "SethiPortfolio database is not configured yet."
+        raise HTTPException(status_code=503, detail=detail)
     return {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
     }
+
+
+def _require_admin(x_admin_secret: Optional[str]) -> None:
+    if not ADMIN_SECRET:
+        raise HTTPException(status_code=503, detail="SethiPortfolio admin authentication is not configured.")
+    if not x_admin_secret or x_admin_secret != ADMIN_SECRET:
+        raise HTTPException(status_code=401, detail="Invalid admin credentials.")
+
+
+def _supabase_post(table: str, payload: Dict[str, Any], params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    try:
+        headers = _headers(write=True)
+        headers["Prefer"] = "return=representation"
+        response = requests.post(
+            f"{SUPABASE_URL}/rest/v1/{table}",
+            headers=headers,
+            params=params or {},
+            json=payload,
+            timeout=12,
+        )
+        if response.status_code >= 400:
+            raise HTTPException(status_code=502, detail=f"Portfolio write failed: {response.text[:300]}")
+        rows = response.json() if response.content else []
+        return rows[0] if isinstance(rows, list) and rows else {}
+    except HTTPException:
+        raise
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"Portfolio write service unavailable: {exc}") from exc
+
 
 
 def _supabase_get(table: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -398,6 +435,137 @@ def _performance_history(
         "method": "transaction_reconstructed_nav_with_fx_initial_capital_base",
         "inception_date": inception,
     }
+
+
+class AdminTransactionPayload(BaseModel):
+    symbol: str = Field(min_length=1, max_length=32)
+    name: str = Field(min_length=1, max_length=160)
+    asset_type: str = Field(default="equity", min_length=1, max_length=40)
+    currency: str = Field(default="GBP", min_length=3, max_length=3)
+    trade_date: date
+    side: str
+    quantity: float = Field(gt=0)
+    price: float = Field(ge=0)
+    fees: float = Field(default=0, ge=0)
+    fx_rate_to_base: Optional[float] = Field(default=None, gt=0)
+    note: Optional[str] = Field(default=None, max_length=1000)
+
+
+class AdminJournalPayload(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    summary: str = Field(min_length=1, max_length=1000)
+    body: str = Field(min_length=1)
+    category: str = Field(default="Investment Note", min_length=1, max_length=80)
+    effective_date: date
+    related_transaction_id: Optional[str] = None
+    slug: Optional[str] = Field(default=None, max_length=200)
+    is_published: bool = True
+
+
+def _slugify(value: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return cleaned[:180] or "journal-entry"
+
+
+def _find_instrument(symbol: str) -> Optional[Dict[str, Any]]:
+    rows = _supabase_get("instruments", {"select": "id,symbol,name,asset_type,currency", "symbol": f"eq.{symbol}", "limit": "1"})
+    return rows[0] if rows else None
+
+
+def _cash_balance(portfolio: Dict[str, Any], transactions: List[Dict[str, Any]]) -> float:
+    base_currency = str(portfolio.get("base_currency") or "GBP").upper()
+    cash = float(portfolio.get("initial_capital") or 0.0)
+    for txn in transactions:
+        qty = float(txn.get("quantity") or 0.0)
+        price = float(txn.get("price") or 0.0)
+        fees = float(txn.get("fees") or 0.0)
+        fx = _trade_fx(txn, base_currency)
+        if str(txn.get("side", "")).upper() == "BUY":
+            cash -= (qty * price + fees) * fx
+        else:
+            cash += (qty * price - fees) * fx
+    return cash
+
+
+@router.get("/admin/health")
+def admin_health(x_admin_secret: Optional[str] = Header(default=None, alias="X-Admin-Secret")) -> Dict[str, Any]:
+    _require_admin(x_admin_secret)
+    return {"authenticated": True, "writes_configured": bool(SUPABASE_URL and SUPABASE_SERVICE_KEY)}
+
+
+@router.post("/admin/{slug}/transaction")
+def create_transaction(slug: str, payload: AdminTransactionPayload, x_admin_secret: Optional[str] = Header(default=None, alias="X-Admin-Secret")) -> Dict[str, Any]:
+    _require_admin(x_admin_secret)
+    portfolio = _portfolio(slug)
+    base_currency = str(portfolio.get("base_currency") or "GBP").upper()
+    symbol = payload.symbol.strip().upper()
+    currency = payload.currency.strip().upper()
+    side = payload.side.strip().upper()
+    if side not in {"BUY", "SELL"}:
+        raise HTTPException(status_code=400, detail="side must be BUY or SELL.")
+    if currency != base_currency and payload.fx_rate_to_base is None:
+        raise HTTPException(status_code=400, detail=f"fx_rate_to_base is required for {currency} trades in a {base_currency} portfolio.")
+
+    instrument = _find_instrument(symbol)
+    if not instrument:
+        instrument = _supabase_post("instruments", {
+            "symbol": symbol,
+            "name": payload.name.strip(),
+            "asset_type": payload.asset_type.strip().lower(),
+            "currency": currency,
+        })
+    elif str(instrument.get("currency") or "").upper() != currency:
+        raise HTTPException(status_code=400, detail=f"{symbol} already exists with currency {instrument.get('currency')}.")
+
+    transactions = _transactions(portfolio["id"])
+    fx = 1.0 if currency == base_currency else float(payload.fx_rate_to_base)
+    if side == "BUY":
+        required_cash = (payload.quantity * payload.price + payload.fees) * fx
+        available_cash = _cash_balance(portfolio, transactions)
+        if required_cash > available_cash + 0.01:
+            raise HTTPException(status_code=400, detail=f"Insufficient cash. Required {required_cash:.2f} {base_currency}; available {available_cash:.2f} {base_currency}.")
+    else:
+        book = _derive_book(transactions, base_currency)
+        held = float((book.get(symbol) or {}).get("quantity") or 0.0)
+        if payload.quantity > held + 1e-9:
+            raise HTTPException(status_code=400, detail=f"Cannot sell {payload.quantity:g} {symbol}; only {held:g} held.")
+
+    row = _supabase_post("portfolio_transactions", {
+        "portfolio_id": portfolio["id"],
+        "instrument_id": instrument["id"],
+        "trade_date": payload.trade_date.isoformat(),
+        "side": side,
+        "quantity": payload.quantity,
+        "price": payload.price,
+        "fees": payload.fees,
+        "currency": currency,
+        "fx_rate_to_base": fx,
+        "note": payload.note,
+    })
+    return {"transaction": row}
+
+
+@router.post("/admin/{slug}/journal")
+def create_journal_entry(slug: str, payload: AdminJournalPayload, x_admin_secret: Optional[str] = Header(default=None, alias="X-Admin-Secret")) -> Dict[str, Any]:
+    _require_admin(x_admin_secret)
+    portfolio = _portfolio(slug)
+    if payload.related_transaction_id:
+        matches = [txn for txn in _transactions(portfolio["id"]) if txn.get("id") == payload.related_transaction_id]
+        if not matches:
+            raise HTTPException(status_code=400, detail="related_transaction_id does not belong to this portfolio.")
+    row = _supabase_post("portfolio_journal_entries", {
+        "portfolio_id": portfolio["id"],
+        "slug": _slugify(payload.slug or payload.title),
+        "title": payload.title.strip(),
+        "summary": payload.summary.strip(),
+        "body": payload.body.strip(),
+        "category": payload.category.strip(),
+        "effective_date": payload.effective_date.isoformat(),
+        "published_at": datetime.utcnow().isoformat() + "Z" if payload.is_published else None,
+        "related_transaction_id": payload.related_transaction_id,
+        "is_published": payload.is_published,
+    })
+    return {"journal": row}
 
 
 @router.get("")
