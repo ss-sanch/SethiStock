@@ -570,6 +570,7 @@ class AdminActiveAllocationPayload(BaseModel):
     funding_quantity: float = Field(gt=0)
     funding_price: float = Field(ge=0)
     funding_fees: float = Field(default=0, ge=0)
+    funding_fx_rate_to_base: Optional[float] = Field(default=None, gt=0)
     target_symbol: str = Field(min_length=1, max_length=32)
     target_name: str = Field(min_length=1, max_length=160)
     target_asset_type: str = Field(default="equity", min_length=1, max_length=40)
@@ -586,6 +587,7 @@ class AdminAllocationCorrectionPayload(BaseModel):
     funding_quantity: float = Field(gt=0)
     funding_price: float = Field(ge=0)
     funding_fees: float = Field(default=0, ge=0)
+    funding_fx_rate_to_base: Optional[float] = Field(default=None, gt=0)
     target_quantity: float = Field(gt=0)
     target_price: float = Field(ge=0)
     target_fees: float = Field(default=0, ge=0)
@@ -744,8 +746,9 @@ def _build_allocation_correction(
         raise HTTPException(status_code=500, detail="Allocation instruments are unavailable.")
 
     funding_currency = str(funding_instrument.get("currency") or funding.get("currency") or base_currency).upper()
-    if funding_currency != base_currency:
-        raise HTTPException(status_code=400, detail="Allocation-date correction currently requires a base-currency funding instrument.")
+    funding_fx = 1.0 if funding_currency == base_currency else payload.funding_fx_rate_to_base
+    if funding_fx is None:
+        raise HTTPException(status_code=400, detail=f"funding_fx_rate_to_base is required for {funding_currency} corrected sales in a {base_currency} portfolio.")
     target_currency = str(target_instrument.get("currency") or target.get("currency") or base_currency).upper()
     target_fx = 1.0 if target_currency == base_currency else payload.target_fx_rate_to_base
     if target_fx is None:
@@ -777,7 +780,7 @@ def _build_allocation_correction(
         "portfolio_id": portfolio["id"], "instrument_id": funding_instrument["id"],
         "trade_date": payload.corrected_trade_date.isoformat(), "side": "SELL",
         "quantity": payload.funding_quantity, "price": payload.funding_price,
-        "fees": payload.funding_fees, "currency": funding_currency, "fx_rate_to_base": 1.0,
+        "fees": payload.funding_fees, "currency": funding_currency, "fx_rate_to_base": float(funding_fx),
         "note": f"ALLOCATION {correction_id} FUNDING: [CORRECTS {decision_id}] {funding_public_reason}",
     }
     corrected_target = {
@@ -799,7 +802,7 @@ def _build_allocation_correction(
     candidate = list(raw_transactions) + validation_rows
     validation = _validate_effective_ledger(portfolio, candidate)
 
-    funding_proceeds = (payload.funding_quantity * payload.funding_price - payload.funding_fees)
+    funding_proceeds = (payload.funding_quantity * payload.funding_price - payload.funding_fees) * float(funding_fx)
     target_cost_base = (payload.target_quantity * payload.target_price + payload.target_fees) * float(target_fx)
     return {
         "correction_id": correction_id,
@@ -997,9 +1000,9 @@ def create_active_allocation(
     if not funding_instrument:
         raise HTTPException(status_code=404, detail=f"Funding instrument {funding_symbol} was not found.")
     funding_currency = str(funding_instrument.get("currency") or base_currency).upper()
-    funding_fx = 1.0 if funding_currency == base_currency else None
+    funding_fx = 1.0 if funding_currency == base_currency else payload.funding_fx_rate_to_base
     if funding_fx is None:
-        raise HTTPException(status_code=400, detail=f"Funding instrument {funding_symbol} is not base-currency denominated; active-allocation funding FX is not yet supported.")
+        raise HTTPException(status_code=400, detail=f"funding_fx_rate_to_base is required for {funding_currency} sales in a {base_currency} portfolio.")
 
     target_currency = payload.target_currency.strip().upper()
     target_fx = 1.0 if target_currency == base_currency else payload.target_fx_rate_to_base
@@ -1089,6 +1092,10 @@ def create_active_allocation(
         "decision_id": decision_id,
         "funding_transaction": rows[0],
         "target_transaction": rows[1],
+        "funding_currency": funding_currency,
+        "funding_fx_rate_to_base": float(funding_fx),
+        "target_currency": target_currency,
+        "target_fx_rate_to_base": float(target_fx),
         "base_currency": base_currency,
     }
 
