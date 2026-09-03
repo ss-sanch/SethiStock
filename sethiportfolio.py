@@ -196,7 +196,14 @@ def _journal(portfolio_id: str, limit: int = 20) -> List[Dict[str, Any]]:
 def _fx_symbol(currency: str, base_currency: str) -> str | None:
     currency = (currency or base_currency).upper()
     base_currency = base_currency.upper()
-    return None if currency == base_currency else f"{currency}{base_currency}=X"
+    if currency == base_currency:
+        return None
+    # Yahoo's canonical USD-to-GBP series is GBP=X (GBP received per USD).
+    # USDGBP=X can return a differently aligned daily series, which caused
+    # historical trade-date FX references to pick the prior day's level.
+    if currency == "USD" and base_currency == "GBP":
+        return "GBP=X"
+    return f"{currency}{base_currency}=X"
 
 
 def _latest_market_data(symbols: List[str]) -> Dict[str, float]:
