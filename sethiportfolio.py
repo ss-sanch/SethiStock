@@ -889,7 +889,12 @@ def admin_instrument_lookup(
 @router.get("/admin/health")
 def admin_health(x_admin_secret: Optional[str] = Header(default=None, alias="X-Admin-Secret")) -> Dict[str, Any]:
     _require_admin(x_admin_secret)
-    return {"authenticated": True, "writes_configured": bool(SUPABASE_URL and SUPABASE_SERVICE_KEY)}
+    return {
+        "authenticated": True,
+        "writes_configured": bool(SUPABASE_URL and SUPABASE_SERVICE_KEY),
+        "admin_ledger": True,
+        "allocation_corrections": True,
+    }
 
 
 @router.post("/admin/{slug}/transaction")
@@ -1060,6 +1065,7 @@ def create_active_allocation(
     }
 
 
+@router.get("/admin/{slug}/ledger")
 @router.get("/admin/{slug}/transactions")
 def get_admin_transactions(slug: str, x_admin_secret: Optional[str] = Header(default=None, alias="X-Admin-Secret")) -> Dict[str, Any]:
     _require_admin(x_admin_secret)
