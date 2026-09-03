@@ -1,5 +1,6 @@
 from pathlib import Path
 
+# Trigger the patch workflow after the workflow file itself exists on this branch.
 p = Path('sethiportfolio.py')
 s = p.read_text(encoding='utf-8')
 
