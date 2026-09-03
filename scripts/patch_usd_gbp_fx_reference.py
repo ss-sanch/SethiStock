@@ -1,5 +1,6 @@
 from pathlib import Path
 
+# Trigger the patch workflow after the workflow definition exists on this branch.
 p = Path('sethiportfolio.py')
 s = p.read_text(encoding='utf-8')
 old = '''def _fx_symbol(currency: str, base_currency: str) -> str | None:\n    currency = (currency or base_currency).upper()\n    base_currency = base_currency.upper()\n    return None if currency == base_currency else f"{currency}{base_currency}=X"\n'''
