@@ -196,14 +196,43 @@ def _journal(portfolio_id: str, limit: int = 20) -> List[Dict[str, Any]]:
 def _fx_symbol(currency: str, base_currency: str) -> str | None:
     currency = (currency or base_currency).upper()
     base_currency = base_currency.upper()
+    return None if currency == base_currency else f"{currency}{base_currency}=X"
+
+
+def _historical_fx_reference(currency: str, base_currency: str, requested_date: date) -> tuple[float, date, str]:
+    """Return an auditable daily FX reference for transaction accounting.
+
+    Historical transaction FX should not depend on Yahoo daily-bar timezone/close
+    conventions. For GBP-base portfolios, pin the Bank of England provider exposed
+    by Frankfurter. The API returns the provider date as well as the rate, so a
+    weekend/holiday fallback remains explicit in the ledger UI.
+    """
+    currency = (currency or base_currency).upper()
+    base_currency = base_currency.upper()
     if currency == base_currency:
-        return None
-    # Yahoo's canonical USD-to-GBP series is GBP=X (GBP received per USD).
-    # USDGBP=X can return a differently aligned daily series, which caused
-    # historical trade-date FX references to pick the prior day's level.
-    if currency == "USD" and base_currency == "GBP":
-        return "GBP=X"
-    return f"{currency}{base_currency}=X"
+        return 1.0, requested_date, 'Identity'
+
+    provider = 'BOE' if base_currency == 'GBP' else 'ECB'
+    try:
+        response = requests.get(
+            f'https://api.frankfurter.dev/v2/rate/{currency}/{base_currency}',
+            params={'date': requested_date.isoformat(), 'providers': provider},
+            timeout=8,
+        )
+        if response.status_code >= 400:
+            raise ValueError(f'HTTP {response.status_code}: {response.text[:160]}')
+        data = response.json()
+        rate = float(data['rate'])
+        rate_date = date.fromisoformat(str(data['date']))
+        if rate <= 0:
+            raise ValueError('non-positive FX rate')
+    except (requests.RequestException, KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f'Historical FX reference unavailable for {currency}/{base_currency} on {requested_date.isoformat()}: {exc}',
+        ) from exc
+
+    return rate, rate_date, f'{provider} via Frankfurter'
 
 
 def _latest_market_data(symbols: List[str]) -> Dict[str, float]:
@@ -851,23 +880,14 @@ def admin_instrument_lookup(
     fx_price_date = trade_date
     fx_used_previous_session = False
     fx_source_symbol = None
+    fx_source = 'Identity'
     if normalized_currency != base_currency:
-        fx_source_symbol = _fx_symbol(normalized_currency, base_currency)
-        fx_ticker = yf.Ticker(fx_source_symbol)
-        try:
-            fx_history = fx_ticker.history(start=start.isoformat(), end=end.isoformat(), auto_adjust=False)
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"FX lookup failed for {normalized_currency}/{base_currency}: {exc}") from exc
-        if fx_history is None or fx_history.empty or "Close" not in fx_history:
-            raise HTTPException(status_code=404, detail=f"No FX reference rate is available for {normalized_currency}/{base_currency} around {trade_date.isoformat()}.")
-        fx_closes = fx_history["Close"].dropna()
-        fx_eligible = fx_closes[fx_closes.index.date <= trade_date]
-        if fx_eligible.empty:
-            raise HTTPException(status_code=404, detail=f"No FX reference rate is available on or before {trade_date.isoformat()} for {normalized_currency}/{base_currency}.")
-        fx_ts = fx_eligible.index[-1]
-        fx_rate_to_base = float(fx_eligible.iloc[-1])
-        fx_price_date = fx_ts.date()
+        fx_rate_to_base, fx_price_date, fx_source = _historical_fx_reference(
+            normalized_currency, base_currency, trade_date
+        )
         fx_used_previous_session = fx_price_date != trade_date
+        fx_source_symbol = f'{normalized_currency}/{base_currency}'
+
 
     return {
         "verified": True,
@@ -889,6 +909,7 @@ def admin_instrument_lookup(
         "fx_price_date": fx_price_date.isoformat(),
         "fx_used_previous_session": fx_used_previous_session,
         "fx_source_symbol": fx_source_symbol,
+        "fx_source": fx_source,
         "source": "Yahoo Finance via yfinance",
     }
 
