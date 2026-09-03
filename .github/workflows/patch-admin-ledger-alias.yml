@@ -1,0 +1,28 @@
+name: Patch admin ledger alias
+on:
+  push:
+    branches: [fix/sethiportfolio-admin-ledger-route]
+    paths:
+      - 'scripts/patch_admin_ledger_alias.py'
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/sethiportfolio-admin-ledger-route
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python scripts/patch_admin_ledger_alias.py
+      - run: python -m py_compile sethiportfolio.py
+      - name: Commit patched backend
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add sethiportfolio.py
+          git diff --cached --quiet && exit 0
+          git commit -m "Add explicit admin ledger alias and capabilities [skip ci]"
+          git push
