@@ -716,6 +716,10 @@ def _build_allocation_correction(
         raise HTTPException(status_code=400, detail=f"target_fx_rate_to_base is required for {target_currency} corrected purchases.")
 
     reason = payload.reason.strip()
+    funding_meta = _allocation_note(funding) or {}
+    target_meta = _allocation_note(target) or {}
+    funding_public_reason = str(funding_meta.get("reason") or "").strip() or reason
+    target_public_reason = str(target_meta.get("reason") or "").strip() or reason
     decision_id = decision_id.lower()
     reversal_funding = {
         "portfolio_id": portfolio["id"], "instrument_id": funding_instrument["id"],
@@ -738,14 +742,14 @@ def _build_allocation_correction(
         "trade_date": payload.corrected_trade_date.isoformat(), "side": "SELL",
         "quantity": payload.funding_quantity, "price": payload.funding_price,
         "fees": payload.funding_fees, "currency": funding_currency, "fx_rate_to_base": 1.0,
-        "note": f"ALLOCATION {correction_id} FUNDING: [CORRECTS {decision_id}] {reason}",
+        "note": f"ALLOCATION {correction_id} FUNDING: [CORRECTS {decision_id}] {funding_public_reason}",
     }
     corrected_target = {
         "portfolio_id": portfolio["id"], "instrument_id": target_instrument["id"],
         "trade_date": payload.corrected_trade_date.isoformat(), "side": "BUY",
         "quantity": payload.target_quantity, "price": payload.target_price,
         "fees": payload.target_fees, "currency": target_currency, "fx_rate_to_base": float(target_fx),
-        "note": f"ALLOCATION {correction_id} TARGET: [CORRECTS {decision_id}] {reason}",
+        "note": f"ALLOCATION {correction_id} TARGET: [CORRECTS {decision_id}] {target_public_reason}",
     }
 
     validation_rows = []
@@ -771,6 +775,7 @@ def _build_allocation_correction(
         "funding_proceeds_base": funding_proceeds,
         "target_cost_base": target_cost_base,
         "net_cash_impact": funding_proceeds - target_cost_base,
+        "public_reason": target_public_reason,
         "rows": [reversal_funding, reversal_target, corrected_funding, corrected_target],
         "validation": {"ending_cash": validation["ending_cash"], "minimum_cash": validation["minimum_cash"], "base_currency": base_currency},
     }
