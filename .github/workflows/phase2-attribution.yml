@@ -63,4 +63,5 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add sethiportfolio.py
           git commit -m "Add transaction-aware performance attribution API"
+          git pull --rebase origin phase2-attribution
           git push origin phase2-attribution
