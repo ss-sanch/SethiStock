@@ -18,6 +18,9 @@ jobs:
       - name: Apply attribution backend patch
         run: python .github/scripts/phase2_attribution_patch.py
 
+      - name: Install validation dependencies
+        run: pip install -r requirements.txt
+
       - name: Validate backend attribution
         shell: bash
         run: |
