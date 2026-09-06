@@ -1,0 +1,63 @@
+name: Phase 2.4 Risk Analytics Numerical Test
+
+on:
+  push:
+    branches: [phase2-risk-analytics-api]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: phase2-risk-analytics-api
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install runtime dependencies
+        run: pip install -r requirements.txt
+      - name: Run synthetic risk analytics test
+        run: |
+          python - <<'PY'
+          import numpy as np
+          import pandas as pd
+          from sethiportfolio import _portfolio_risk_analytics_from_prices
+
+          rng = np.random.default_rng(7)
+          cov = np.array([
+              [0.00020, 0.00008, 0.00002],
+              [0.00008, 0.00016, 0.00003],
+              [0.00002, 0.00003, 0.00010],
+          ])
+          returns = rng.multivariate_normal([0.0004, 0.0003, 0.0002], cov, size=520)
+          prices = pd.DataFrame(
+              100 * np.cumprod(1 + returns, axis=0),
+              columns=['AAA', 'BBB', 'CCC'],
+              index=pd.bdate_range('2024-01-02', periods=520),
+          )
+          snapshot = {
+              'portfolio_value': 100000.0,
+              'cash_weight_pct': 10.0,
+              'holdings': [
+                  {'symbol':'AAA','name':'Asset A','market_value':45000.0,'weight_pct':45.0},
+                  {'symbol':'BBB','name':'Asset B','market_value':27000.0,'weight_pct':27.0},
+                  {'symbol':'CCC','name':'Asset C','market_value':18000.0,'weight_pct':18.0},
+              ],
+          }
+          result = _portfolio_risk_analytics_from_prices(snapshot, prices)
+          concentration = result['concentration']
+          expected_effective = 1.0 / (0.5**2 + 0.3**2 + 0.2**2)
+          assert abs(concentration['effective_holdings'] - expected_effective) < 0.02
+          assert result['portfolio']['invested_value'] == 90000.0
+          assert result['portfolio']['invested_weight_pct'] == 90.0
+          assert abs(sum(c['contribution_pct'] for c in result['attribution']['components']) - 100.0) < 0.15
+          matrix = result['correlation']['matrix']
+          for ticker in ['AAA','BBB','CCC']:
+              assert abs(matrix[ticker][ticker] - 1.0) < 1e-9
+          assert abs(matrix['AAA']['BBB'] - matrix['BBB']['AAA']) < 1e-9
+          assert result['attribution']['sum_component_var'] == result['attribution']['portfolio_var']
+          print('Phase 2.4 numerical validation passed')
+          PY
