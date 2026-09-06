@@ -51,8 +51,8 @@ class PortfolioRiskInput(BaseModel):
 
 
 def _clean_input(data: PortfolioRiskInput):
-    if not 2 <= len(data.positions) <= 5:
-        raise HTTPException(status_code=400, detail="Use between 2 and 5 equity assets.")
+    if not 2 <= len(data.positions) <= 50:
+        raise HTTPException(status_code=400, detail="Use between 2 and 50 equity assets.")
     if len(data.options) > 3:
         raise HTTPException(status_code=400, detail="Use no more than 3 option positions.")
 
@@ -150,11 +150,18 @@ def _equity_monte_carlo_returns(asset_log_returns: pd.DataFrame, weights: np.nda
     mu = asset_log_returns.mean().to_numpy(dtype=float)
     cov = asset_log_returns.cov().to_numpy(dtype=float) + np.eye(asset_log_returns.shape[1]) * 1e-12
     rng = np.random.default_rng(seed)
+    # Daily shocks are iid Gaussian in this model, so their H-day sum is exactly
+    # N(H * mu, H * cov). Sampling the cumulative shock directly avoids allocating
+    # a simulations x horizon x assets tensor and lets the engine scale to larger books.
     try:
-        shocks = rng.multivariate_normal(mean=mu, cov=cov, size=(simulations, horizon_days), check_valid="warn")
+        cumulative_log_returns = rng.multivariate_normal(
+            mean=mu * horizon_days,
+            cov=cov * horizon_days,
+            size=simulations,
+            check_valid="warn",
+        )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Monte Carlo simulation failed: {exc}")
-    cumulative_log_returns = shocks.sum(axis=1)
     cumulative_simple_returns = np.exp(cumulative_log_returns) - 1.0
     return cumulative_simple_returns @ weights
 
@@ -209,11 +216,18 @@ def _joint_monte_carlo_scenarios(simple_returns: pd.DataFrame, log_returns: pd.D
     mu = factor_df.mean().to_numpy(dtype=float)
     cov = factor_df.cov().to_numpy(dtype=float) + np.eye(factor_df.shape[1]) * 1e-12
     rng = np.random.default_rng(seed)
+    # As above, the sum of iid multivariate-normal daily factors is itself
+    # multivariate normal. Draw the cumulative horizon shock directly to keep
+    # memory use roughly linear in simulations x factors rather than x horizon.
     try:
-        shocks = rng.multivariate_normal(mean=mu, cov=cov, size=(simulations, horizon_days), check_valid="warn")
+        cumulative = rng.multivariate_normal(
+            mean=mu * horizon_days,
+            cov=cov * horizon_days,
+            size=simulations,
+            check_valid="warn",
+        )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Monte Carlo simulation failed: {exc}")
-    cumulative = shocks.sum(axis=1)
     n_assets = simple_returns.shape[1]
     return np.exp(cumulative[:, :n_assets]) - 1.0, cumulative[:, n_assets:]
 
