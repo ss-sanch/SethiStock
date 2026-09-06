@@ -531,6 +531,215 @@ def _performance_history(
     }
 
 
+def _attribution_history(
+    portfolio: Dict[str, Any],
+    transactions: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Transaction-aware arithmetic performance attribution in base currency.
+
+    Instrument P&L equals the change in marked market value less net capital
+    invested after the opening mark. With no external portfolio cash flows,
+    component P&L reconciles to the change in portfolio NAV. Fees are attributed
+    to the instrument that incurred them and FX effects are captured in base marks.
+    """
+    base_currency = str(portfolio.get("base_currency") or "GBP").upper()
+    initial_capital = float(portfolio.get("initial_capital") or 0.0)
+    inception_date = date.fromisoformat(str(portfolio.get("inception_date")))
+
+    symbol_meta: Dict[str, Dict[str, str]] = {}
+    for txn in transactions:
+        instrument = txn.get("instruments") or {}
+        symbol = instrument.get("symbol")
+        if not symbol:
+            continue
+        symbol_meta[symbol] = {
+            "name": instrument.get("name") or symbol,
+            "currency": (instrument.get("currency") or txn.get("currency") or base_currency).upper(),
+        }
+
+    portfolio_symbols = sorted(symbol_meta)
+    if not portfolio_symbols:
+        return {"base_currency": base_currency, "method": "transaction_reconciled_pnl_attribution", "periods": {}}
+
+    fx_symbols = [
+        fx for fx in {
+            _fx_symbol(meta["currency"], base_currency)
+            for meta in symbol_meta.values()
+        } if fx
+    ]
+    closes = _download_adjusted_close(
+        list(dict.fromkeys(portfolio_symbols + fx_symbols)),
+        inception_date.isoformat(),
+    )
+
+    missing = [symbol for symbol in portfolio_symbols if symbol not in closes.columns]
+    if missing:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Historical prices are unavailable for attribution: {', '.join(missing)}.",
+        )
+
+    trading_dates = closes[portfolio_symbols].dropna(how="all").index
+    if trading_dates.empty:
+        raise HTTPException(status_code=502, detail="No portfolio trading dates are available for attribution.")
+
+    base_prices: Dict[str, pd.Series] = {}
+    for symbol in portfolio_symbols:
+        local = closes[symbol].reindex(trading_dates).ffill()
+        fx = _series_fx(closes, symbol_meta[symbol]["currency"], base_currency, trading_dates)
+        base_prices[symbol] = local * fx
+
+    ordered_transactions = sorted(
+        transactions,
+        key=lambda txn: (str(txn.get("trade_date") or ""), str(txn.get("id") or "")),
+    )
+    transaction_dates = [pd.Timestamp(txn["trade_date"]).date() for txn in ordered_transactions]
+    quantities: Dict[str, float] = defaultdict(float)
+    cash = initial_capital
+    cursor = 0
+    nav_by_ts: Dict[pd.Timestamp, float] = {}
+    values_by_ts: Dict[pd.Timestamp, Dict[str, float]] = {}
+
+    for raw_ts in trading_dates:
+        ts = pd.Timestamp(raw_ts)
+        day = ts.date()
+        while cursor < len(ordered_transactions) and transaction_dates[cursor] <= day:
+            txn = ordered_transactions[cursor]
+            symbol = (txn.get("instruments") or {}).get("symbol")
+            if symbol:
+                qty = float(txn.get("quantity") or 0.0)
+                price = float(txn.get("price") or 0.0)
+                fees = float(txn.get("fees") or 0.0)
+                fx = _trade_fx(txn, base_currency)
+                if str(txn.get("side") or "").upper() == "BUY":
+                    quantities[symbol] += qty
+                    cash -= (qty * price + fees) * fx
+                else:
+                    quantities[symbol] -= qty
+                    cash += (qty * price - fees) * fx
+            cursor += 1
+
+        values: Dict[str, float] = {}
+        nav = cash
+        for symbol, qty in quantities.items():
+            if abs(qty) < 1e-12:
+                continue
+            marked = base_prices.get(symbol)
+            if marked is None or pd.isna(marked.loc[ts]):
+                continue
+            value = qty * float(marked.loc[ts])
+            values[symbol] = value
+            nav += value
+        values_by_ts[ts] = values
+        nav_by_ts[ts] = float(nav)
+
+    end_ts = pd.Timestamp(trading_dates[-1])
+    end_day = end_ts.date()
+    end_nav = nav_by_ts[end_ts]
+    end_values = values_by_ts[end_ts]
+
+    period_specs = {
+        "1M": (end_ts - pd.DateOffset(months=1)).date(),
+        "3M": (end_ts - pd.DateOffset(months=3)).date(),
+        "YTD": date(end_day.year, 1, 1),
+        "SI": inception_date,
+    }
+    period_labels = {"1M": "1 Month", "3M": "3 Months", "YTD": "Year to Date", "SI": "Since Inception"}
+    periods: Dict[str, Any] = {}
+    trading_ts = [pd.Timestamp(ts) for ts in trading_dates]
+
+    for key, requested_start in period_specs.items():
+        use_inception = key == "SI" or requested_start <= inception_date
+        if use_inception:
+            start_day = inception_date
+            start_nav = initial_capital
+            start_values: Dict[str, float] = {}
+            window_ts = trading_ts
+        else:
+            eligible = [ts for ts in trading_ts if ts.date() >= requested_start]
+            start_ts = eligible[0] if eligible else trading_ts[0]
+            start_day = start_ts.date()
+            start_nav = nav_by_ts[start_ts]
+            start_values = values_by_ts[start_ts]
+            window_ts = [ts for ts in trading_ts if ts >= start_ts]
+
+        if not start_nav:
+            continue
+
+        net_invested: Dict[str, float] = defaultdict(float)
+        for txn in ordered_transactions:
+            txn_day = pd.Timestamp(txn["trade_date"]).date()
+            include = txn_day <= end_day if use_inception else start_day < txn_day <= end_day
+            if not include:
+                continue
+            symbol = (txn.get("instruments") or {}).get("symbol")
+            if not symbol:
+                continue
+            qty = float(txn.get("quantity") or 0.0)
+            price = float(txn.get("price") or 0.0)
+            fees = float(txn.get("fees") or 0.0)
+            fx = _trade_fx(txn, base_currency)
+            if str(txn.get("side") or "").upper() == "BUY":
+                net_invested[symbol] += (qty * price + fees) * fx
+            else:
+                net_invested[symbol] -= (qty * price - fees) * fx
+
+        component_symbols = set(start_values) | set(end_values) | set(net_invested)
+        components: List[Dict[str, Any]] = []
+        for symbol in component_symbols:
+            start_value = float(start_values.get(symbol, 0.0))
+            end_value = float(end_values.get(symbol, 0.0))
+            flow = float(net_invested.get(symbol, 0.0))
+            pnl = end_value - start_value - flow
+
+            weights = []
+            for ts in window_ts:
+                nav = nav_by_ts.get(ts, 0.0)
+                if nav:
+                    weights.append(values_by_ts.get(ts, {}).get(symbol, 0.0) / nav * 100.0)
+            avg_weight = sum(weights) / len(weights) if weights else 0.0
+
+            if abs(pnl) < 0.005 and abs(start_value) < 0.005 and abs(end_value) < 0.005 and abs(flow) < 0.005:
+                continue
+            meta = symbol_meta.get(symbol) or {"name": symbol, "currency": base_currency}
+            components.append({
+                "symbol": symbol,
+                "name": meta.get("name") or symbol,
+                "currency": meta.get("currency") or base_currency,
+                "average_weight_pct": round(avg_weight, 2),
+                "starting_value": round(start_value, 2),
+                "ending_value": round(end_value, 2),
+                "net_invested": round(flow, 2),
+                "pnl": round(pnl, 2),
+                "contribution_pp": round(pnl / start_nav * 100.0, 4),
+                "ending_weight_pct": round((end_value / end_nav * 100.0) if end_nav else 0.0, 2),
+            })
+
+        components.sort(key=lambda row: abs(row["contribution_pp"]), reverse=True)
+        total_pnl = end_nav - start_nav
+        component_pnl = sum(float(row["pnl"]) for row in components)
+        periods[key] = {
+            "label": period_labels[key],
+            "requested_start_date": requested_start.isoformat(),
+            "start_date": start_day.isoformat(),
+            "end_date": end_day.isoformat(),
+            "starting_nav": round(start_nav, 2),
+            "ending_nav": round(end_nav, 2),
+            "total_pnl": round(total_pnl, 2),
+            "portfolio_return_pct": round(total_pnl / start_nav * 100.0, 4),
+            "component_contribution_pp": round(sum(float(row["contribution_pp"]) for row in components), 4),
+            "reconciliation_error": round(total_pnl - component_pnl, 6),
+            "components": components,
+        }
+
+    return {
+        "base_currency": base_currency,
+        "method": "transaction_reconciled_pnl_attribution",
+        "methodology": "End value minus start value minus net capital invested; contribution is instrument P&L divided by starting portfolio NAV.",
+        "periods": periods,
+    }
+
+
 class AdminTransactionPayload(BaseModel):
     symbol: str = Field(min_length=1, max_length=32)
     name: str = Field(min_length=1, max_length=160)
@@ -1375,3 +1584,10 @@ def get_performance(slug: str) -> Dict[str, Any]:
     transactions = _effective_transactions(_transactions(portfolio["id"]))
     benchmarks = _benchmarks(portfolio["id"])
     return _performance_history(portfolio, transactions, benchmarks)
+
+
+@router.get("/{slug}/attribution")
+def get_attribution(slug: str) -> Dict[str, Any]:
+    portfolio = _portfolio(slug)
+    transactions = _effective_transactions(_transactions(portfolio["id"]))
+    return _attribution_history(portfolio, transactions)
