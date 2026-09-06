@@ -1,0 +1,71 @@
+name: Market Risk Multiasset Patch
+
+on:
+  push:
+    branches: [market-risk-multiasset]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: market-risk-multiasset
+
+      - name: Expand portfolio support and optimise Monte Carlo memory
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('market_risk_lab.py')
+          text = path.read_text()
+
+          replacements = [
+              (
+                  '    if not 2 <= len(data.positions) <= 5:\n        raise HTTPException(status_code=400, detail="Use between 2 and 5 equity assets.")',
+                  '    if not 2 <= len(data.positions) <= 50:\n        raise HTTPException(status_code=400, detail="Use between 2 and 50 equity assets.")',
+                  'position limit',
+              ),
+              (
+                  '''def _equity_monte_carlo_returns(asset_log_returns: pd.DataFrame, weights: np.ndarray, horizon_days: int, simulations: int, seed: int) -> np.ndarray:\n    mu = asset_log_returns.mean().to_numpy(dtype=float)\n    cov = asset_log_returns.cov().to_numpy(dtype=float) + np.eye(asset_log_returns.shape[1]) * 1e-12\n    rng = np.random.default_rng(seed)\n    try:\n        shocks = rng.multivariate_normal(mean=mu, cov=cov, size=(simulations, horizon_days), check_valid="warn")\n    except Exception as exc:\n        raise HTTPException(status_code=500, detail=f"Monte Carlo simulation failed: {exc}")\n    cumulative_log_returns = shocks.sum(axis=1)\n    cumulative_simple_returns = np.exp(cumulative_log_returns) - 1.0\n    return cumulative_simple_returns @ weights''',
+                  '''def _equity_monte_carlo_returns(asset_log_returns: pd.DataFrame, weights: np.ndarray, horizon_days: int, simulations: int, seed: int) -> np.ndarray:\n    mu = asset_log_returns.mean().to_numpy(dtype=float)\n    cov = asset_log_returns.cov().to_numpy(dtype=float) + np.eye(asset_log_returns.shape[1]) * 1e-12\n    rng = np.random.default_rng(seed)\n    # Daily shocks are iid Gaussian in this model, so their H-day sum is exactly\n    # N(H * mu, H * cov). Sampling the cumulative shock directly avoids allocating\n    # a simulations x horizon x assets tensor and lets the engine scale to larger books.\n    try:\n        cumulative_log_returns = rng.multivariate_normal(\n            mean=mu * horizon_days,\n            cov=cov * horizon_days,\n            size=simulations,\n            check_valid="warn",\n        )\n    except Exception as exc:\n        raise HTTPException(status_code=500, detail=f"Monte Carlo simulation failed: {exc}")\n    cumulative_simple_returns = np.exp(cumulative_log_returns) - 1.0\n    return cumulative_simple_returns @ weights''',
+                  'equity Monte Carlo',
+              ),
+              (
+                  '''    mu = factor_df.mean().to_numpy(dtype=float)\n    cov = factor_df.cov().to_numpy(dtype=float) + np.eye(factor_df.shape[1]) * 1e-12\n    rng = np.random.default_rng(seed)\n    try:\n        shocks = rng.multivariate_normal(mean=mu, cov=cov, size=(simulations, horizon_days), check_valid="warn")\n    except Exception as exc:\n        raise HTTPException(status_code=500, detail=f"Monte Carlo simulation failed: {exc}")\n    cumulative = shocks.sum(axis=1)\n    n_assets = simple_returns.shape[1]\n    return np.exp(cumulative[:, :n_assets]) - 1.0, cumulative[:, n_assets:]''',
+                  '''    mu = factor_df.mean().to_numpy(dtype=float)\n    cov = factor_df.cov().to_numpy(dtype=float) + np.eye(factor_df.shape[1]) * 1e-12\n    rng = np.random.default_rng(seed)\n    # As above, the sum of iid multivariate-normal daily factors is itself\n    # multivariate normal. Draw the cumulative horizon shock directly to keep\n    # memory use roughly linear in simulations x factors rather than x horizon.\n    try:\n        cumulative = rng.multivariate_normal(\n            mean=mu * horizon_days,\n            cov=cov * horizon_days,\n            size=simulations,\n            check_valid="warn",\n        )\n    except Exception as exc:\n        raise HTTPException(status_code=500, detail=f"Monte Carlo simulation failed: {exc}")\n    n_assets = simple_returns.shape[1]\n    return np.exp(cumulative[:, :n_assets]) - 1.0, cumulative[:, n_assets:]''',
+                  'joint Monte Carlo',
+              ),
+          ]
+
+          for old, new, label in replacements:
+              if new in text and old not in text:
+                  continue
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected exactly one match, found {count}')
+              text = text.replace(old, new, 1)
+
+          path.write_text(text)
+          PY
+
+          python -m py_compile market_risk_lab.py
+          grep -q '2 <= len(data.positions) <= 50' market_risk_lab.py
+          grep -q 'mean=mu \* horizon_days' market_risk_lab.py
+
+      - name: Commit backend patch
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo "Patch already applied."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add market_risk_lab.py
+          git commit -m "Support larger Market Risk Lab portfolios"
+          git push origin market-risk-multiasset
