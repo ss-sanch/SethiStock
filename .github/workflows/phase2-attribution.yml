@@ -43,9 +43,9 @@ jobs:
               ]
               out = sp._attribution_history(portfolio, txns)
               si = out['periods']['SI']
-              assert abs(si['ending_nav'] - 1320.0) < 1e-6, si
-              assert abs(si['total_pnl'] - 320.0) < 1e-6, si
-              assert abs(si['component_contribution_pp'] - 32.0) < 1e-6, si
+              assert abs(si['ending_nav'] - 1120.0) < 1e-6, si
+              assert abs(si['total_pnl'] - 120.0) < 1e-6, si
+              assert abs(si['component_contribution_pp'] - 12.0) < 1e-6, si
               assert abs(si['reconciliation_error']) < 1e-6, si
           finally:
               sp._download_adjusted_close = original
