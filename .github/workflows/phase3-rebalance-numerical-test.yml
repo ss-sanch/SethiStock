@@ -1,0 +1,42 @@
+name: Phase 3.3 Rebalance Numerical Test
+
+on:
+  push:
+    branches: [phase3-rebalance-api]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: phase3-rebalance-api
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Test rebalance risk math
+        run: |
+          python - <<'PY'
+          import numpy as np
+          import pandas as pd
+          from sethiportfolio import _rebalance_risk_state
+
+          rng = np.random.default_rng(42)
+          cov = np.array([
+              [0.00025, 0.00010, 0.00004],
+              [0.00010, 0.00020, 0.00003],
+              [0.00004, 0.00003, 0.00016],
+          ])
+          returns = rng.multivariate_normal([0.0003, 0.0002, 0.00025], cov, size=500)
+          frame = pd.DataFrame(returns, columns=['AAA','BBB','CCC'])
+
+          concentrated = _rebalance_risk_state(frame, {'AAA':60.0,'BBB':30.0,'CCC':10.0}, 100000.0)
+          equal = _rebalance_risk_state(frame, {'AAA':33.3333,'BBB':33.3333,'CCC':33.3334}, 100000.0)
+
+          assert concentrated['portfolio_var'] > 0
+          assert equal['portfolio_var'] > 0
+          assert concentrated['effective_holdings'] < equal['effective_holdings']
+          assert abs(sum(float(row['contribution_pct']) for row in concentrated['components']) - 100.0) < 0.2
+          assert abs(sum(float(row['contribution_pct']) for row in equal['components']) - 100.0) < 0.2
+          assert abs(concentrated['top_5_invested_weight_pct'] - 100.0) < 0.01
+          print('Numerical rebalance checks passed')
+          PY
