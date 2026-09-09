@@ -1,0 +1,37 @@
+name: Phase 3.2 FX Analytics API
+
+on:
+  push:
+    branches: [phase3-fx-analytics-api-v3]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: phase3-fx-analytics-api-v3
+      - name: Apply FX analytics patch
+        run: python .github/scripts/phase3_fx_analytics_patch.py
+      - name: Validate backend syntax and anchors
+        shell: bash
+        run: |
+          python -m py_compile sethiportfolio.py
+          grep -q 'def _portfolio_fx_analytics' sethiportfolio.py
+          grep -q '@router.get("/{slug}/fx-analytics")' sethiportfolio.py
+          grep -q 'weighted_average_entry_fx_open_inventory_decomposition' sethiportfolio.py
+      - name: Commit FX analytics API
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo 'Patch already applied.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add sethiportfolio.py
+          git commit -m 'Add portfolio FX analytics API'
+          git push origin HEAD:phase3-fx-analytics-api-v3
