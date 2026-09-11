@@ -29,6 +29,7 @@ ADMIN_SECRET = os.getenv("ADMIN_SECRET", "")
 SETHISTOCK_CACHE_TABLE = os.getenv("SETHISTOCK_CACHE_TABLE", "sethistock_cache")
 SETHISTOCK_CACHE_VERSION = os.getenv("SETHISTOCK_CACHE_VERSION", "v1")
 CACHE_TTL_QUOTE = int(os.getenv("SETHISTOCK_CACHE_TTL_QUOTE", "300"))
+CACHE_TTL_CHART = int(os.getenv("SETHISTOCK_CACHE_TTL_CHART", "300"))
 CACHE_TTL_PEERS = int(os.getenv("SETHISTOCK_CACHE_TTL_PEERS", "600"))
 CACHE_TTL_STOCK = int(os.getenv("SETHISTOCK_CACHE_TTL_STOCK", "21600"))
 CACHE_TTL_TICKER = int(os.getenv("SETHISTOCK_CACHE_TTL_TICKER", "2592000"))
@@ -432,6 +433,7 @@ def cache_status():
         "version": SETHISTOCK_CACHE_VERSION,
         "ttl_seconds": {
             "quote": CACHE_TTL_QUOTE,
+            "chart": CACHE_TTL_CHART,
             "peer_snapshots": CACHE_TTL_PEERS,
             "stock_analysis": CACHE_TTL_STOCK,
             "ticker_resolution": CACHE_TTL_TICKER,
@@ -1034,7 +1036,11 @@ def get_peer_snapshots(tickers: str):
 @app.get("/api/chart/{raw_ticker}")
 def get_chart_data(raw_ticker: str, period: str = "1y", interval: str = "1d"):
     try:
-        ticker = resolve_ticker(raw_ticker)
+        ticker = _resolve_ticker_cached(raw_ticker)
+        cache_identity = f"{ticker.upper()}:{period}:{interval}"
+        cached_chart = _cache_get_fresh("chart", cache_identity)
+        if isinstance(cached_chart, dict):
+            return cached_chart
         
         hist = pd.DataFrame()
         try:
@@ -1046,12 +1052,14 @@ def get_chart_data(raw_ticker: str, period: str = "1y", interval: str = "1d"):
         if hist is None or hist.empty: 
             return {"dates": [], "opens": [], "highs": [], "lows": [], "closes": []}
             
-        if period == "max": hist = hist.loc['2000':] 
-        return {
+        if period == "max": hist = hist.loc['2000':]
+        result = {
             "dates": hist.index.strftime('%Y-%m-%d %H:%M:%S').tolist(),
             "opens": hist['Open'].tolist(), "highs": hist['High'].tolist(),
             "lows": hist['Low'].tolist(), "closes": hist['Close'].tolist()
         }
+        _cache_write("chart", cache_identity, result, CACHE_TTL_CHART, ticker=ticker)
+        return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
