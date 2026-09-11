@@ -21,6 +21,7 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
+          import textwrap
 
           path = Path('app.py')
           text = path.read_text(encoding='utf-8')
@@ -28,7 +29,8 @@ jobs:
           if marker not in text:
               raise SystemExit('Peer endpoint marker not found.')
 
-          block = '''def _default_peers_for_ticker(symbol: str):
+          block = textwrap.dedent('''
+          def _default_peers_for_ticker(symbol: str):
               ticker_peers = {
                   'AAPL': ['MSFT', 'GOOGL', 'META'], 'MSFT': ['AAPL', 'GOOGL', 'AMZN'], 'TSLA': ['F', 'GM', 'RIVN'],
                   'NVDA': ['AMD', 'INTC', 'TSM'], 'AMZN': ['WMT', 'BABA', 'EBAY'], 'META': ['GOOGL', 'SNAP', 'PINS'],
@@ -82,8 +84,7 @@ jobs:
                   raise HTTPException(status_code=500, detail=str(exc))
 
 
-          '''
-          block = block.replace('\n          ', '\n').lstrip()
+          ''').lstrip()
           text = text.replace(marker, block + marker, 1)
           path.write_text(text, encoding='utf-8')
           PY
@@ -95,8 +96,9 @@ jobs:
           from pathlib import Path
           text = Path('app.py').read_text(encoding='utf-8')
           assert '@app.get("/api/quote/{raw_ticker}")' in text
-          assert 'stock.financials' not in text[text.index('@app.get("/api/quote/{raw_ticker}")'):text.index('@app.get("/api/peers")')]
-          assert 'stock.cashflow' not in text[text.index('@app.get("/api/quote/{raw_ticker}")'):text.index('@app.get("/api/peers")')]
+          segment = text[text.index('@app.get("/api/quote/{raw_ticker}")'):text.index('@app.get("/api/peers")')]
+          assert 'stock.financials' not in segment
+          assert 'stock.cashflow' not in segment
           print('Quote endpoint is isolated from full financial-statement fetching.')
           PY
 
