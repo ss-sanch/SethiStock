@@ -683,6 +683,60 @@ def _peer_metric(value, digits=2):
     return round(value, digits) if value is not None else "N/A"
 
 
+def _default_peers_for_ticker(symbol: str):
+    ticker_peers = {
+        'AAPL': ['MSFT', 'GOOGL', 'META'], 'MSFT': ['AAPL', 'GOOGL', 'AMZN'], 'TSLA': ['F', 'GM', 'RIVN'],
+        'NVDA': ['AMD', 'INTC', 'TSM'], 'AMZN': ['WMT', 'BABA', 'EBAY'], 'META': ['GOOGL', 'SNAP', 'PINS'],
+        'GOOGL': ['META', 'MSFT', 'AMZN'], 'NFLX': ['DIS', 'WBD', 'AMZN'], 'JPM': ['BAC', 'WFC', 'C'],
+        'V': ['MA', 'AXP', 'PYPL'], 'AMD': ['NVDA', 'INTC', 'QCOM']
+    }
+    return ticker_peers.get(symbol.upper(), ['SPY', 'QQQ', 'DIA'])
+
+
+@app.get("/api/quote/{raw_ticker}")
+def get_stock_quote(raw_ticker: str):
+    """Fast above-the-fold quote used while the full SethiStock analysis loads."""
+    try:
+        ticker = resolve_ticker(raw_ticker).upper()
+        stock = yf.Ticker(ticker)
+
+        fast = None
+        try:
+            fast = stock.fast_info
+        except Exception:
+            pass
+
+        current_price = _peer_safe_float(getattr(fast, "last_price", None) if fast is not None else None)
+        previous_close = _peer_safe_float(getattr(fast, "previous_close", None) if fast is not None else None)
+        market_cap = _peer_safe_float(getattr(fast, "market_cap", None) if fast is not None else None)
+
+        if current_price is None or previous_close is None:
+            try:
+                hist = stock.history(period="5d", interval="1d")
+                if hist is not None and not hist.empty:
+                    current_price = current_price if current_price is not None else _peer_safe_float(hist['Close'].iloc[-1])
+                    if previous_close is None and len(hist) >= 2:
+                        previous_close = _peer_safe_float(hist['Close'].iloc[-2])
+            except Exception:
+                pass
+
+        current_price = current_price or 0.0
+        previous_close = previous_close or current_price
+        change = current_price - previous_close
+        pct_change = (change / previous_close * 100.0) if previous_close else 0.0
+
+        return {
+            "ticker": ticker,
+            "current_price": round(current_price, 2),
+            "change": round(change, 2),
+            "pct_change": round(pct_change, 2),
+            "market_cap": _peer_format_market_cap(market_cap),
+            "peers": _default_peers_for_ticker(ticker),
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.get("/api/peers")
 def get_peer_snapshots(tickers: str):
     # Return only metrics required by SethiStock peer benchmarking.
