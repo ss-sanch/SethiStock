@@ -1,0 +1,39 @@
+name: Phase 1A Live Smoke Test
+
+on:
+  push:
+    branches:
+      - phase1a-lightweight-peers
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check live peer endpoint
+        run: |
+          set -e
+          for i in {1..12}; do
+            echo "Attempt $i"
+            if curl --fail --silent --show-error --max-time 45 \
+              'https://sethistock-api.onrender.com/api/peers?tickers=MSFT,GOOGL,META' \
+              -o /tmp/peers.json; then
+              cat /tmp/peers.json
+              python - <<'PY'
+          import json
+          from pathlib import Path
+          payload = json.loads(Path('/tmp/peers.json').read_text())
+          rows = payload.get('results') or []
+          assert len(rows) == 3, payload
+          assert [r.get('ticker') for r in rows] == ['MSFT', 'GOOGL', 'META'], payload
+          for row in rows:
+              assert isinstance(row.get('stats'), dict), row
+              for key in ['mkt_cap', 'pe', 'pb', 'eps', 'div_yield', 'fcf_yield']:
+                  assert key in row['stats'], row
+          print('LIVE_PEER_ENDPOINT_OK')
+          PY
+              exit 0
+            fi
+            sleep 15
+          done
+          echo 'Live endpoint did not become healthy in time.' >&2
+          exit 1
