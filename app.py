@@ -215,21 +215,25 @@ def calculate_dupont_analysis(income_stmt, balance_sheet):
     except Exception:
         return {"error": "DuPont Data Unavailable"}
 
-def calculate_risk_profile(ticker_symbol):
+def calculate_risk_profile(hist):
     try:
-        stock = yf.Ticker(ticker_symbol)
-        hist = stock.history(period="5y")
-            
+        if hist is None or hist.empty or 'Close' not in hist.columns:
+            return {"error": "Risk Profile Unavailable"}
+
         daily_returns = hist['Close'].pct_change().dropna()
-        var_95 = np.percentile(daily_returns, 5) 
-        volatility = daily_returns.std() * np.sqrt(252) 
-        
+        if daily_returns.empty:
+            return {"error": "Risk Profile Unavailable"}
+
+        var_95 = np.percentile(daily_returns, 5)
+        volatility = daily_returns.std() * np.sqrt(252)
+
         return {
             "daily_var_95": round(var_95 * 100, 2),
             "annualized_volatility": round(volatility * 100, 2)
         }
     except Exception:
         return {"error": "Risk Profile Unavailable"}
+
 
 def generate_sensitivity_matrix(base_wacc, base_exit_multiple, fcf_projections, shares_outstanding):
     try:
@@ -293,11 +297,15 @@ def get_stock_data(raw_ticker: str, is_peer: bool = False):
             if fetched_info: info = fetched_info  
         except Exception: pass
         
-        recent_hist = pd.DataFrame()
+        # Shared daily history for price, risk, beta and technical indicators.
+        # One 5Y fetch replaces the former 5D + 5Y + 1Y + 1Y stock-history calls.
+        shared_hist = pd.DataFrame()
         try:
-            recent_hist = stock.history(period="5d")
+            shared_hist = stock.history(period="5y", interval="1d")
         except Exception:
             pass
+
+        recent_hist = shared_hist.tail(5).copy() if shared_hist is not None and not shared_hist.empty else pd.DataFrame()
 
         # 2. RUN THE FINVIZ SCRAPER TO FILL IN THE BLANKS
         fv_stats, fv_insiders, fv_summary = scrape_finviz_data(ticker)
@@ -393,7 +401,7 @@ def get_stock_data(raw_ticker: str, is_peer: bool = False):
         
         latest_fcf = fin_data["fcf"][-1] if fin_data["fcf"] and len(fin_data["fcf"]) > 0 and fin_data["fcf"][-1] != 0 else 0
         dupont_metrics = calculate_dupont_analysis(fin, bs) if isinstance(fin, pd.DataFrame) and isinstance(bs, pd.DataFrame) else {}
-        risk_metrics = calculate_risk_profile(ticker)
+        risk_metrics = calculate_risk_profile(shared_hist)
         
         base_fcf_projections = [latest_fcf * ((1.15) ** i) for i in range(1, 6)] if latest_fcf > 0 else [0,0,0,0,0]
         sensitivity_matrix = generate_sensitivity_matrix(0.10, 15.0, base_fcf_projections, shares)
@@ -492,7 +500,7 @@ def get_stock_data(raw_ticker: str, is_peer: bool = False):
         fallback_beta = "N/A"
         try:
             spy_hist = yf.Ticker("SPY").history(period="1y")
-            daily_hist = stock.history(period="1y")
+            daily_hist = shared_hist.tail(260).copy() if shared_hist is not None and not shared_hist.empty else pd.DataFrame()
             if not daily_hist.empty and not spy_hist.empty:
                 stock_rets = daily_hist['Close'].pct_change().dropna()
                 spy_rets = spy_hist['Close'].pct_change().dropna()
@@ -550,7 +558,7 @@ def get_stock_data(raw_ticker: str, is_peer: bool = False):
 
         daily_hist = pd.DataFrame()
         try:
-            daily_hist = stock.history(period="1y")
+            daily_hist = shared_hist.tail(260).copy() if shared_hist is not None and not shared_hist.empty else pd.DataFrame()
         except Exception:
             pass
 
