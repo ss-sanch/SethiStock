@@ -1,0 +1,49 @@
+name: Phase 1D Production Smoke
+
+on:
+  push:
+    branches:
+      - phase1d-production-smoke
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check cache status and live endpoints
+        run: |
+          python - <<'PY'
+          import json, time, urllib.request, urllib.error
+
+          base = 'https://sethistock-api.onrender.com'
+
+          def fetch_json(path, attempts=12):
+              last_error = None
+              for attempt in range(attempts):
+                  try:
+                      with urllib.request.urlopen(base + path, timeout=60) as response:
+                          return json.load(response)
+                  except Exception as exc:
+                      last_error = exc
+                      if attempt == attempts - 1:
+                          raise
+                      time.sleep(10)
+              raise last_error
+
+          status = fetch_json('/api/cache/status')
+          print('CACHE_STATUS=' + json.dumps(status, sort_keys=True))
+          assert status.get('table') == 'sethistock_cache', status
+          assert status.get('version') == 'v1', status
+          assert status.get('ttl_seconds', {}).get('quote') == 300, status
+          assert status.get('ttl_seconds', {}).get('chart') == 300, status
+          assert status.get('ttl_seconds', {}).get('peer_snapshots') == 600, status
+          assert status.get('ttl_seconds', {}).get('stock_analysis') == 21600, status
+
+          quote = fetch_json('/api/quote/AAPL', attempts=3)
+          assert quote.get('ticker') == 'AAPL', quote
+          assert isinstance(quote.get('current_price'), (int, float)) and quote['current_price'] > 0, quote
+          print('QUOTE_OK=' + json.dumps({'ticker': quote['ticker'], 'current_price': quote['current_price']}))
+
+          chart = fetch_json('/api/chart/AAPL?period=1mo&interval=1d', attempts=3)
+          assert len(chart.get('closes', [])) > 0, chart
+          print('CHART_POINTS=' + str(len(chart['closes'])))
+          PY
