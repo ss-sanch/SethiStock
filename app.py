@@ -648,6 +648,119 @@ def get_stock_data(raw_ticker: str, is_peer: bool = False):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# --- SETHISTOCK: LIGHTWEIGHT PEER SNAPSHOT API ---
+def _peer_safe_float(value, fallback=None):
+    try:
+        if value is None or pd.isna(value):
+            return fallback
+        value = float(value)
+        return value if np.isfinite(value) else fallback
+    except Exception:
+        return fallback
+
+
+def _peer_format_market_cap(value):
+    value = _peer_safe_float(value, 0.0) or 0.0
+    if value >= 1e12:
+        return f"${value / 1e12:.2f}T"
+    if value >= 1e9:
+        return f"${value / 1e9:.2f}B"
+    if value >= 1e6:
+        return f"${value / 1e6:.2f}M"
+    return f"${value:,.0f}" if value > 0 else "N/A"
+
+
+def _peer_metric(value, digits=2):
+    value = _peer_safe_float(value)
+    return round(value, digits) if value is not None else "N/A"
+
+
+@app.get("/api/peers")
+def get_peer_snapshots(tickers: str):
+    # Return only metrics required by SethiStock peer benchmarking.
+    # This avoids the full /api/stock pipeline for competitor rows.
+    symbols = []
+    seen = set()
+    for raw in tickers.split(","):
+        symbol = raw.strip().upper()
+        if symbol and symbol not in seen:
+            if len(symbol) > 20:
+                raise HTTPException(status_code=400, detail=f"Invalid ticker: {symbol}")
+            symbols.append(symbol)
+            seen.add(symbol)
+
+    if not symbols:
+        raise HTTPException(status_code=400, detail="Provide at least one ticker.")
+    if len(symbols) > 8:
+        raise HTTPException(status_code=400, detail="Peer snapshot supports up to 8 tickers per request.")
+
+    results = []
+    for symbol in symbols:
+        try:
+            stock = yf.Ticker(symbol)
+            try:
+                info = stock.info or {}
+            except Exception:
+                info = {}
+
+            current_price = _peer_safe_float(info.get("currentPrice"))
+            if current_price is None:
+                current_price = _peer_safe_float(info.get("regularMarketPrice"))
+
+            market_cap = _peer_safe_float(info.get("marketCap"))
+
+            if current_price is None or market_cap is None:
+                try:
+                    fast = stock.fast_info
+                    if current_price is None:
+                        current_price = _peer_safe_float(getattr(fast, "last_price", None))
+                    if market_cap is None:
+                        market_cap = _peer_safe_float(getattr(fast, "market_cap", None))
+                except Exception:
+                    pass
+
+            trailing_pe = _peer_safe_float(info.get("trailingPE"))
+            price_to_book = _peer_safe_float(info.get("priceToBook"))
+            trailing_eps = _peer_safe_float(info.get("trailingEps"))
+            free_cash_flow = _peer_safe_float(info.get("freeCashflow"))
+            dividend_yield = _peer_safe_float(info.get("dividendYield"))
+            if dividend_yield is None:
+                dividend_yield = _peer_safe_float(info.get("trailingAnnualDividendYield"))
+
+            fcf_yield = None
+            if free_cash_flow is not None and market_cap and market_cap > 0:
+                fcf_yield = (free_cash_flow / market_cap) * 100.0
+
+            results.append({
+                "ticker": symbol,
+                "current_price": round(current_price, 2) if current_price is not None else 0.0,
+                "stats": {
+                    "mkt_cap": _peer_format_market_cap(market_cap),
+                    "pe": _peer_metric(trailing_pe),
+                    "pb": _peer_metric(price_to_book),
+                    "eps": _peer_metric(trailing_eps),
+                    "div_yield": f"{round(dividend_yield * 100.0, 2)}%" if dividend_yield is not None and dividend_yield > 0 else "N/A",
+                    "fcf_yield": f"{round(fcf_yield, 2)}%" if fcf_yield is not None else "N/A",
+                },
+            })
+        except Exception as exc:
+            results.append({
+                "ticker": symbol,
+                "current_price": 0.0,
+                "stats": {
+                    "mkt_cap": "N/A",
+                    "pe": "N/A",
+                    "pb": "N/A",
+                    "eps": "N/A",
+                    "div_yield": "N/A",
+                    "fcf_yield": "N/A",
+                },
+                "error": str(exc),
+            })
+
+    return {"results": results, "count": len(results)}
+
+
 @app.get("/api/chart/{raw_ticker}")
 def get_chart_data(raw_ticker: str, period: str = "1y", interval: str = "1d"):
     try:
