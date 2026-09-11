@@ -57,13 +57,7 @@ jobs:
           if risk_count != 1:
               raise SystemExit(f'Expected one risk-profile function replacement, got {risk_count}.')
 
-          old_recent = block('''
-                  recent_hist = pd.DataFrame()
-                  try:
-                      recent_hist = stock.history(period="5d")
-                  except Exception:
-                      pass
-          ''')
+          recent_pattern = r'        recent_hist = pd\.DataFrame\(\)\r?\n        try:\r?\n            recent_hist = stock\.history\(period="5d"\)\r?\n        except Exception:\r?\n            pass'
           new_recent = block('''
                   # Shared daily history for price, risk, beta and technical indicators.
                   # One 5Y fetch replaces the former 5D + 5Y + 1Y + 1Y stock-history calls.
@@ -75,9 +69,9 @@ jobs:
 
                   recent_hist = shared_hist.tail(5).copy() if shared_hist is not None and not shared_hist.empty else pd.DataFrame()
           ''')
-          if old_recent not in text:
-              raise SystemExit('Could not find the existing 5-day history block.')
-          text = text.replace(old_recent, new_recent, 1)
+          text, recent_count = re.subn(recent_pattern, new_recent, text, count=1)
+          if recent_count != 1:
+              raise SystemExit(f'Expected one 5-day history block replacement, got {recent_count}.')
 
           old_risk_call = 'risk_metrics = calculate_risk_profile(ticker)'
           if old_risk_call not in text:
