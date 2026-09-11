@@ -1,0 +1,43 @@
+name: Phase 1D Chart Cache Validation
+
+on:
+  push:
+    branches:
+      - phase1d-supabase-cache
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-test:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: phase1d-supabase-cache
+
+      - name: Apply chart cache patch
+        run: python .phase1d_chart_patch.py
+
+      - name: Validate chart cache wiring
+        run: |
+          python -m py_compile app.py
+          python - <<'PY'
+          from pathlib import Path
+          text = Path('app.py').read_text(encoding='utf-8')
+          assert 'CACHE_TTL_CHART' in text
+          assert '_cache_get_fresh("chart", cache_identity)' in text
+          assert '_cache_write("chart", cache_identity, result, CACHE_TTL_CHART, ticker=ticker)' in text
+          assert 'ticker = _resolve_ticker_cached(raw_ticker)' in text[text.index('@app.get("/api/chart/{raw_ticker}")'):]
+          print('Chart cache wiring found.')
+          PY
+
+      - name: Commit chart cache
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.py
+          git diff --cached --quiet && exit 0
+          git commit -m "Cache SethiStock chart responses"
+          git push
