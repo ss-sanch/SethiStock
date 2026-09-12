@@ -1,0 +1,74 @@
+name: Phase 3B KPI Audit
+
+on:
+  push:
+    branches: [phase3b-kpi-extraction]
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Audit live SEC custom taxonomies for flagship KPIs
+        run: |
+          python - <<'PY'
+          import json
+          import re
+          import time
+          import urllib.parse
+          import urllib.request
+
+          base = 'https://sethistock-api.onrender.com/api/sec'
+          tickers = ['AAPL','GOOGL','AMZN','META','NVDA','TSLA','MSFT','NFLX','JPM','V']
+          keywords = {
+              'AAPL': ['iphone','services','wearables','installed'],
+              'GOOGL': ['search','youtube','cloud'],
+              'AMZN': ['aws','advertising','international'],
+              'META': ['reality','family','impressions','price per ad'],
+              'NVDA': ['data center','gaming','automotive'],
+              'TSLA': ['deliveries','automotive','energy storage'],
+              'MSFT': ['azure','cloud','gaming'],
+              'NFLX': ['membership','revenue per','engagement','advertising'],
+              'JPM': ['interest','cet1','deposit','loan'],
+              'V': ['payment volume','cross-border','processed transactions'],
+          }
+
+          def get(url, attempts=4):
+              last = None
+              for attempt in range(attempts):
+                  try:
+                      with urllib.request.urlopen(url, timeout=90) as response:
+                          return json.load(response)
+                  except Exception as exc:
+                      last = exc
+                      if attempt < attempts - 1:
+                          time.sleep(4 * (attempt + 1))
+              raise last
+
+          for ticker in tickers:
+              overview = get(f'{base}/{ticker}/overview')
+              custom = [t['taxonomy'] for t in overview['taxonomies'] if t['taxonomy'] not in {'us-gaap','dei'}]
+              print('\n===', ticker, 'CUSTOM_TAXONOMIES', custom, '===')
+              for taxonomy in custom:
+                  payload = get(f'{base}/{ticker}/concepts?taxonomy={urllib.parse.quote(taxonomy)}&limit=1000')
+                  concepts = payload.get('concepts', [])
+                  for kw in keywords[ticker]:
+                      tokens = [x for x in re.split(r'\W+', kw.lower()) if x]
+                      scored = []
+                      for c in concepts:
+                          hay = ' '.join([str(c.get('concept') or ''), str(c.get('label') or ''), str(c.get('description') or '')]).lower()
+                          score = sum(1 for token in tokens if token in hay)
+                          if score:
+                              scored.append((score, int(c.get('fact_count') or 0), c))
+                      scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+                      top = [x[2] for x in scored[:8]]
+                      if top:
+                          print('KEYWORD', kw, 'TAXONOMY', taxonomy)
+                          for c in top:
+                              print(json.dumps({
+                                  'concept': c.get('concept'),
+                                  'label': c.get('label'),
+                                  'units': c.get('units'),
+                                  'fact_count': c.get('fact_count'),
+                              }))
+          print('PHASE3B_AUDIT_OK')
+          PY
