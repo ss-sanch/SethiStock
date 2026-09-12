@@ -18,27 +18,143 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import company_driver_filings
 
 
-DRIVER_HISTORY_VERSION = "3b-history-v1"
+DRIVER_HISTORY_VERSION = "3c-history-v1"
 
 # These rules have been verified against live SEC Inline XBRL filings during Phase 3B.
 # 3C expands this registry across all flagship companies and KPI definitions.
 VERIFIED_EXTRACTION_RULES: Dict[Tuple[str, str], Dict[str, Any]] = {
+    # Apple product mix
+    ("AAPL", "iphone_revenue"): {
+        "concept_any": ["revenue", "revenues", "sales"],
+        "dimension_any": ["iphonemember"],
+        "verified_example": "IPhoneMember",
+    },
+    ("AAPL", "wearables_home_accessories_revenue"): {
+        "concept_any": ["revenue", "revenues", "sales"],
+        "dimension_any": ["wearableshomeandaccessoriesmember"],
+        "verified_example": "WearablesHomeandAccessoriesMember",
+    },
+
+    # Microsoft cloud reporting
+    ("MSFT", "intelligent_cloud_revenue"): {
+        "concept_any": ["revenue", "revenues", "sales"],
+        "dimension_any": ["intelligentcloudmember"],
+        "verified_example": "IntelligentCloudMember",
+    },
+    ("MSFT", "microsoft_cloud_revenue"): {
+        "concept_any": ["revenue", "revenues", "sales"],
+        "dimension_any": ["microsoftcloudmember"],
+        "verified_example": "MicrosoftCloudMember",
+    },
+
+    # Alphabet Search, YouTube and Cloud
+    ("GOOGL", "google_search_revenue"): {
+        "concept_any": ["revenue", "revenues", "sales"],
+        "dimension_any": ["googlesearchothermember"],
+        "verified_example": "GoogleSearchOtherMember",
+    },
+    ("GOOGL", "youtube_ads_revenue"): {
+        "concept_any": ["revenue", "revenues", "sales"],
+        "dimension_any": ["youtubeadvertisingrevenuemember"],
+        "verified_example": "YouTubeAdvertisingRevenueMember",
+    },
+    ("GOOGL", "google_cloud_revenue"): {
+        "concept_any": ["revenue", "revenues", "sales"],
+        "dimension_any": ["googlecloudmember"],
+        "verified_example": "GoogleCloudMember",
+    },
+    ("GOOGL", "google_cloud_operating_income"): {
+        "concept_any": ["operatingincomeloss", "operatingprofit", "operatingloss"],
+        "dimension_any": ["googlecloudmember"],
+        "verified_example": "GoogleCloudMember + OperatingIncomeLoss",
+    },
+
+    # Amazon AWS / advertising / geography
     ("AMZN", "aws_revenue"): {
         "concept_any": ["revenue", "revenues", "sales"],
         "dimension_any": ["amazonwebservices"],
         "verified_example": "AmazonWebServicesSegmentMember",
     },
-    ("GOOGL", "google_cloud_revenue"): {
-        "concept_any": ["revenue", "revenues", "sales"],
-        "dimension_any": ["googlecloud"],
-        "verified_example": "GoogleCloudMember",
+    ("AMZN", "aws_operating_income"): {
+        "concept_any": ["operatingincomeloss", "operatingprofit", "operatingloss"],
+        "dimension_any": ["amazonwebservices"],
+        "verified_example": "AmazonWebServicesSegmentMember + OperatingIncomeLoss",
     },
+    ("AMZN", "advertising_services_revenue"): {
+        "concept_any": ["revenue", "revenues", "sales"],
+        "dimension_any": ["advertisingservicesmember"],
+        "verified_example": "AdvertisingServicesMember",
+    },
+    ("AMZN", "international_revenue"): {
+        "concept_any": ["revenue", "revenues", "sales"],
+        "dimension_any": ["internationalsegmentmember"],
+        "verified_example": "InternationalSegmentMember",
+    },
+
+    # Meta segment economics
+    ("META", "family_of_apps_revenue"): {
+        "concept_any": ["revenue", "revenues", "sales"],
+        "dimension_any": ["familyofappsmember"],
+        "dimension_none": ["advertisingmember", "serviceothermember"],
+        "verified_example": "FamilyOfAppsMember (segment total)",
+    },
+    ("META", "reality_labs_revenue"): {
+        "concept_any": ["revenue", "revenues", "sales"],
+        "dimension_any": ["realitylabsmember"],
+        "verified_example": "RealityLabsMember",
+    },
+    ("META", "reality_labs_operating_income"): {
+        "concept_any": ["operatingincomeloss", "operatingprofit", "operatingloss"],
+        "dimension_any": ["realitylabsmember"],
+        "verified_example": "RealityLabsMember + OperatingIncomeLoss",
+    },
+
+    # NVIDIA current platform disclosure
     ("NVDA", "data_center_revenue"): {
         "concept_any": ["revenue", "revenues", "sales"],
-        "dimension_any": ["datacenter"],
+        "dimension_any": ["datacentermember"],
         "verified_example": "DataCenterMember",
     },
+
+    # Tesla segment revenue
+    ("TSLA", "automotive_revenue"): {
+        "concept_any": ["revenue", "revenues", "sales"],
+        "dimension_any": ["automotivesegmentmember"],
+        "dimension_none": ["productmember", "serviceothermember"],
+        "verified_example": "AutomotiveSegmentMember (segment total)",
+    },
 }
+
+
+SOURCE_LIMITED_METRICS: Dict[Tuple[str, str], Dict[str, str]] = {
+    ("AAPL", "services_revenue"): {"state": "official_filing_table", "reason": "Services is disclosed in filed revenue tables; exact XBRL rule is verified separately during 3C."},
+    ("AAPL", "installed_device_base"): {"state": "official_ir_required", "reason": "Installed-base milestones are disclosed by Apple outside a continuous SEC fact series."},
+    ("MSFT", "azure_growth"): {"state": "official_ir_required", "reason": "Azure growth is a company-reported growth KPI rather than a stable SEC numeric fact."},
+    ("MSFT", "gaming_revenue"): {"state": "official_filing_table_or_ir_required", "reason": "Current filings do not expose a stable Gaming revenue fact under the registry definition."},
+    ("META", "ad_impressions_growth"): {"state": "official_ir_required", "reason": "Ad-impression growth is disclosed in results commentary rather than a stable SEC fact."},
+    ("META", "average_price_per_ad_growth"): {"state": "official_ir_required", "reason": "Average price per ad growth is disclosed in results commentary rather than a stable SEC fact."},
+    ("NVDA", "gaming_revenue"): {"state": "historical_definition_changed", "reason": "NVIDIA changed its market-platform revenue presentation in FY2027; do not extend the old Gaming series across the new definition."},
+    ("NVDA", "automotive_revenue"): {"state": "historical_definition_changed", "reason": "NVIDIA changed its market-platform revenue presentation in FY2027; do not extend the old Automotive series across the new definition."},
+    ("NVDA", "gross_margin"): {"state": "derived_sec_metric", "reason": "Gross margin should be derived from matching Gross Profit and Revenue periods, not from an unrelated direct percentage fact."},
+    ("TSLA", "vehicle_deliveries"): {"state": "official_ir_required", "reason": "Quarterly deliveries are operational disclosures; similarly named XBRL facts can refer to compensation milestones."},
+    ("TSLA", "automotive_gross_margin"): {"state": "derived_sec_metric", "reason": "Automotive margin should be derived from matching automotive Gross Profit and Revenue facts."},
+    ("TSLA", "energy_storage_deployments"): {"state": "official_ir_required", "reason": "GWh deployments are operational disclosures rather than a stable SEC numeric fact."},
+    ("NFLX", "paid_memberships"): {"state": "historical_filing_series", "reason": "Netflix disclosed paid memberships through 2024 and later changed its KPI disclosure approach; the historical series must stop where disclosure stops."},
+    ("NFLX", "average_revenue_per_membership"): {"state": "historical_filing_series", "reason": "Netflix historically disclosed this KPI but changed its KPI disclosure approach."},
+    ("NFLX", "engagement_hours"): {"state": "official_ir_required", "reason": "Engagement is disclosed on an irregular official basis and must not be interpolated."},
+    ("NFLX", "ad_tier_scale"): {"state": "official_ir_required", "reason": "Ad-tier scale is an irregular official disclosure and must not be interpolated."},
+    ("JPM", "net_interest_income"): {"state": "official_filing_table", "reason": "JPMorgan reports NII in filed operating tables; generic fact ranking is insufficient."},
+    ("JPM", "net_interest_margin"): {"state": "official_filing_table", "reason": "NIM is a basis-sensitive banking KPI reported in filed tables."},
+    ("JPM", "cet1_ratio"): {"state": "official_filing_table", "reason": "CET1 has multiple legal-entity/methodology contexts and requires an explicit Firm standardized rule."},
+    ("JPM", "deposits"): {"state": "official_filing_table", "reason": "Total firm deposits require an explicit consolidated-table rule to avoid structured-note/deposit subcomponents."},
+    ("JPM", "loans"): {"state": "official_filing_table", "reason": "Total firm loans require an explicit consolidated-table rule to avoid portfolio subcomponents."},
+    ("JPM", "provision_for_credit_losses"): {"state": "official_filing_table", "reason": "Provision requires an explicit consolidated credit-loss table rule."},
+    ("V", "payments_volume"): {"state": "official_filing_table", "reason": "Visa reports nominal payments volume in operating tables with a one-quarter service-revenue lag."},
+    ("V", "cross_border_volume_growth"): {"state": "official_filing_or_release", "reason": "Cross-border growth is reported as an operating KPI, with basis variants such as total and excluding intra-Europe."},
+    ("V", "processed_transactions"): {"state": "official_filing_table", "reason": "Visa reports processed transactions in a dedicated operating table."},
+    ("V", "payments_credentials"): {"state": "official_ir_required", "reason": "Credential scale is not a stable filed numeric history under the registry definition."},
+}
+
 
 
 def _compact(value: Any) -> str:
@@ -244,6 +360,26 @@ def get_verified_rule(ticker: str, metric_key: str) -> Optional[Dict[str, Any]]:
     return VERIFIED_EXTRACTION_RULES.get((str(ticker or "").strip().upper(), str(metric_key or "").strip().lower()))
 
 
+def metric_coverage(ticker: str, metric_key: str) -> Dict[str, Any]:
+    key=(str(ticker or "").strip().upper(), str(metric_key or "").strip().lower())
+    rule=VERIFIED_EXTRACTION_RULES.get(key)
+    if rule:
+        return {
+            "state": "verified_sec_history",
+            "verified": True,
+            "history_version": DRIVER_HISTORY_VERSION,
+            "extraction_rule": rule,
+        }
+    limited=SOURCE_LIMITED_METRICS.get(key)
+    if limited:
+        return {"verified": False, **limited}
+    return {
+        "state": "not_verified",
+        "verified": False,
+        "reason": "No verified Phase 3C extraction rule has been approved for this KPI.",
+    }
+
+
 def build_verified_history(
     ticker: str,
     metric: Dict[str, Any],
@@ -261,9 +397,10 @@ def build_verified_history(
             "metric": metric_key,
             "data_state": "not_verified_for_history",
             "verified": False,
+            "coverage": metric_coverage(symbol, metric_key),
             "observations": [],
             "observation_count": 0,
-            "rule": "No Phase 3B verified SEC filing rule exists for this ticker/metric yet; Phase 3C expands coverage.",
+            "rule": "No verified SEC history rule exists for this ticker/metric; the coverage state explains the approved source path.",
         }
 
     filings = company_driver_filings.recent_periodic_filings(
@@ -342,7 +479,7 @@ def build_verified_history(
 def history_schema() -> Dict[str, Any]:
     return {
         "version": DRIVER_HISTORY_VERSION,
-        "phase": "3B",
+        "phase": "3C",
         "source": "SEC EDGAR Inline XBRL primary filings",
         "data_state": "verified_history",
         "periods": ["quarterly", "annual", "reported"],

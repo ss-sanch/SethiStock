@@ -457,6 +457,30 @@ def company_driver_metric_history(
     return result
 
 
+@router.get("/{ticker}/coverage")
+def company_driver_coverage(ticker: str):
+    """Return Phase 3C source/readiness state for every registered company driver."""
+    try:
+        registry=get_company_driver_registry(ticker)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Company Drivers registry is not yet available for {str(ticker).strip().upper()}.") from exc
+    metrics=[]
+    for metric in registry["metrics"]:
+        metrics.append({
+            "key": metric["key"],
+            "label": metric["label"],
+            **company_driver_history.metric_coverage(registry["ticker"], metric["key"]),
+        })
+    return {
+        "ticker": registry["ticker"],
+        "company": registry["company"],
+        "history_version": company_driver_history.DRIVER_HISTORY_VERSION,
+        "metric_count": len(metrics),
+        "verified_count": sum(1 for row in metrics if row.get("verified")),
+        "metrics": metrics,
+    }
+
+
 @router.get("/{ticker}")
 def company_driver_registry(ticker: str):
     """Return the company-specific KPI registry for a supported flagship ticker."""
