@@ -1,0 +1,127 @@
+name: Phase 2B Production Smoke
+
+on:
+  push:
+    branches:
+      - phase2b-production-smoke
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify normalized fundamentals in production
+        run: |
+          python - <<'PY'
+          import json
+          import math
+          import time
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          base = 'https://sethistock-api.onrender.com'
+          expected_metrics = [
+              'revenue', 'net_income', 'operating_cash_flow', 'capex',
+              'free_cash_flow', 'cash', 'debt', 'shares', 'gross_margin',
+              'operating_margin', 'net_margin',
+          ]
+
+          def get(path, timeout=120):
+              try:
+                  with urllib.request.urlopen(base + path, timeout=timeout) as response:
+                      return response.status, json.load(response)
+              except urllib.error.HTTPError as exc:
+                  body = exc.read().decode('utf-8', errors='replace')
+                  try:
+                      payload = json.loads(body)
+                  except Exception:
+                      payload = {'raw': body[:1000]}
+                  return exc.code, payload
+
+          # Wait for the new Render deployment.
+          deadline = time.time() + 360
+          last = None
+          while time.time() < deadline:
+              status, schema = get('/api/sec/normalization/schema', 60)
+              last = (status, schema)
+              if status == 200 and schema.get('schema_version') == '2b-v1':
+                  break
+              print('WAITING=' + str(status) + ':' + json.dumps(schema, sort_keys=True)[:500])
+              time.sleep(10)
+          else:
+              raise AssertionError(f'2B schema not deployed before timeout: {last}')
+
+          assert schema.get('metrics') == expected_metrics, schema
+          assert schema.get('period_classification') == 'deferred_to_phase_2d', schema
+          print('SCHEMA_OK=' + json.dumps({'version': schema['schema_version'], 'metrics': schema['metrics']}))
+
+          results = {}
+          for ticker in ['AAPL', 'MSFT', 'GOOGL']:
+              q = urllib.parse.urlencode({'limit': 120})
+              status, payload = get(f'/api/sec/{ticker}/fundamentals/normalized?' + q, 180)
+              assert status == 200, (ticker, status, payload)
+              assert payload.get('schema_version') == '2b-v1', payload
+              assert payload.get('metric_order') == expected_metrics, payload.get('metric_order')
+              metrics = payload.get('metrics') or {}
+              assert list(metrics) == expected_metrics, list(metrics)
+
+              summary = {}
+              for metric_name in expected_metrics:
+                  metric = metrics[metric_name]
+                  rows = metric.get('observations') or []
+                  assert metric.get('count') == len(rows), (ticker, metric_name, metric.get('count'), len(rows))
+                  assert len(rows) > 0, (ticker, metric_name, metric)
+                  for row in rows:
+                      value = row.get('value')
+                      assert isinstance(value, (int, float)) and math.isfinite(value), (ticker, metric_name, row)
+                      assert row.get('end'), (ticker, metric_name, row)
+
+                  # Normaliser must not emit duplicate economic periods.
+                  if metric.get('kind') == 'instant':
+                      keys = [(row.get('end'), row.get('unit')) for row in rows]
+                  else:
+                      keys = [(row.get('start'), row.get('end'), row.get('unit')) for row in rows]
+                  assert len(keys) == len(set(keys)), (ticker, metric_name, 'duplicate periods')
+
+                  coverage = metric.get('coverage') or {}
+                  summary[metric_name] = {
+                      'count': len(rows),
+                      'earliest': coverage.get('earliest_end'),
+                      'latest': coverage.get('latest_end'),
+                      'concepts': coverage.get('concepts_used'),
+                      'latest_value': rows[-1].get('value'),
+                  }
+
+              # Core history should meaningfully predate the latest filing.
+              revenue_coverage = metrics['revenue']['coverage']
+              assert revenue_coverage.get('earliest_end') and revenue_coverage.get('latest_end')
+              assert revenue_coverage['earliest_end'] < revenue_coverage['latest_end'], revenue_coverage
+
+              # Derived metrics should retain raw SEC source concepts.
+              for derived_name in ['free_cash_flow', 'debt', 'gross_margin', 'operating_margin', 'net_margin']:
+                  concepts = (metrics[derived_name].get('coverage') or {}).get('concepts_used') or []
+                  assert concepts and all(':' in concept for concept in concepts), (ticker, derived_name, concepts)
+
+              results[ticker] = summary
+              print(ticker + '_SUMMARY=' + json.dumps(summary, sort_keys=True))
+
+          # Apple: CommercialPaper should be visible somewhere in debt provenance when present historically.
+          apple_debt_concepts = results['AAPL']['debt']['concepts'] or []
+          assert 'us-gaap:CommercialPaper' in apple_debt_concepts, apple_debt_concepts
+
+          # Alphabet has no direct GrossProfit tag in the live audit, so gross margin must be reconstructed
+          # from raw Revenue + CostOfRevenue and retain both concepts in provenance.
+          googl_gm_concepts = set(results['GOOGL']['gross_margin']['concepts'] or [])
+          assert 'us-gaap:CostOfRevenue' in googl_gm_concepts, googl_gm_concepts
+          assert any('Revenue' in concept for concept in googl_gm_concepts), googl_gm_concepts
+          assert results['GOOGL']['gross_margin']['count'] > 0
+
+          # Metric filtering must be stable and preserve canonical ordering.
+          q = urllib.parse.urlencode({'metrics': 'net_margin,revenue,free_cash_flow', 'limit': 20})
+          status, filtered = get('/api/sec/AAPL/fundamentals/normalized?' + q, 120)
+          assert status == 200, (status, filtered)
+          assert filtered.get('metric_order') == ['revenue', 'free_cash_flow', 'net_margin'], filtered.get('metric_order')
+          assert set((filtered.get('metrics') or {}).keys()) == {'revenue', 'free_cash_flow', 'net_margin'}
+
+          print('PHASE2B_PRODUCTION_OK')
+          PY
