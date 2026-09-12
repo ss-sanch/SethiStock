@@ -1,0 +1,43 @@
+name: Phase 3C Fact Search
+
+on:
+  push:
+    branches: [phase3c-fact-search]
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: phase3c-fact-search
+      - name: Install dependencies
+        run: pip install beautifulsoup4 requests fastapi
+      - name: Apply fact-search patch
+        run: python .phase3c_fact_search_patch.py
+      - name: Validate search utility
+        run: |
+          python -m py_compile company_driver_filings.py company_drivers.py
+          python - <<'PY'
+          import company_driver_filings as f
+          filing={'form':'10-Q','filing_date':'2026-07-31','report_date':'2026-06-30','accession':'x','source_url':'https://sec.test/x','is_inline_xbrl':True}
+          f.recent_periodic_filings=lambda ticker,limit=2:[filing]
+          f.get_parsed_filing=lambda row:{'facts':[
+            {'qualified_concept':'us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax','dimensions':[{'dimension':'srt:ProductOrServiceAxis','member':'aapl:ServicesMember'}],'filing_date':'2026-07-31','end':'2026-06-30','value':123,'numeric':True},
+            {'qualified_concept':'us-gaap:Assets','dimensions':[],'filing_date':'2026-07-31','end':'2026-06-30','value':456,'numeric':True},
+          ]}
+          out=f.search_filing_facts('AAPL','services',1,10)
+          assert out['match_count']==1 and out['matches'][0]['value']==123
+          print('PHASE3C_FACT_SEARCH_OK')
+          PY
+      - name: Commit permanent changes
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add company_driver_filings.py company_drivers.py
+          git commit -m "Add Company Drivers filing fact search" || true
+          git pull --rebase origin phase3c-fact-search
+          git push
