@@ -1,0 +1,132 @@
+name: Phase 2D Quality Validation
+
+on:
+  push:
+    branches: [phase2d-period-engine]
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: phase2d-period-engine
+
+      - name: Apply accounting-basis quality handling
+        run: python .phase2d_quality_patch.py
+
+      - name: Run unit tests
+        run: |
+          python -m py_compile fundamentals_periods.py fundamentals_normalizer.py fundamentals_store.py sec_fundamentals.py app.py
+          python -m unittest tests.test_fundamentals_periods -v
+
+      - name: Validate four fiscal calendars and reconciliation quality
+        run: |
+          python - <<'PY'
+          import json
+          import math
+          import time
+          import urllib.request
+          from fundamentals_periods import build_period_view
+
+          base = 'https://sethistock-api.onrender.com'
+
+          def fetch(ticker):
+              last = None
+              for _ in range(8):
+                  try:
+                      with urllib.request.urlopen(f'{base}/api/sec/{ticker}/fundamentals/normalized?limit=1000', timeout=180) as response:
+                          return json.load(response)
+                  except Exception as exc:
+                      last = exc
+                      time.sleep(4)
+              raise AssertionError((ticker, last))
+
+          summary = {}
+          views = {}
+          for ticker in ('AAPL', 'MSFT', 'WMT', 'NVDA'):
+              normalized = fetch(ticker)['metrics']
+              annual = build_period_view(normalized, period='annual', limit=40)
+              quarterly = build_period_view(normalized, period='quarterly', limit=120)
+              ttm = build_period_view(normalized, period='ttm', limit=120)
+              views[ticker] = (annual, quarterly, ttm)
+
+              assert annual['metrics']['revenue']['count'] >= 10, (ticker, 'annual revenue')
+              assert quarterly['metrics']['revenue']['count'] >= 20, (ticker, 'quarterly revenue')
+              assert quarterly['metrics']['operating_cash_flow']['count'] >= 20, (ticker, 'quarterly ocf')
+              assert ttm['metrics']['revenue']['count'] >= 8, (ticker, 'ttm revenue')
+              assert ttm['metrics']['cash']['ttm_semantics'] == 'point_in_time'
+
+              for view in (annual, quarterly, ttm):
+                  for metric_name, metric in view['metrics'].items():
+                      for point in metric['series']:
+                          value = point.get('value')
+                          assert isinstance(value, (int, float)) and math.isfinite(value), (ticker, metric_name, point)
+
+              reconciliation = {}
+              for metric_name in ('revenue', 'operating_cash_flow', 'free_cash_flow'):
+                  annual_by_fy = {p['fiscal_year']: float(p['value']) for p in annual['metrics'][metric_name]['series']}
+                  by_fy = {}
+                  for point in quarterly['metrics'][metric_name]['series']:
+                      by_fy.setdefault(point['fiscal_year'], []).append(point)
+                  reconciled = 0
+                  mismatched = 0
+                  for fy, rows in by_fy.items():
+                      if fy not in annual_by_fy or len(rows) != 4:
+                          continue
+                      statuses = {row.get('reconciliation_status') for row in rows}
+                      qsum = sum(float(row['value']) for row in rows)
+                      av = annual_by_fy[fy]
+                      if statuses == {'reconciled'}:
+                          assert abs(qsum-av) <= max(1.0, abs(av)*1e-6), (ticker, metric_name, fy, qsum, av)
+                          reconciled += 1
+                      elif statuses == {'basis_mismatch'}:
+                          assert abs(qsum-av) > max(1.0, abs(av)*1e-6), (ticker, metric_name, fy, qsum, av)
+                          assert all('annual_reconciliation_mismatch' in row.get('quality_flags', []) for row in rows)
+                          mismatched += 1
+                      else:
+                          raise AssertionError((ticker, metric_name, fy, statuses))
+                  assert reconciled >= 3, (ticker, metric_name, reconciled, mismatched)
+                  reconciliation[metric_name] = {'reconciled_years': reconciled, 'basis_mismatch_years': mismatched}
+
+              summary[ticker] = {
+                  'annual_revenue': annual['metrics']['revenue']['count'],
+                  'quarterly_revenue': quarterly['metrics']['revenue']['count'],
+                  'ttm_revenue': ttm['metrics']['revenue']['count'],
+                  'calendar': annual['fiscal_calendar'],
+                  'reconciliation': reconciliation,
+              }
+
+          # Regression: Microsoft FY2016 was retrospectively restated at annual level
+          # under ASC 606 while Company Facts retains older SalesRevenueNet quarters.
+          msft_quarterly = views['MSFT'][1]
+          fy2016 = [p for p in msft_quarterly['metrics']['revenue']['series'] if p['fiscal_year'] == 2016]
+          assert len(fy2016) == 4
+          assert [p['value'] for p in fy2016] == [20379000000.0, 23796000000.0, 20531000000.0, 20614000000.0]
+          assert all(p['reconciliation_status'] == 'basis_mismatch' for p in fy2016)
+          assert all('concept_basis_change' in p.get('quality_flags', []) for p in fy2016)
+          assert abs(sum(p['value'] for p in fy2016) - 85320000000.0) < 1
+
+          # TTM windows containing those contaminated quarters must be absent.
+          msft_ttm = views['MSFT'][2]['metrics']['revenue']['series']
+          bad_labels = {f'TTM FY2016 Q{q}' for q in (1, 2, 3, 4)}
+          assert not bad_labels.intersection({p['label'] for p in msft_ttm})
+
+          # Walmart proves January fiscal-year handling rather than calendar-year assumptions.
+          assert summary['WMT']['calendar']['latest_completed_fiscal_year'] >= 2026, summary['WMT']
+
+          print('PHASE2D_QUALITY=' + json.dumps(summary, sort_keys=True))
+          print('PHASE2D_QUALITY_OK')
+          PY
+
+      - name: Commit quality handling
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add fundamentals_periods.py tests/test_fundamentals_periods.py
+          git commit -m "Handle Phase 2D accounting-basis transitions" || true
+          git pull --rebase origin phase2d-period-engine
+          git push
