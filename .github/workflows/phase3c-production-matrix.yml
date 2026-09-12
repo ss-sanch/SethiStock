@@ -1,0 +1,137 @@
+name: Phase 3C Production Matrix
+
+on:
+  push:
+    branches: [phase3c-production-matrix]
+
+jobs:
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - ticker: AAPL
+            metric: services_revenue
+            filings: 6
+            expected: 30739000000
+            tolerance: 1000000
+          - ticker: MSFT
+            metric: intelligent_cloud_revenue
+            filings: 8
+            expected: 0
+            tolerance: 0
+          - ticker: GOOGL
+            metric: google_search_revenue
+            filings: 6
+            expected: 63271000000
+            tolerance: 1000000
+          - ticker: AMZN
+            metric: aws_revenue
+            filings: 6
+            expected: 42232000000
+            tolerance: 1000000
+          - ticker: META
+            metric: reality_labs_revenue
+            filings: 6
+            expected: 431000000
+            tolerance: 1000000
+          - ticker: NVDA
+            metric: data_center_revenue
+            filings: 6
+            expected: 89023000000
+            tolerance: 1000000
+          - ticker: TSLA
+            metric: automotive_revenue
+            filings: 6
+            expected: 25097000000
+            tolerance: 1000000
+          - ticker: NFLX
+            metric: paid_memberships
+            filings: 12
+            expected: 301626000
+            tolerance: 1000
+          - ticker: JPM
+            metric: cet1_ratio
+            filings: 5
+            expected: 14.2
+            tolerance: 0.2
+          - ticker: V
+            metric: processed_transactions
+            filings: 5
+            expected: 71662000000
+            tolerance: 1000000
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate ${{ matrix.ticker }} flagship driver
+        env:
+          TICKER: ${{ matrix.ticker }}
+          METRIC: ${{ matrix.metric }}
+          FILINGS: ${{ matrix.filings }}
+          EXPECTED: ${{ matrix.expected }}
+          TOLERANCE: ${{ matrix.tolerance }}
+        run: |
+          python - <<'PY'
+          import json, os, time, urllib.request
+          ticker=os.environ['TICKER']; metric=os.environ['METRIC']; filings=int(os.environ['FILINGS'])
+          expected=float(os.environ['EXPECTED']); tolerance=float(os.environ['TOLERANCE'])
+          base='https://sethistock-api.onrender.com/api/drivers'
+          def get(path, timeout=300):
+              with urllib.request.urlopen(base+path, timeout=timeout) as r: return json.load(r)
+
+          # Wait until the merged 3C deployment is observable, not merely a warm old worker.
+          deadline=time.time()+480
+          last=None
+          while time.time()<deadline:
+              try:
+                  cov=get(f'/{ticker}/coverage')
+                  if cov.get('history_version')=='3c-history-v1':
+                      break
+                  last=cov
+              except Exception as exc:
+                  last=repr(exc)
+              time.sleep(12)
+          else:
+              raise AssertionError(('3C deployment not observed',ticker,last))
+
+          assert cov['metric_count']>=1
+          assert cov['verified_count']>=1, cov
+          target=next(row for row in cov['metrics'] if row['key']==metric)
+          assert target['verified'] is True, target
+
+          history=get(f'/{ticker}/history/{metric}?filings={filings}&period=quarterly&limit=40', timeout=420)
+          assert history['verified'] is True, history
+          assert history['data_state']=='verified_history', history
+          assert history['observation_count']>=1, history
+          rows=history['observations']
+          dates=[str(row.get('end') or row.get('instant') or '') for row in rows]
+          assert all(dates) and dates==sorted(dates), dates
+          assert len(dates)==len(set(dates)), dates
+          for row in rows:
+              assert row.get('value') is not None
+              assert row.get('filing_date')
+              assert row.get('accession')
+              assert (row.get('source_url') or '').startswith('https://www.sec.gov/Archives/edgar/data/')
+          latest=rows[-1]
+          if expected>0:
+              assert abs(float(latest['value'])-expected)<=tolerance, (ticker,metric,latest)
+
+          # Exercise derived-ratio paths on the two flagship companies that use them.
+          derived=None
+          if ticker=='NVDA':
+              derived=get(f'/NVDA/history/gross_margin?filings=6&period=quarterly&limit=12', timeout=420)
+              assert derived['verified'] and derived['observation_count']>=1
+              assert 0<float(derived['observations'][-1]['value'])<100
+              assert derived['observations'][-1]['extraction_method']=='derived_ratio_from_sec_facts'
+          if ticker=='TSLA':
+              derived=get(f'/TSLA/history/automotive_gross_margin?filings=6&period=quarterly&limit=12', timeout=420)
+              assert derived['verified'] and derived['observation_count']>=1
+              assert 0<float(derived['observations'][-1]['value'])<100
+              assert derived['observations'][-1]['extraction_method']=='derived_ratio_from_sec_facts'
+
+          print(json.dumps({
+              'ticker':ticker,'metric':metric,'verified_count':cov['verified_count'],
+              'coverage':history.get('coverage'),'observation_count':history['observation_count'],
+              'latest':latest,'derived_latest':(derived or {}).get('observations',[])[-1] if derived and derived.get('observations') else None
+          },indent=2))
+          print('PHASE3C_FLAGSHIP_OK',ticker)
+          PY
