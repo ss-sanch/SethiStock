@@ -16,9 +16,7 @@ if old_status not in text:
 text = text.replace(old_status, new_status, 1)
 
 start = text.index('@router.get("/{ticker}/fundamentals/normalized")')
-text = text[:start].rstrip() + r'''
-
-
+text = text[:start].rstrip() + "\n\n" + r'''
 def _parse_requested_metrics(metrics: Optional[str]):
     if metrics is None:
         return None
