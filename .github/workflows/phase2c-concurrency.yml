@@ -1,0 +1,77 @@
+name: Phase 2C Concurrency Validation
+
+on:
+  push:
+    branches: [phase2c-persistent-fundamentals]
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: phase2c-persistent-fundamentals
+      - name: Apply concurrency fix
+        run: python .phase2c_concurrency_patch.py
+      - name: Validate safe snapshot retirement
+        run: |
+          python -m py_compile fundamentals_store.py sec_fundamentals.py
+          python - <<'PY'
+          import fundamentals_store as store
+
+          def obs(value):
+              return {
+                  'value': value, 'unit': 'USD', 'start': '2024-01-01', 'end': '2024-12-31',
+                  'filed': '2025-02-01', 'fy': 2024, 'fp': 'FY', 'form': '10-K', 'frame': 'CY2024',
+                  'accn': 'x', 'taxonomy': 'us-gaap', 'concept': 'Revenues', 'concept_rank': 0,
+                  'duration_days': 365, 'derived': False, 'source': 'SEC EDGAR Company Facts'}
+          normalized = {'revenue': {
+              'metric': 'revenue', 'label': 'Revenue', 'kind': 'flow', 'unit': 'USD', 'derived': False,
+              'count': 1, 'coverage': {}, 'observations': [obs(100)]}}
+          identity = {'ticker': 'FIX', 'cik': 123456, 'title': 'Fixture Corp'}
+
+          calls = []
+          original_request = store._request
+          original_configured = store.is_configured
+          original_state = store.get_sync_state
+          store.is_configured = lambda: True
+          store.get_sync_state = lambda ticker, schema_version: {'active_sync_id': 'old-sync'}
+
+          class Response:
+              def json(self): return []
+          def fake_request(method, table, **kwargs):
+              calls.append((method, table, kwargs)); return Response()
+          store._request = fake_request
+          result = store.persist_snapshot(identity=identity, entity_name='Fixture Corp', normalized=normalized,
+                                          schema_version='2b-v1', ttl_seconds=86400)
+          new_sync = result['sync_id']
+          deletes = [c for c in calls if c[0] == 'DELETE' and c[1] == store.OBSERVATIONS_TABLE]
+          assert len(deletes) == 1, deletes
+          assert deletes[0][2]['params'] == {'sync_id': 'eq.old-sync'}, deletes
+          assert all('neq.' not in str(c) for c in deletes), deletes
+          assert new_sync not in str(deletes), deletes
+
+          # With no previous active snapshot there should be no post-activation broad cleanup.
+          calls.clear()
+          store.get_sync_state = lambda ticker, schema_version: None
+          store.persist_snapshot(identity=identity, entity_name='Fixture Corp', normalized=normalized,
+                                 schema_version='2b-v1', ttl_seconds=86400)
+          deletes = [c for c in calls if c[0] == 'DELETE' and c[1] == store.OBSERVATIONS_TABLE]
+          assert deletes == [], deletes
+
+          store._request = original_request
+          store.is_configured = original_configured
+          store.get_sync_state = original_state
+          print('PHASE2C_CONCURRENCY_OK')
+          PY
+      - name: Commit concurrency fix
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add fundamentals_store.py
+          git commit -m "Harden Phase 2C snapshot cleanup concurrency" || true
+          git pull --rebase origin phase2c-persistent-fundamentals
+          git push
