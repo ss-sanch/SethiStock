@@ -1,0 +1,79 @@
+name: Phase 3B Production Smoke
+
+on:
+  push:
+    branches: [phase3b-production-smoke]
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate live Company Drivers filing discovery
+        run: |
+          python - <<'PY'
+          import json
+          import time
+          import urllib.parse
+          import urllib.request
+
+          base = 'https://sethistock-api.onrender.com/api/drivers'
+
+          def get(path, attempts=12):
+              last = None
+              for attempt in range(attempts):
+                  try:
+                      with urllib.request.urlopen(base + path, timeout=120) as response:
+                          if response.status != 200:
+                              raise RuntimeError(f'HTTP {response.status}')
+                          return json.load(response)
+                  except Exception as exc:
+                      last = exc
+                      if attempt < attempts - 1:
+                          time.sleep(min(8 + attempt * 4, 30))
+              raise last
+
+          # Wait until Render has deployed the merged Phase 3B routes.
+          schema = get('/extraction/schema')
+          assert schema['version'] == '3b-v1', schema
+
+          checks = [
+              ('AMZN', 'aws_revenue'),
+              ('GOOGL', 'google_cloud_revenue'),
+              ('NVDA', 'data_center_revenue'),
+          ]
+          summary = {}
+          for ticker, metric in checks:
+              filings = get(f'/{ticker}/filings?limit=2')
+              assert filings['extraction_version'] == '3b-v1'
+              assert filings['count'] >= 1
+              assert filings['filings'][0]['accession']
+              assert filings['filings'][0]['source_url'].startswith('https://www.sec.gov/Archives/edgar/data/')
+
+              result = get(f'/{ticker}/discover/{metric}?filings=1&limit=40')
+              assert result['data_state'] == 'discovery_candidates'
+              assert result['metric'] == metric
+              assert result['filings_checked']
+              assert result['candidate_count'] > 0, (ticker, metric, result)
+
+              candidates = result['candidates']
+              best = candidates[0]
+              for field in ['qualified_concept','context_ref','form','filing_date','accession','source_url','extraction_method']:
+                  assert best.get(field), (ticker, metric, field, best)
+              assert best['source_url'].startswith('https://www.sec.gov/Archives/edgar/data/')
+              assert best['extraction_method'] == 'sec_inline_xbrl'
+
+              summary[ticker] = {
+                  'metric': metric,
+                  'candidate_count': result['candidate_count'],
+                  'best_score': best.get('score'),
+                  'best_concept': best.get('qualified_concept'),
+                  'best_value': best.get('value'),
+                  'period': [best.get('start'), best.get('end')],
+                  'dimensions': best.get('dimensions'),
+                  'filing_date': best.get('filing_date'),
+                  'accession': best.get('accession'),
+              }
+
+          print(json.dumps(summary, indent=2))
+          print('PHASE3B_PRODUCTION_OK')
+          PY
