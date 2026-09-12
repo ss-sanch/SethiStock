@@ -1,0 +1,57 @@
+name: Phase 3A Production Smoke
+
+on:
+  push:
+    branches: [phase3a-production-smoke]
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify deployed Company Drivers registry
+        run: |
+          python - <<'PY'
+          import json
+          import time
+          import urllib.error
+          import urllib.request
+
+          base = 'https://sethistock-api.onrender.com'
+          deadline = time.time() + 240
+          last = None
+          while time.time() < deadline:
+              try:
+                  with urllib.request.urlopen(base + '/api/drivers/schema', timeout=30) as r:
+                      schema = json.load(r)
+                  with urllib.request.urlopen(base + '/api/drivers/companies', timeout=30) as r:
+                      companies = json.load(r)
+                  with urllib.request.urlopen(base + '/api/drivers/GOOG', timeout=30) as r:
+                      alphabet = json.load(r)
+                  try:
+                      urllib.request.urlopen(base + '/api/drivers/AMD', timeout=30)
+                      unsupported_status = 200
+                  except urllib.error.HTTPError as exc:
+                      unsupported_status = exc.code
+
+                  assert schema['schema_version'] == '3a-v1'
+                  assert schema['company_count'] == 10
+                  assert schema['metric_count'] == 43
+                  assert companies['count'] == 10
+                  assert alphabet['ticker'] == 'GOOGL'
+                  assert alphabet['requested_ticker'] == 'GOOG'
+                  assert alphabet['metric_count'] == 4
+                  assert unsupported_status == 404
+                  print('PHASE3A_PRODUCTION_OK')
+                  print(json.dumps({
+                      'companies': companies['count'],
+                      'metrics': schema['metric_count'],
+                      'goog_alias': alphabet['ticker'],
+                      'unsupported_status': unsupported_status,
+                  }))
+                  break
+              except Exception as exc:
+                  last = repr(exc)
+                  time.sleep(8)
+          else:
+              raise AssertionError(f'Phase 3A production routes did not become ready: {last}')
+          PY
