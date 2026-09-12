@@ -388,6 +388,34 @@ def company_driver_discover_metric(
     return result
 
 
+@router.get("/{ticker}/facts/search")
+def company_driver_fact_search(
+    ticker: str,
+    q: str = Query(..., min_length=2, max_length=120),
+    filings: int = Query(2, ge=1, le=12),
+    limit: int = Query(100, ge=1, le=500),
+):
+    """Search raw Inline XBRL concepts/dimensions to research verified KPI rules."""
+    try:
+        registry = get_company_driver_registry(ticker)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Company Drivers registry is not yet available for {str(ticker).strip().upper()}.",
+        ) from exc
+    try:
+        result = company_driver_filings.search_filing_facts(
+            registry["ticker"], q, filing_limit=filings, result_limit=limit
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    result.update({
+        "company": registry["company"],
+        "registry_schema_version": DRIVER_SCHEMA_VERSION,
+    })
+    return result
+
+
 @router.get("/history/schema")
 def company_driver_history_schema():
     """Describe the Phase 3B verified historical KPI contract."""
