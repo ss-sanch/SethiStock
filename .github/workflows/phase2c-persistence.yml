@@ -1,0 +1,177 @@
+name: Phase 2C Persistent Fundamentals
+
+on:
+  push:
+    branches:
+      - phase2c-persistent-fundamentals
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: phase2c-persistent-fundamentals
+
+      - name: Apply Phase 2C route patch
+        run: python .phase2c_patch.py
+
+      - name: Install dependencies
+        run: pip install -q -r requirements.txt
+
+      - name: Validate persistence layer
+        run: |
+          python -m py_compile fundamentals_store.py fundamentals_normalizer.py sec_fundamentals.py app.py
+          python - <<'PY'
+          from datetime import datetime, timezone, timedelta
+          from fastapi import FastAPI, HTTPException
+          from fastapi.testclient import TestClient
+
+          import fundamentals_store as store
+          import sec_fundamentals as sec
+
+          def observation(value, start='2024-01-01', end='2024-12-31', concept='Revenues'):
+              return {
+                  'value': value,
+                  'unit': 'USD',
+                  'start': start,
+                  'end': end,
+                  'filed': '2025-02-01',
+                  'fy': 2024,
+                  'fp': 'FY',
+                  'form': '10-K',
+                  'frame': 'CY2024',
+                  'accn': 'x',
+                  'taxonomy': 'us-gaap',
+                  'concept': concept,
+                  'concept_rank': 0,
+                  'duration_days': 365,
+                  'derived': False,
+                  'source': 'SEC EDGAR Company Facts',
+              }
+
+          normalized = {
+              'revenue': {
+                  'metric': 'revenue', 'label': 'Revenue', 'kind': 'flow', 'unit': 'USD',
+                  'derived': False, 'count': 1,
+                  'coverage': {'earliest_end': '2024-12-31', 'latest_end': '2024-12-31', 'concepts_used': ['us-gaap:Revenues']},
+                  'observations': [observation(100)],
+              },
+              'net_income': {
+                  'metric': 'net_income', 'label': 'Net Income', 'kind': 'flow', 'unit': 'USD',
+                  'derived': False, 'count': 1,
+                  'coverage': {'earliest_end': '2024-12-31', 'latest_end': '2024-12-31', 'concepts_used': ['us-gaap:NetIncomeLoss']},
+                  'observations': [observation(20, concept='NetIncomeLoss')],
+              },
+          }
+          identity = {'ticker': 'FIX', 'cik': 123456, 'cik_padded': '0000123456', 'title': 'Fixture Corp'}
+
+          rows, manifest, stats = store._flatten_snapshot(
+              identity=identity,
+              normalized=normalized,
+              schema_version='2b-v1',
+              sync_id='11111111-1111-1111-1111-111111111111',
+          )
+          assert len(rows) == 2
+          assert stats['observation_count'] == 2
+          assert rows[0]['source_concepts'] == ['us-gaap:Revenues']
+          assert manifest['revenue']['label'] == 'Revenue'
+
+          # Persist must stage observations before activating the snapshot pointer.
+          calls = []
+          original_request = store._request
+          original_configured = store.is_configured
+          store.is_configured = lambda: True
+          def fake_request(method, table, **kwargs):
+              calls.append((method, table, kwargs))
+              class Response:
+                  def json(self): return []
+              return Response()
+          store._request = fake_request
+          result = store.persist_snapshot(
+              identity=identity,
+              entity_name='Fixture Corp',
+              normalized=normalized,
+              schema_version='2b-v1',
+              ttl_seconds=86400,
+          )
+          obs_posts = [c for c in calls if c[0] == 'POST' and c[1] == store.OBSERVATIONS_TABLE]
+          sync_posts = [c for c in calls if c[0] == 'POST' and c[1] == store.SYNCS_TABLE]
+          assert obs_posts and sync_posts
+          assert calls.index(obs_posts[-1]) < calls.index(sync_posts[0])
+          assert result['observation_count'] == 2
+          store._request = original_request
+          store.is_configured = original_configured
+
+          # Rebuild a stored snapshot and preserve the existing Phase 2B response shape.
+          now = datetime.now(timezone.utc)
+          store.get_sync_state = lambda ticker, schema_version: {
+              'ticker': 'FIX', 'schema_version': '2b-v1', 'cik': 123456,
+              'title': 'Fixture Corp', 'entity_name': 'Fixture Corp',
+              'active_sync_id': '11111111-1111-1111-1111-111111111111',
+              'source': 'SEC EDGAR Company Facts', 'metric_manifest': manifest,
+              'observation_count': 2, 'source_latest_filed': '2025-02-01',
+              'synced_at': now.isoformat(),
+              'expires_at': (now + timedelta(hours=1)).isoformat(),
+          }
+          store._read_active_rows = lambda sync_id, metrics=None: [
+              {
+                  'metric': 'revenue', 'kind': 'flow', 'unit': 'USD', 'value': 100,
+                  'period_start': '2024-01-01', 'period_end': '2024-12-31', 'filed': '2025-02-01',
+                  'fy': 2024, 'fp': 'FY', 'form': '10-K', 'frame': 'CY2024', 'accn': 'x',
+                  'taxonomy': 'us-gaap', 'concept': 'Revenues', 'concept_rank': 0,
+                  'duration_days': 365, 'derived': False, 'formula': None, 'components': None,
+                  'source_concepts': ['us-gaap:Revenues'], 'source': 'SEC EDGAR Company Facts',
+              }
+          ]
+          rebuilt = store.load_snapshot(
+              ticker='FIX', schema_version='2b-v1', metric_order=['revenue'], metrics=['revenue'], limit=10
+          )
+          assert rebuilt['fresh'] is True
+          assert rebuilt['metrics']['revenue']['observations'][0]['value'] == 100
+          assert rebuilt['metrics']['revenue']['coverage']['concepts_used'] == ['us-gaap:Revenues']
+
+          # Fresh database hit must not touch the SEC.
+          app = FastAPI(); app.include_router(sec.router); client = TestClient(app)
+          sec.fundamentals_store.is_configured = lambda: True
+          fresh_payload = {
+              'ticker': 'FIX', 'cik': 123456, 'cik_padded': '0000123456', 'title': 'Fixture Corp',
+              'entity_name': 'Fixture Corp', 'schema_version': '2b-v1', 'metric_order': ['revenue'],
+              'metrics': {'revenue': rebuilt['metrics']['revenue']},
+              'period_classification': 'deferred_to_phase_2d', 'source': 'SEC EDGAR Company Facts',
+              'storage': {'backend': 'supabase', 'state': 'fresh', 'sync_id': 'x'}, 'fresh': True,
+          }
+          sec.fundamentals_store.load_snapshot = lambda **kwargs: fresh_payload
+          sec.get_company_facts = lambda *a, **k: (_ for _ in ()).throw(AssertionError('SEC should not be called'))
+          response = client.get('/api/sec/FIX/fundamentals/normalized?metrics=revenue')
+          assert response.status_code == 200, response.text
+          assert response.json()['storage']['backend'] == 'supabase'
+          assert 'fresh' not in response.json()
+
+          # Stale stored data must remain available if the SEC is temporarily unavailable.
+          stale_payload = dict(fresh_payload)
+          stale_payload['fresh'] = False
+          stale_payload['storage'] = {'backend': 'supabase', 'state': 'stale', 'sync_id': 'x'}
+          sec.fundamentals_store.load_snapshot = lambda **kwargs: stale_payload
+          sec.get_company_facts = lambda *a, **k: (_ for _ in ()).throw(HTTPException(status_code=502, detail='down'))
+          response = client.get('/api/sec/FIX/fundamentals/normalized?metrics=revenue')
+          assert response.status_code == 200, response.text
+          assert response.json()['storage']['state'] == 'stale_fallback'
+
+          # Unknown metrics should be rejected before any upstream work.
+          response = client.get('/api/sec/FIX/fundamentals/normalized?metrics=made_up_metric')
+          assert response.status_code == 400
+          print('PHASE2C_PERSISTENCE_OK')
+          PY
+
+      - name: Commit real Phase 2C route changes
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add sec_fundamentals.py
+          git commit -m "Wire Phase 2C persistent fundamentals API" || true
+          git pull --rebase origin phase2c-persistent-fundamentals
+          git push
