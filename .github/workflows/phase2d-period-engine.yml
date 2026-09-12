@@ -1,0 +1,156 @@
+name: Phase 2D Period Engine
+
+on:
+  push:
+    branches: [phase2d-period-engine]
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: phase2d-period-engine
+
+      - name: Apply Phase 2D API patch
+        run: python .phase2d_patch.py
+
+      - name: Install dependencies
+        run: pip install -q -r requirements.txt
+
+      - name: Run Phase 2D unit tests
+        run: |
+          python -m py_compile fundamentals_periods.py fundamentals_normalizer.py fundamentals_store.py sec_fundamentals.py app.py
+          python -m unittest tests.test_fundamentals_periods -v
+
+      - name: Validate against persisted AAPL history
+        run: |
+          python - <<'PY'
+          import json
+          import math
+          import time
+          import urllib.request
+
+          from fundamentals_periods import build_period_view
+
+          url = 'https://sethistock-api.onrender.com/api/sec/AAPL/fundamentals/normalized?limit=1000'
+          last_error = None
+          for _ in range(8):
+              try:
+                  with urllib.request.urlopen(url, timeout=120) as response:
+                      payload = json.load(response)
+                  break
+              except Exception as exc:
+                  last_error = exc
+                  time.sleep(5)
+          else:
+              raise AssertionError(f'Unable to fetch production AAPL normalized history: {last_error}')
+
+          normalized = payload['metrics']
+          annual = build_period_view(normalized, period='annual', limit=40)
+          quarterly = build_period_view(normalized, period='quarterly', limit=100)
+          ttm = build_period_view(normalized, period='ttm', limit=100)
+
+          assert annual['period_engine_version'] == '2d-v1'
+          assert annual['metrics']['revenue']['count'] >= 10, annual['metrics']['revenue']['count']
+          assert quarterly['metrics']['revenue']['count'] >= 20, quarterly['metrics']['revenue']['count']
+          assert quarterly['metrics']['operating_cash_flow']['count'] >= 20
+          assert ttm['metrics']['revenue']['count'] >= 10
+          assert ttm['metrics']['net_margin']['count'] >= 8
+          assert ttm['metrics']['cash']['ttm_semantics'] == 'point_in_time'
+
+          for view in (annual, quarterly, ttm):
+              for metric_name, metric in view['metrics'].items():
+                  for point in metric['series']:
+                      value = point.get('value')
+                      assert isinstance(value, (int, float)) and math.isfinite(value), (metric_name, point)
+
+          # For completed fiscal years with all four standalone quarters, quarterly
+          # reconstruction must reconcile exactly back to reported FY revenue/OCF.
+          for metric_name in ('revenue', 'operating_cash_flow', 'free_cash_flow'):
+              annual_by_fy = {p['fiscal_year']: p['value'] for p in annual['metrics'][metric_name]['series']}
+              quarters = {}
+              for point in quarterly['metrics'][metric_name]['series']:
+                  quarters.setdefault(point['fiscal_year'], []).append(point)
+              reconciled = 0
+              for fy, rows in quarters.items():
+                  if fy not in annual_by_fy or len(rows) != 4:
+                      continue
+                  qsum = sum(float(row['value']) for row in rows)
+                  annual_value = float(annual_by_fy[fy])
+                  tolerance = max(1e-6, abs(annual_value) * 1e-9)
+                  assert abs(qsum - annual_value) <= tolerance, (metric_name, fy, qsum, annual_value)
+                  reconciled += 1
+              assert reconciled >= 5, (metric_name, reconciled)
+
+          # A Q4 TTM point should equal that fiscal year's annual flow when the four
+          # quarters are complete.
+          revenue_annual = {p['fiscal_year']: p['value'] for p in annual['metrics']['revenue']['series']}
+          q4_ttm = [p for p in ttm['metrics']['revenue']['series'] if p.get('fiscal_quarter') == 4]
+          matches = 0
+          for point in q4_ttm:
+              annual_value = revenue_annual.get(point['fiscal_year'])
+              if annual_value is None:
+                  continue
+              assert abs(float(point['value']) - float(annual_value)) <= max(1e-6, abs(float(annual_value))*1e-9)
+              matches += 1
+          assert matches >= 5, matches
+
+          print('AAPL_2D_COUNTS=' + json.dumps({
+              'annual_revenue': annual['metrics']['revenue']['count'],
+              'quarterly_revenue': quarterly['metrics']['revenue']['count'],
+              'quarterly_ocf': quarterly['metrics']['operating_cash_flow']['count'],
+              'ttm_revenue': ttm['metrics']['revenue']['count'],
+              'ttm_net_margin': ttm['metrics']['net_margin']['count'],
+              'fiscal_calendar': annual['fiscal_calendar'],
+          }, sort_keys=True))
+          print('PHASE2D_REAL_DATA_OK')
+          PY
+
+      - name: Validate API route shape
+        run: |
+          python - <<'PY'
+          import json
+          import urllib.request
+          from fastapi import FastAPI
+          from fastapi.testclient import TestClient
+          import sec_fundamentals as sec
+
+          with urllib.request.urlopen('https://sethistock-api.onrender.com/api/sec/AAPL/fundamentals/normalized?limit=1000', timeout=120) as response:
+              normalized_payload = json.load(response)
+
+          original = sec.sec_normalized_fundamentals
+          sec.sec_normalized_fundamentals = lambda ticker, metrics=None, limit=1000: normalized_payload
+          try:
+              app = FastAPI()
+              app.include_router(sec.router)
+              client = TestClient(app)
+              response = client.get('/api/sec/AAPL/fundamentals/series?period=quarterly&metrics=revenue,operating_cash_flow,cash,net_margin&limit=80')
+              assert response.status_code == 200, response.text
+              body = response.json()
+              assert body['period_engine_version'] == '2d-v1'
+              assert body['period'] == 'quarterly'
+              assert body['metric_order'] == ['revenue', 'operating_cash_flow', 'cash', 'net_margin']
+              assert body['metrics']['revenue']['count'] >= 20
+              assert body['storage']['backend'] == 'supabase'
+              assert client.get('/api/sec/AAPL/fundamentals/series?period=bad').status_code == 422
+              assert client.get('/api/sec/AAPL/fundamentals/series?period=annual&metrics=fake').status_code == 400
+              schema = client.get('/api/sec/periods/schema')
+              assert schema.status_code == 200
+              assert schema.json()['period_engine_version'] == '2d-v1'
+              print('PHASE2D_ROUTE_OK')
+          finally:
+              sec.sec_normalized_fundamentals = original
+          PY
+
+      - name: Commit Phase 2D API wiring
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add sec_fundamentals.py
+          git commit -m "Wire Phase 2D Annual Quarterly TTM API" || true
+          git pull --rebase origin phase2d-period-engine
+          git push
