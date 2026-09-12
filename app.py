@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 import yfinance as yf
 import pandas as pd
@@ -13,6 +13,7 @@ from typing import Optional
 from datetime import datetime, timezone, timedelta
 import math
 import copy
+import threading
 from scipy.stats import norm
 from scipy.optimize import minimize
 import market_risk_lab
@@ -33,7 +34,16 @@ CACHE_TTL_CHART = int(os.getenv("SETHISTOCK_CACHE_TTL_CHART", "300"))
 CACHE_TTL_PEERS = int(os.getenv("SETHISTOCK_CACHE_TTL_PEERS", "600"))
 CACHE_TTL_STOCK = int(os.getenv("SETHISTOCK_CACHE_TTL_STOCK", "21600"))
 CACHE_TTL_TICKER = int(os.getenv("SETHISTOCK_CACHE_TTL_TICKER", "2592000"))
+CACHE_STALE_QUOTE = int(os.getenv("SETHISTOCK_CACHE_STALE_QUOTE", "900"))
+CACHE_STALE_CHART = int(os.getenv("SETHISTOCK_CACHE_STALE_CHART", "1800"))
+CACHE_STALE_PEERS = int(os.getenv("SETHISTOCK_CACHE_STALE_PEERS", "3600"))
+CACHE_STALE_STOCK = int(os.getenv("SETHISTOCK_CACHE_STALE_STOCK", "86400"))
+CACHE_STALE_TICKER = int(os.getenv("SETHISTOCK_CACHE_STALE_TICKER", "15552000"))
 CACHE_HTTP_TIMEOUT = float(os.getenv("SETHISTOCK_CACHE_HTTP_TIMEOUT", "2.5"))
+
+_CACHE_REFRESH_LOCK = threading.Lock()
+_CACHE_REFRESH_INFLIGHT = set()
+_CACHE_REFRESH_CONTEXT = threading.local()
 
 
 def _cache_base_url():
@@ -103,21 +113,74 @@ def _cache_lookup(namespace: str, identity: str):
         expires_raw = row.get("expires_at")
         expires_at = datetime.fromisoformat(str(expires_raw).replace("Z", "+00:00")) if expires_raw else None
         now = datetime.now(timezone.utc)
+        fresh = bool(expires_at and expires_at > now)
+        stale_for_seconds = 0.0
+        if expires_at and not fresh:
+            stale_for_seconds = max(0.0, (now - expires_at).total_seconds())
         return {
             "payload": row.get("payload"),
             "cached_at": row.get("cached_at"),
             "expires_at": expires_raw,
-            "fresh": bool(expires_at and expires_at > now),
+            "fresh": fresh,
+            "stale_for_seconds": stale_for_seconds,
         }
     except Exception:
         return None
 
 
+def _cache_refresh_bypassed(namespace: str):
+    bypass = getattr(_CACHE_REFRESH_CONTEXT, "bypass_namespaces", set())
+    return namespace in bypass
+
+
 def _cache_get_fresh(namespace: str, identity: str):
+    if _cache_refresh_bypassed(namespace):
+        return None
     entry = _cache_lookup(namespace, identity)
     if entry and entry.get("fresh"):
         return entry.get("payload")
     return None
+
+
+def _cache_get_swr(namespace: str, identity: str, max_stale_seconds: int):
+    if _cache_refresh_bypassed(namespace):
+        return None, "bypass"
+    entry = _cache_lookup(namespace, identity)
+    if not entry or entry.get("payload") is None:
+        return None, "miss"
+    if entry.get("fresh"):
+        return entry.get("payload"), "fresh"
+    stale_for = entry.get("stale_for_seconds")
+    if stale_for is not None and stale_for <= max_stale_seconds:
+        return entry.get("payload"), "stale"
+    return None, "expired"
+
+
+def _run_cache_refresh(refresh_key: str, bypass_namespace: str, refresh_callable, *args, **kwargs):
+    previous_bypass = getattr(_CACHE_REFRESH_CONTEXT, "bypass_namespaces", set())
+    previous_suppress = getattr(_CACHE_REFRESH_CONTEXT, "suppress_telemetry", False)
+    _CACHE_REFRESH_CONTEXT.bypass_namespaces = set(previous_bypass) | {bypass_namespace}
+    _CACHE_REFRESH_CONTEXT.suppress_telemetry = True
+    try:
+        refresh_callable(*args, **kwargs)
+    except Exception:
+        pass
+    finally:
+        _CACHE_REFRESH_CONTEXT.bypass_namespaces = previous_bypass
+        _CACHE_REFRESH_CONTEXT.suppress_telemetry = previous_suppress
+        with _CACHE_REFRESH_LOCK:
+            _CACHE_REFRESH_INFLIGHT.discard(refresh_key)
+
+
+def _schedule_cache_refresh(background_tasks, refresh_key: str, bypass_namespace: str, refresh_callable, *args, **kwargs):
+    if background_tasks is None:
+        return False
+    with _CACHE_REFRESH_LOCK:
+        if refresh_key in _CACHE_REFRESH_INFLIGHT:
+            return False
+        _CACHE_REFRESH_INFLIGHT.add(refresh_key)
+    background_tasks.add_task(_run_cache_refresh, refresh_key, bypass_namespace, refresh_callable, *args, **kwargs)
+    return True
 
 
 def _cache_write(namespace: str, identity: str, payload, ttl_seconds: int, ticker=None):
@@ -149,22 +212,21 @@ def _cache_write(namespace: str, identity: str, payload, ttl_seconds: int, ticke
         return False
 
 
-def _resolve_ticker_cached(query: str):
+def _refresh_ticker_resolution(normalized: str, identity: str):
+    ticker = resolve_ticker(normalized)
+    _cache_write("ticker_resolution", identity, {"ticker": ticker}, CACHE_TTL_TICKER, ticker=ticker)
+    return ticker
+
+
+def _resolve_ticker_cached(query: str, background_tasks=None):
     normalized = str(query or "").strip()
     identity = normalized.upper()
-    cached = _cache_get_fresh("ticker_resolution", identity)
+    cached, cache_state = _cache_get_swr("ticker_resolution", identity, CACHE_STALE_TICKER)
     if isinstance(cached, dict) and cached.get("ticker"):
+        if cache_state == "stale":
+            _schedule_cache_refresh(background_tasks, f"ticker_resolution:{identity}", "ticker_resolution", _refresh_ticker_resolution, normalized, identity)
         return str(cached["ticker"]).upper()
-
-    ticker = resolve_ticker(normalized)
-    _cache_write(
-        "ticker_resolution",
-        identity,
-        {"ticker": ticker},
-        CACHE_TTL_TICKER,
-        ticker=ticker,
-    )
-    return ticker
+    return _refresh_ticker_resolution(normalized, identity)
 
 
 def _cache_probe():
@@ -438,23 +500,30 @@ def cache_status():
             "stock_analysis": CACHE_TTL_STOCK,
             "ticker_resolution": CACHE_TTL_TICKER,
         },
+        "stale_while_revalidate_seconds": {
+            "quote": CACHE_STALE_QUOTE,
+            "chart": CACHE_STALE_CHART,
+            "peer_snapshots": CACHE_STALE_PEERS,
+            "stock_analysis": CACHE_STALE_STOCK,
+            "ticker_resolution": CACHE_STALE_TICKER,
+        },
+        "refreshes_inflight": len(_CACHE_REFRESH_INFLIGHT),
     }
 
 
 @app.get("/api/stock/{raw_ticker}")
-def get_stock_data(raw_ticker: str, is_peer: bool = False):
+def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is_peer: bool = False):
     try:
-        if not is_peer:
+        if not is_peer and not getattr(_CACHE_REFRESH_CONTEXT, "suppress_telemetry", False):
             log_telemetry_event(project="SethiStock", action="ticker_search", ticker=raw_ticker)
-            
-        ticker = _resolve_ticker_cached(raw_ticker)
-
+        ticker = _resolve_ticker_cached(raw_ticker, background_tasks)
         if not is_peer:
-            cached_analysis = _cache_get_fresh("stock_analysis", ticker)
+            cached_analysis, cache_state = _cache_get_swr("stock_analysis", ticker, CACHE_STALE_STOCK)
             if isinstance(cached_analysis, dict):
+                should_refresh_analysis = cache_state == "stale"
                 cached_analysis = copy.deepcopy(cached_analysis)
                 try:
-                    live_quote = get_stock_quote(ticker)
+                    live_quote = get_stock_quote(ticker, background_tasks)
                     cached_analysis["ticker"] = str(live_quote.get("ticker", ticker)).upper()
                     cached_analysis["current_price"] = live_quote.get("current_price", cached_analysis.get("current_price", 0))
                     cached_analysis["change"] = live_quote.get("change", cached_analysis.get("change", 0))
@@ -463,6 +532,8 @@ def get_stock_data(raw_ticker: str, is_peer: bool = False):
                         cached_analysis["stats"]["mkt_cap"] = live_quote.get("market_cap", cached_analysis["stats"].get("mkt_cap", "N/A"))
                 except Exception:
                     pass
+                if should_refresh_analysis:
+                    _schedule_cache_refresh(background_tasks, f"stock_analysis:{ticker}", "stock_analysis", get_stock_data, ticker, None, False)
                 return cached_analysis
         
         f_info, fin, cf, bs, info = None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}
@@ -891,12 +962,14 @@ def _default_peers_for_ticker(symbol: str):
 
 
 @app.get("/api/quote/{raw_ticker}")
-def get_stock_quote(raw_ticker: str):
+def get_stock_quote(raw_ticker: str, background_tasks: BackgroundTasks = None):
     """Fast above-the-fold quote used while the full SethiStock analysis loads."""
     try:
-        ticker = _resolve_ticker_cached(raw_ticker).upper()
-        cached_quote = _cache_get_fresh("quote", ticker)
+        ticker = _resolve_ticker_cached(raw_ticker, background_tasks).upper()
+        cached_quote, cache_state = _cache_get_swr("quote", ticker, CACHE_STALE_QUOTE)
         if isinstance(cached_quote, dict):
+            if cache_state == "stale":
+                _schedule_cache_refresh(background_tasks, f"quote:{ticker}", "quote", get_stock_quote, ticker, None)
             return cached_quote
 
         stock = yf.Ticker(ticker)
@@ -941,7 +1014,7 @@ def get_stock_quote(raw_ticker: str):
 
 
 @app.get("/api/peers")
-def get_peer_snapshots(tickers: str):
+def get_peer_snapshots(tickers: str, background_tasks: BackgroundTasks = None):
     # Return only metrics required by SethiStock peer benchmarking.
     # This avoids the full /api/stock pipeline for competitor rows.
     symbols = []
@@ -960,8 +1033,10 @@ def get_peer_snapshots(tickers: str):
         raise HTTPException(status_code=400, detail="Peer snapshot supports up to 8 tickers per request.")
 
     cache_identity = ",".join(symbols)
-    cached_peers = _cache_get_fresh("peer_snapshots", cache_identity)
+    cached_peers, cache_state = _cache_get_swr("peer_snapshots", cache_identity, CACHE_STALE_PEERS)
     if isinstance(cached_peers, dict):
+        if cache_state == "stale":
+            _schedule_cache_refresh(background_tasks, f"peer_snapshots:{cache_identity}", "peer_snapshots", get_peer_snapshots, cache_identity, None)
         return cached_peers
 
     results = []
@@ -1034,12 +1109,14 @@ def get_peer_snapshots(tickers: str):
 
 
 @app.get("/api/chart/{raw_ticker}")
-def get_chart_data(raw_ticker: str, period: str = "1y", interval: str = "1d"):
+def get_chart_data(raw_ticker: str, period: str = "1y", interval: str = "1d", background_tasks: BackgroundTasks = None):
     try:
-        ticker = _resolve_ticker_cached(raw_ticker)
+        ticker = _resolve_ticker_cached(raw_ticker, background_tasks)
         cache_identity = f"{ticker.upper()}:{period}:{interval}"
-        cached_chart = _cache_get_fresh("chart", cache_identity)
+        cached_chart, cache_state = _cache_get_swr("chart", cache_identity, CACHE_STALE_CHART)
         if isinstance(cached_chart, dict):
+            if cache_state == "stale":
+                _schedule_cache_refresh(background_tasks, f"chart:{cache_identity}", "chart", get_chart_data, ticker, period, interval, None)
             return cached_chart
         
         hist = pd.DataFrame()
