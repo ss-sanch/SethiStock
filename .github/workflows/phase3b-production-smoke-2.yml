@@ -1,0 +1,43 @@
+name: Phase 3B Production Smoke 2
+
+on:
+  push:
+    branches: [phase3b-production-smoke-2]
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify live KPI semantic ranking
+        run: |
+          python - <<'PY'
+          import json, time, urllib.request
+          base='https://sethistock-api.onrender.com/api/drivers'
+          def get(path, attempts=12):
+              last=None
+              for attempt in range(attempts):
+                  try:
+                      with urllib.request.urlopen(base+path, timeout=120) as r:
+                          return json.load(r)
+                  except Exception as e:
+                      last=e
+                      if attempt<attempts-1: time.sleep(min(8+attempt*4,30))
+              raise last
+          get('/extraction/schema')
+          checks=[('AMZN','aws_revenue'),('GOOGL','google_cloud_revenue'),('NVDA','data_center_revenue')]
+          out={}
+          for ticker,metric in checks:
+              r=get(f'/{ticker}/discover/{metric}?filings=1&limit=20')
+              assert r['candidate_count']>0
+              best=r['candidates'][0]
+              concept=(best.get('qualified_concept') or '').lower()
+              assert any(x in concept for x in ('revenue','revenues','sales')), (ticker,metric,best)
+              assert best.get('dimensions'), (ticker,metric,best)
+              out[ticker]={
+                  'metric':metric,'concept':best.get('qualified_concept'),'value':best.get('value'),
+                  'period':[best.get('start'),best.get('end')],'dimensions':best.get('dimensions'),
+                  'score':best.get('score'),'filing_date':best.get('filing_date'),'accession':best.get('accession')
+              }
+          print(json.dumps(out,indent=2))
+          print('PHASE3B_SEMANTIC_PRODUCTION_OK')
+          PY
