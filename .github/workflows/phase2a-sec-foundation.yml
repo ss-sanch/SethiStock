@@ -11,8 +11,6 @@ permissions:
 jobs:
   patch-and-test:
     runs-on: ubuntu-latest
-    env:
-      SEC_USER_AGENT: SethiStock-Phase2A https://github.com/ss-sanch/SethiStock
     steps:
       - uses: actions/checkout@v4
         with:
@@ -51,6 +49,7 @@ jobs:
           assert 'BAD' not in mapping
 
           sample = {
+              'entityName': 'Apple Inc.',
               'facts': {
                   'us-gaap': {
                       'Assets': {
@@ -62,53 +61,70 @@ jobs:
                                   {'end': '2023-09-30', 'filed': '2023-11-01', 'val': 1},
                               ]
                           },
-                      }
+                      },
+                      'RevenueFromContractWithCustomerExcludingAssessedTax': {
+                          'label': 'Revenue',
+                          'description': 'Revenue from contracts with customers',
+                          'units': {
+                              'USD': [
+                                  {'start': '2023-10-01', 'end': '2024-09-30', 'filed': '2024-11-01', 'val': 100},
+                              ]
+                          },
+                      },
                   }
               }
           }
           summary = sec._taxonomy_summary(sample)
           assert summary[0]['taxonomy'] == 'us-gaap'
-          assert summary[0]['concept_count'] == 1
-          assert summary[0]['fact_count'] == 2
+          assert summary[0]['concept_count'] == 2
+          assert summary[0]['fact_count'] == 3
           payload = sec._concept_payload(sample, 'us-gaap', 'Assets', 1)
           assert payload['units']['USD'][0]['val'] == 2
           assert len(payload['units']['USD']) == 1
           print('PARSER_TESTS_OK')
           PY
 
-      - name: Run live SEC smoke tests
-        run: |
-          python - <<'PY'
-          import sec_fundamentals as sec
-
-          identities = {
-              'AAPL': 320193,
-              'MSFT': 789019,
-              'GOOGL': 1652044,
-          }
-          for ticker, expected_cik in identities.items():
-              identity, facts = sec.get_company_facts(ticker)
-              assert identity['cik'] == expected_cik, (ticker, identity)
-              assert identity['cik_padded'] == f'{expected_cik:010d}'
-              assert facts.get('entityName'), ticker
-              us_gaap = (facts.get('facts') or {}).get('us-gaap') or {}
-              assert len(us_gaap) > 100, (ticker, len(us_gaap))
-              print(f'SEC_OK={ticker}:{identity["cik_padded"]}:{len(us_gaap)}')
-
-          _, apple = sec.get_company_facts('AAPL')
-          assets = sec._concept_payload(apple, 'us-gaap', 'Assets', 10)
-          usd_rows = assets['units'].get('USD') or []
-          assert usd_rows, 'AAPL Assets/USD missing'
-          assert all(row.get('val') is not None for row in usd_rows)
-          print('AAPL_ASSETS_ROWS=' + str(len(usd_rows)))
-          print('LIVE_SEC_TESTS_OK')
-          PY
-
-      - name: Test FastAPI SEC routes
+      - name: Test FastAPI SEC routes with deterministic SEC fixture
         run: |
           python - <<'PY'
           from fastapi.testclient import TestClient
           import app
+          import sec_fundamentals as sec
+
+          identity = {
+              'ticker': 'AAPL',
+              'cik': 320193,
+              'cik_padded': '0000320193',
+              'title': 'Apple Inc.',
+          }
+          companyfacts = {
+              'cik': 320193,
+              'entityName': 'Apple Inc.',
+              'facts': {
+                  'us-gaap': {
+                      'Assets': {
+                          'label': 'Assets',
+                          'description': 'Total assets',
+                          'units': {
+                              'USD': [
+                                  {'end': '2024-09-30', 'filed': '2024-11-01', 'val': 2},
+                                  {'end': '2023-09-30', 'filed': '2023-11-01', 'val': 1},
+                              ]
+                          },
+                      },
+                      'RevenueFromContractWithCustomerExcludingAssessedTax': {
+                          'label': 'Revenue',
+                          'description': 'Revenue from contracts with customers',
+                          'units': {
+                              'USD': [
+                                  {'start': '2023-10-01', 'end': '2024-09-30', 'filed': '2024-11-01', 'val': 100},
+                              ]
+                          },
+                      },
+                  }
+              },
+          }
+          sec.get_company_facts = lambda ticker, force_refresh=False: (identity, companyfacts)
 
           client = TestClient(app.app)
           overview = client.get('/api/sec/AAPL/overview')
@@ -120,11 +136,11 @@ jobs:
 
           concepts = client.get('/api/sec/AAPL/concepts', params={'q': 'revenue', 'limit': 25})
           assert concepts.status_code == 200, concepts.text
-          assert concepts.json()['count'] > 0
+          assert concepts.json()['count'] == 1
 
-          concept = client.get('/api/sec/AAPL/concept', params={'concept': 'Assets', 'limit': 5})
+          concept = client.get('/api/sec/AAPL/concept', params={'concept': 'Assets', 'limit': 1})
           assert concept.status_code == 200, concept.text
-          assert (concept.json()['units'].get('USD') or [])
+          assert concept.json()['units']['USD'][0]['val'] == 2
           print('ROUTES_OK')
           PY
 
