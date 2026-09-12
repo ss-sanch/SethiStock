@@ -1,0 +1,82 @@
+name: Phase 2D Reconciliation Fix
+
+on:
+  push:
+    branches: [phase2d-period-engine]
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: phase2d-period-engine
+      - name: Apply reconciliation fix
+        run: python .phase2d_reconcile_patch.py
+      - name: Unit tests
+        run: |
+          python -m py_compile fundamentals_periods.py
+          python -m unittest tests.test_fundamentals_periods -v
+      - name: Validate AAPL MSFT WMT NVDA
+        run: |
+          python - <<'PY'
+          import json
+          import time
+          import urllib.request
+          from fundamentals_periods import build_period_view
+
+          base = 'https://sethistock-api.onrender.com'
+          def fetch(ticker):
+              last = None
+              for _ in range(8):
+                  try:
+                      with urllib.request.urlopen(f'{base}/api/sec/{ticker}/fundamentals/normalized?limit=1000', timeout=180) as r:
+                          return json.load(r)
+                  except Exception as exc:
+                      last = exc
+                      time.sleep(4)
+              raise AssertionError((ticker, last))
+
+          summary = {}
+          for ticker in ('AAPL', 'MSFT', 'WMT', 'NVDA'):
+              normalized = fetch(ticker)['metrics']
+              annual = build_period_view(normalized, period='annual', limit=40)
+              quarterly = build_period_view(normalized, period='quarterly', limit=100)
+              ttm = build_period_view(normalized, period='ttm', limit=100)
+              assert annual['metrics']['revenue']['count'] >= 10, (ticker, 'annual revenue')
+              assert quarterly['metrics']['revenue']['count'] >= 20, (ticker, 'quarter revenue')
+              assert ttm['metrics']['revenue']['count'] >= 10, (ticker, 'ttm revenue')
+              for metric_name in ('revenue', 'operating_cash_flow', 'free_cash_flow'):
+                  annual_by_fy = {p['fiscal_year']: float(p['value']) for p in annual['metrics'][metric_name]['series']}
+                  by_fy = {}
+                  for point in quarterly['metrics'][metric_name]['series']:
+                      by_fy.setdefault(point['fiscal_year'], []).append(point)
+                  reconciled = 0
+                  for fy, rows in by_fy.items():
+                      if fy not in annual_by_fy or len(rows) != 4:
+                          continue
+                      qsum = sum(float(row['value']) for row in rows)
+                      av = annual_by_fy[fy]
+                      assert abs(qsum-av) <= max(1e-6, abs(av)*1e-9), (ticker, metric_name, fy, qsum, av)
+                      reconciled += 1
+                  assert reconciled >= 3, (ticker, metric_name, reconciled)
+              summary[ticker] = {
+                  'annual_revenue': annual['metrics']['revenue']['count'],
+                  'quarterly_revenue': quarterly['metrics']['revenue']['count'],
+                  'ttm_revenue': ttm['metrics']['revenue']['count'],
+                  'calendar': annual['fiscal_calendar'],
+              }
+          assert summary['WMT']['calendar']['latest_completed_fiscal_year'] >= 2026
+          print('PHASE2D_RECONCILED=' + json.dumps(summary, sort_keys=True))
+          PY
+      - name: Commit fix
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add fundamentals_periods.py tests/test_fundamentals_periods.py
+          git commit -m "Fix Phase 2D Q4 reconciliation across fiscal calendars" || true
+          git pull --rebase origin phase2d-period-engine
+          git push
