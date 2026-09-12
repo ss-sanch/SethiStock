@@ -1,0 +1,78 @@
+name: Phase 2C Production Smoke
+
+on:
+  push:
+    branches: [phase2c-production-smoke]
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify persistent fundamentals in production
+        run: |
+          python - <<'PY'
+          import json
+          import math
+          import time
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          base = 'https://sethistock-api.onrender.com'
+
+          def get(path, timeout=180):
+              try:
+                  with urllib.request.urlopen(base + path, timeout=timeout) as response:
+                      return response.status, json.load(response)
+              except urllib.error.HTTPError as exc:
+                  body = exc.read().decode('utf-8', errors='replace')
+                  try:
+                      return exc.code, json.loads(body)
+                  except Exception:
+                      return exc.code, {'raw': body[:1000]}
+
+          deadline = time.time() + 420
+          last = None
+          while time.time() < deadline:
+              status, payload = get('/api/sec/storage/status', 90)
+              last = (status, payload)
+              if status == 200 and payload.get('configured') is True and payload.get('ready') is True and payload.get('schema_version') == '2b-v1':
+                  print('STORAGE_READY=' + json.dumps(payload, sort_keys=True))
+                  break
+              print('WAITING=' + str(status) + ':' + json.dumps(payload, sort_keys=True)[:500])
+              time.sleep(10)
+          else:
+              raise AssertionError(f'Phase 2C not ready before timeout: {last}')
+
+          query = urllib.parse.urlencode({'limit': 180})
+          started = time.time()
+          status, first = get('/api/sec/AAPL/fundamentals/normalized?' + query, 240)
+          first_seconds = time.time() - started
+          assert status == 200, (status, first)
+          assert first.get('schema_version') == '2b-v1', first
+          assert len(first.get('metrics') or {}) == 11, list((first.get('metrics') or {}).keys())
+          first_storage = first.get('storage') or {}
+          assert first_storage.get('backend') == 'supabase', first_storage
+          assert first_storage.get('state') in ('refreshed', 'fresh'), first_storage
+          first_sync = first_storage.get('sync_id')
+          assert first_sync, first_storage
+          for metric_name, metric in first['metrics'].items():
+              rows = metric.get('observations') or []
+              assert rows, metric_name
+              for row in rows:
+                  assert isinstance(row.get('value'), (int, float)) and math.isfinite(row['value']), (metric_name, row)
+          print('FIRST=' + json.dumps({'seconds': round(first_seconds, 3), 'state': first_storage.get('state'), 'sync_id': first_sync, 'observation_count': first_storage.get('observation_count'), 'revenue_count': first['metrics']['revenue']['count'], 'revenue_earliest': first['metrics']['revenue']['coverage']['earliest_end']}, sort_keys=True))
+
+          started = time.time()
+          status, second = get('/api/sec/AAPL/fundamentals/normalized?' + query, 120)
+          second_seconds = time.time() - started
+          assert status == 200, (status, second)
+          second_storage = second.get('storage') or {}
+          assert second_storage.get('backend') == 'supabase', second_storage
+          assert second_storage.get('state') == 'fresh', second_storage
+          assert second_storage.get('sync_id') == first_sync, (first_storage, second_storage)
+          assert second['metrics']['revenue']['observations'] == first['metrics']['revenue']['observations']
+          assert second['metrics']['free_cash_flow']['observations'] == first['metrics']['free_cash_flow']['observations']
+          print('SECOND=' + json.dumps({'seconds': round(second_seconds, 3), 'state': second_storage.get('state'), 'sync_id': second_storage.get('sync_id'), 'observation_count': second_storage.get('observation_count')}, sort_keys=True))
+          print('PHASE2C_PRODUCTION_OK')
+          PY
