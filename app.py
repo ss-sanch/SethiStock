@@ -517,6 +517,23 @@ def cache_status():
     }
 
 
+def _analysis_cache_payload_valid(payload):
+    if not isinstance(payload, dict):
+        return False
+    try:
+        cached_price = float(payload.get("current_price", 0))
+        if not np.isfinite(cached_price) or cached_price <= 0:
+            return False
+    except Exception:
+        return False
+    stats = payload.get("stats")
+    if isinstance(stats, dict):
+        for value in stats.values():
+            if isinstance(value, str) and ("nan" in value.lower() or "inf" in value.lower()):
+                return False
+    return True
+
+
 @app.get("/api/stock/{raw_ticker}")
 def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is_peer: bool = False):
     try:
@@ -525,7 +542,7 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
         ticker = _resolve_ticker_cached(raw_ticker, background_tasks)
         if not is_peer:
             cached_analysis, cache_state = _cache_get_swr("stock_analysis", ticker, CACHE_STALE_STOCK)
-            if isinstance(cached_analysis, dict):
+            if _analysis_cache_payload_valid(cached_analysis):
                 should_refresh_analysis = cache_state == "stale"
                 cached_analysis = copy.deepcopy(cached_analysis)
                 try:
@@ -576,6 +593,13 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
         except Exception:
             pass
 
+        # Yahoo can append an incomplete current-session row with a null Close.
+        # Drop it before price, risk and technical calculations so bad rows cannot poison the 6h analysis cache.
+        if shared_hist is not None and not shared_hist.empty and 'Close' in shared_hist.columns:
+            numeric_close = pd.to_numeric(shared_hist['Close'], errors='coerce')
+            valid_close = numeric_close.notna() & np.isfinite(numeric_close) & (numeric_close > 0)
+            shared_hist = shared_hist.loc[valid_close].copy()
+
         recent_hist = shared_hist.tail(5).copy() if shared_hist is not None and not shared_hist.empty else pd.DataFrame()
 
         # 2. RUN THE FINVIZ SCRAPER TO FILL IN THE BLANKS
@@ -589,7 +613,8 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
                 if val is None or pd.isna(val) or val == '-': return float(fallback)
                 if isinstance(val, str):
                     val = val.replace(',', '').replace('%', '')
-                return float(val)
+                result = float(val)
+                return result if np.isfinite(result) else float(fallback)
             except Exception:
                 return float(fallback)
 
@@ -791,8 +816,27 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
         fcf_yield_raw = (latest_fcf / final_mkt_cap) if final_mkt_cap and latest_fcf else 0
         fcf_yield = f"{round(fcf_yield_raw * 100, 2)}%" if fcf_yield_raw != 0 else "N/A"
         
-        div_yield_raw = safe_float(info.get("dividendYield") if info else info.get("trailingAnnualDividendYield") if info else None)
-        div_yield = f"{round(div_yield_raw * 100, 2)}%" if div_yield_raw > 0 else fallback_div_yield
+        div_yield_raw = safe_float(info.get("dividendYield") if info else None)
+        trailing_div_yield_raw = safe_float(info.get("trailingAnnualDividendYield") if info else None)
+        info_dividend_pct = 0.0
+        if trailing_div_yield_raw > 0:
+            trailing_pct = trailing_div_yield_raw * 100.0
+            if div_yield_raw > 0:
+                as_reported_pct = div_yield_raw
+                as_ratio_pct = div_yield_raw * 100.0
+                info_dividend_pct = as_reported_pct if abs(as_reported_pct - trailing_pct) <= abs(as_ratio_pct - trailing_pct) else as_ratio_pct
+            else:
+                info_dividend_pct = trailing_pct
+        elif div_yield_raw > 0:
+            # Current yfinance commonly reports dividendYield in percentage points.
+            info_dividend_pct = div_yield_raw if div_yield_raw >= 0.2 else div_yield_raw * 100.0
+
+        if fallback_div_yield != "N/A":
+            div_yield = fallback_div_yield
+        elif 0 < info_dividend_pct < 100:
+            div_yield = f"{round(info_dividend_pct, 2)}%"
+        else:
+            div_yield = "N/A"
         
         book_value = safe_float(info.get("bookValue") if info else None, fallback_bv)
         fiftyTwoWeekHigh = safe_float(info.get("fiftyTwoWeekHigh") if info else None, current_price * 1.2)
@@ -848,17 +892,20 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
             avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
             avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
             rs = avg_gain / avg_loss
-            rsi_14 = round((100 - (100 / (1 + rs))).iloc[-1], 2)
+            rsi_value = (100 - (100 / (1 + rs))).iloc[-1]
+            rsi_14 = round(float(rsi_value), 2) if np.isfinite(rsi_value) else "N/A"
 
             low_14 = lows.rolling(14).min().iloc[-1]
             high_14 = highs.rolling(14).max().iloc[-1]
-            stoch_k = round(100 * ((current_price - low_14) / (high_14 - low_14)), 2) if high_14 != low_14 else 50
+            if current_price > 0 and np.isfinite(low_14) and np.isfinite(high_14):
+                stoch_k = round(100 * ((current_price - low_14) / (high_14 - low_14)), 2) if high_14 != low_14 else 50
 
             if len(daily_hist) >= 200:
                 sma_200 = closes.rolling(200).mean().iloc[-1]
-                sma_200_pct = round(((current_price - sma_200) / sma_200) * 100, 2)
+                if np.isfinite(sma_200) and sma_200 > 0 and current_price > 0:
+                    sma_200_pct = round(((current_price - sma_200) / sma_200) * 100, 2)
 
-        dist_52w_high = round(((current_price - fiftyTwoWeekHigh) / fiftyTwoWeekHigh) * 100, 2) if fiftyTwoWeekHigh and fiftyTwoWeekHigh > 0 else "N/A"
+        dist_52w_high = round(((current_price - fiftyTwoWeekHigh) / fiftyTwoWeekHigh) * 100, 2) if current_price > 0 and fiftyTwoWeekHigh and fiftyTwoWeekHigh > 0 and np.isfinite(fiftyTwoWeekHigh) else "N/A"
         
         # --- FINVIZ DATA MAPPING ---
         short_interest = fv_stats.get("Short Float", "N/A")
@@ -955,6 +1002,23 @@ def _peer_format_market_cap(value):
 def _peer_metric(value, digits=2):
     value = _peer_safe_float(value)
     return round(value, digits) if value is not None else "N/A"
+
+
+def _peer_dividend_yield_pct(info):
+    if not isinstance(info, dict):
+        return None
+    primary = _peer_safe_float(info.get("dividendYield"))
+    trailing = _peer_safe_float(info.get("trailingAnnualDividendYield"))
+    if trailing is not None and trailing > 0:
+        trailing_pct = trailing * 100.0
+        if primary is None or primary <= 0:
+            return trailing_pct
+        as_reported_pct = primary
+        as_ratio_pct = primary * 100.0
+        return as_reported_pct if abs(as_reported_pct - trailing_pct) <= abs(as_ratio_pct - trailing_pct) else as_ratio_pct
+    if primary is not None and primary > 0:
+        return primary if primary >= 0.2 else primary * 100.0
+    return None
 
 
 def _default_peers_for_ticker(symbol: str):
@@ -1074,9 +1138,7 @@ def get_peer_snapshots(tickers: str, background_tasks: BackgroundTasks = None):
             price_to_book = _peer_safe_float(info.get("priceToBook"))
             trailing_eps = _peer_safe_float(info.get("trailingEps"))
             free_cash_flow = _peer_safe_float(info.get("freeCashflow"))
-            dividend_yield = _peer_safe_float(info.get("dividendYield"))
-            if dividend_yield is None:
-                dividend_yield = _peer_safe_float(info.get("trailingAnnualDividendYield"))
+            dividend_yield_pct = _peer_dividend_yield_pct(info)
 
             fcf_yield = None
             if free_cash_flow is not None and market_cap and market_cap > 0:
@@ -1090,7 +1152,7 @@ def get_peer_snapshots(tickers: str, background_tasks: BackgroundTasks = None):
                     "pe": _peer_metric(trailing_pe),
                     "pb": _peer_metric(price_to_book),
                     "eps": _peer_metric(trailing_eps),
-                    "div_yield": f"{round(dividend_yield * 100.0, 2)}%" if dividend_yield is not None and dividend_yield > 0 else "N/A",
+                    "div_yield": f"{round(dividend_yield_pct, 2)}%" if dividend_yield_pct is not None and dividend_yield_pct > 0 else "N/A",
                     "fcf_yield": f"{round(fcf_yield, 2)}%" if fcf_yield is not None else "N/A",
                 },
             })
