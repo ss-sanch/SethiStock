@@ -18,6 +18,7 @@ from typing import Any, Dict, List
 from fastapi import APIRouter, HTTPException, Query
 
 import company_driver_filings
+import company_driver_history
 
 
 router = APIRouter(prefix="/api/drivers", tags=["Company Drivers"])
@@ -378,6 +379,47 @@ def company_driver_discover_metric(
         filing_limit=filings,
         candidate_limit=limit,
     )
+    result.update({
+        "company": registry["company"],
+        "theme": registry["theme"],
+        "registry_schema_version": DRIVER_SCHEMA_VERSION,
+        "metric_definition": metric,
+    })
+    return result
+
+
+@router.get("/history/schema")
+def company_driver_history_schema():
+    """Describe the Phase 3B verified historical KPI contract."""
+    return company_driver_history.history_schema()
+
+
+@router.get("/{ticker}/history/{metric_key}")
+def company_driver_metric_history(
+    ticker: str,
+    metric_key: str,
+    filings: int = Query(16, ge=1, le=32),
+    period: str = Query("quarterly", pattern="^(quarterly|annual|reported)$"),
+    limit: int = Query(40, ge=1, le=100),
+):
+    """Return a verified, deduplicated historical series for one operating KPI."""
+    try:
+        registry, metric = _driver_metric_definition(ticker, metric_key)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Company Drivers registry is not yet available for {str(ticker).strip().upper()}.",
+        ) from exc
+    try:
+        result = company_driver_history.build_verified_history(
+            registry["ticker"],
+            metric,
+            filing_limit=filings,
+            period=period,
+            observation_limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     result.update({
         "company": registry["company"],
         "theme": registry["theme"],
