@@ -93,6 +93,16 @@ DIRECT_METRICS: Dict[str, Dict[str, Any]] = {
         "unit": "USD",
         "candidates": [("us-gaap", "GrossProfit")],
     },
+    "cost_of_revenue": {
+        "label": "Cost of Revenue",
+        "kind": "flow",
+        "unit": "USD",
+        "candidates": [
+            ("us-gaap", "CostOfRevenue"),
+            ("us-gaap", "CostOfGoodsAndServicesSold"),
+            ("us-gaap", "CostOfGoodsSold"),
+        ],
+    },
     "operating_income": {
         "label": "Operating Income",
         "kind": "flow",
@@ -114,6 +124,7 @@ DEBT_COMPONENTS: Dict[str, List[Tuple[str, str]]] = {
     ],
     "short_term": [
         ("us-gaap", "ShortTermBorrowings"),
+        ("us-gaap", "CommercialPaper"),
         ("us-gaap", "ShortTermDebt"),
     ],
 }
@@ -425,6 +436,50 @@ def derive_free_cash_flow(
     )
 
 
+def derive_effective_gross_profit(
+    gross_profit: Dict[str, Any],
+    cost_of_revenue: Dict[str, Any],
+    revenue: Dict[str, Any],
+    limit: int = 250,
+) -> Dict[str, Any]:
+    """Prefer reported GrossProfit and fill missing periods from Revenue - Cost."""
+    reported_by_period = _by_period(gross_profit["observations"])
+    cost_by_period = _by_period(cost_of_revenue["observations"])
+    revenue_by_period = _by_period(revenue["observations"])
+    rows = list(gross_profit["observations"])
+
+    for period, revenue_row in revenue_by_period.items():
+        if period in reported_by_period:
+            continue
+        cost_row = cost_by_period.get(period)
+        if cost_row is None:
+            continue
+        value = float(revenue_row["value"]) - abs(float(cost_row["value"]))
+        if not math.isfinite(value):
+            continue
+        rows.append(
+            _derived_flow_row(
+                value=value,
+                unit="USD",
+                components=[("revenue", revenue_row), ("cost_of_revenue", cost_row)],
+                formula="revenue - abs(cost_of_revenue)",
+            )
+        )
+
+    rows.sort(key=lambda row: (str(row.get("end") or ""), str(row.get("start") or "")))
+    if limit > 0 and len(rows) > limit:
+        rows = rows[-limit:]
+    return _metric_payload(
+        metric="gross_profit",
+        label="Gross Profit",
+        kind="flow",
+        unit="USD",
+        observations=rows,
+        derived=any(bool(row.get("derived")) for row in rows),
+        formula="reported GrossProfit; fallback revenue - abs(cost_of_revenue)",
+    )
+
+
 def derive_margin(
     metric: str,
     numerator_metric: str,
@@ -615,7 +670,7 @@ def build_normalized_fundamentals(
         elif metric == "free_cash_flow":
             required_direct.update({"operating_cash_flow", "capex"})
         elif metric == "gross_margin":
-            required_direct.update({"gross_profit", "revenue"})
+            required_direct.update({"gross_profit", "cost_of_revenue", "revenue"})
         elif metric == "operating_margin":
             required_direct.update({"operating_income", "revenue"})
         elif metric == "net_margin":
@@ -647,8 +702,14 @@ def build_normalized_fundamentals(
         elif metric == "debt":
             output[metric] = derive_debt(companyfacts, limit=limit)
         elif metric == "gross_margin":
+            effective_gross_profit = derive_effective_gross_profit(
+                direct["gross_profit"],
+                direct["cost_of_revenue"],
+                direct["revenue"],
+                limit=max(limit, 500),
+            )
             output[metric] = derive_margin(
-                "gross_margin", "gross_profit", direct["gross_profit"], direct["revenue"], limit=limit
+                "gross_margin", "gross_profit", effective_gross_profit, direct["revenue"], limit=limit
             )
         elif metric == "operating_margin":
             output[metric] = derive_margin(
