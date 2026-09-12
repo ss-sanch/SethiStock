@@ -19,6 +19,7 @@ from scipy.optimize import minimize
 import market_risk_lab
 import stock_research
 import sec_fundamentals
+import company_drivers
 import sethiportfolio
 
 # --- SUPABASE TELEMETRY ENGINE ---
@@ -297,6 +298,7 @@ app.add_middleware(
 app.include_router(market_risk_lab.router)
 app.include_router(stock_research.router)
 app.include_router(sec_fundamentals.router)
+app.include_router(company_drivers.router)
 sethiportfolio.configure_supabase(SUPABASE_URL, SUPABASE_KEY, SUPABASE_SERVICE_KEY, ADMIN_SECRET)
 app.include_router(sethiportfolio.router)
 
