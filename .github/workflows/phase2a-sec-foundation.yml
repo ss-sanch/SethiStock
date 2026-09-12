@@ -1,0 +1,138 @@
+name: Phase 2A SEC Foundation
+
+on:
+  push:
+    branches:
+      - phase2a-sec-data-foundation
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-test:
+    runs-on: ubuntu-latest
+    env:
+      SEC_USER_AGENT: SethiStock-Phase2A https://github.com/ss-sanch/SethiStock
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: phase2a-sec-data-foundation
+
+      - name: Apply app wiring patch
+        run: python .phase2a_patch.py
+
+      - name: Validate syntax and router wiring
+        run: |
+          python -m py_compile app.py sec_fundamentals.py
+          python - <<'PY'
+          from pathlib import Path
+          text = Path('app.py').read_text()
+          assert 'import sec_fundamentals' in text
+          assert 'app.include_router(sec_fundamentals.router)' in text
+          print('WIRING_OK')
+          PY
+
+      - name: Install dependencies
+        run: pip install -q -r requirements.txt
+
+      - name: Run parser unit tests
+        run: |
+          python - <<'PY'
+          import sec_fundamentals as sec
+
+          mapping = sec._normalise_ticker_map({
+              '0': {'cik_str': 320193, 'ticker': 'AAPL', 'title': 'Apple Inc.'},
+              '1': {'cik_str': '789019', 'ticker': 'MSFT', 'title': 'Microsoft Corp.'},
+              'bad': {'ticker': 'BAD'},
+          })
+          assert mapping['AAPL']['cik'] == 320193
+          assert mapping['AAPL']['cik_padded'] == '0000320193'
+          assert mapping['MSFT']['cik'] == 789019
+          assert 'BAD' not in mapping
+
+          sample = {
+              'facts': {
+                  'us-gaap': {
+                      'Assets': {
+                          'label': 'Assets',
+                          'description': 'Total assets',
+                          'units': {
+                              'USD': [
+                                  {'end': '2024-09-30', 'filed': '2024-11-01', 'val': 2},
+                                  {'end': '2023-09-30', 'filed': '2023-11-01', 'val': 1},
+                              ]
+                          },
+                      }
+                  }
+              }
+          }
+          summary = sec._taxonomy_summary(sample)
+          assert summary[0]['taxonomy'] == 'us-gaap'
+          assert summary[0]['concept_count'] == 1
+          assert summary[0]['fact_count'] == 2
+          payload = sec._concept_payload(sample, 'us-gaap', 'Assets', 1)
+          assert payload['units']['USD'][0]['val'] == 2
+          assert len(payload['units']['USD']) == 1
+          print('PARSER_TESTS_OK')
+          PY
+
+      - name: Run live SEC smoke tests
+        run: |
+          python - <<'PY'
+          import sec_fundamentals as sec
+
+          identities = {
+              'AAPL': 320193,
+              'MSFT': 789019,
+              'GOOGL': 1652044,
+          }
+          for ticker, expected_cik in identities.items():
+              identity, facts = sec.get_company_facts(ticker)
+              assert identity['cik'] == expected_cik, (ticker, identity)
+              assert identity['cik_padded'] == f'{expected_cik:010d}'
+              assert facts.get('entityName'), ticker
+              us_gaap = (facts.get('facts') or {}).get('us-gaap') or {}
+              assert len(us_gaap) > 100, (ticker, len(us_gaap))
+              print(f'SEC_OK={ticker}:{identity["cik_padded"]}:{len(us_gaap)}')
+
+          _, apple = sec.get_company_facts('AAPL')
+          assets = sec._concept_payload(apple, 'us-gaap', 'Assets', 10)
+          usd_rows = assets['units'].get('USD') or []
+          assert usd_rows, 'AAPL Assets/USD missing'
+          assert all(row.get('val') is not None for row in usd_rows)
+          print('AAPL_ASSETS_ROWS=' + str(len(usd_rows)))
+          print('LIVE_SEC_TESTS_OK')
+          PY
+
+      - name: Test FastAPI SEC routes
+        run: |
+          python - <<'PY'
+          from fastapi.testclient import TestClient
+          import app
+
+          client = TestClient(app.app)
+          overview = client.get('/api/sec/AAPL/overview')
+          assert overview.status_code == 200, overview.text
+          body = overview.json()
+          assert body['ticker'] == 'AAPL'
+          assert body['cik'] == 320193
+          assert any(item['taxonomy'] == 'us-gaap' for item in body['taxonomies'])
+
+          concepts = client.get('/api/sec/AAPL/concepts', params={'q': 'revenue', 'limit': 25})
+          assert concepts.status_code == 200, concepts.text
+          assert concepts.json()['count'] > 0
+
+          concept = client.get('/api/sec/AAPL/concept', params={'concept': 'Assets', 'limit': 5})
+          assert concept.status_code == 200, concept.text
+          assert (concept.json()['units'].get('USD') or [])
+          print('ROUTES_OK')
+          PY
+
+      - name: Commit Phase 2A app wiring
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add app.py
+          git commit -m "Wire SEC fundamentals routes into SethiStock"
+          git pull --rebase origin phase2a-sec-data-foundation
+          git push
