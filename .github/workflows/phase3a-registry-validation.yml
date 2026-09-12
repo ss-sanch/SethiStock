@@ -12,14 +12,28 @@ jobs:
         run: |
           python - <<'PY'
           import json
+          import time
           import urllib.error
           import urllib.request
 
           base = 'https://sethistock-api.onrender.com/api/drivers'
 
-          def get(path):
-              with urllib.request.urlopen(base + path, timeout=30) as response:
-                  return response.status, json.load(response)
+          def get(path, attempts=4):
+              last = None
+              for attempt in range(attempts):
+                  try:
+                      with urllib.request.urlopen(base + path, timeout=90) as response:
+                          return response.status, json.load(response)
+                  except urllib.error.HTTPError:
+                      raise
+                  except Exception as exc:
+                      last = exc
+                      if attempt < attempts - 1:
+                          time.sleep(5 * (attempt + 1))
+              raise last
+
+          # Warm the free-tier Render service before validating the contract.
+          get('/schema')
 
           status, schema = get('/schema')
           assert status == 200
