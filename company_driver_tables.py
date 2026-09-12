@@ -66,6 +66,11 @@ def _row_cells(row: Any) -> List[str]:
     return [_clean(cell.get_text(" ", strip=True)) for cell in row.find_all(["th", "td"])]
 
 
+def _label_index(cells: List[str], phrase: str) -> Optional[int]:
+    target=phrase.lower()
+    return next((i for i, cell in enumerate(cells) if target in cell.lower()), None)
+
+
 def _table_rows(soup: BeautifulSoup):
     for table in soup.find_all("table"):
         for row in table.find_all("tr"):
@@ -101,9 +106,10 @@ def _visa_processed_transactions(soup: BeautifulSoup, filing: Dict[str, Any]) ->
         return []
     observations: List[Dict[str, Any]] = []
     for table, cells in _table_rows(soup):
-        if not cells or "visa processed transactions" not in cells[0].lower():
+        label_index=_label_index(cells, "visa processed transactions")
+        if label_index is None:
             continue
-        nums = [value for value in (_number(cell) for cell in cells[1:]) if value is not None]
+        nums = [value for value in (_number(cell) for cell in cells[label_index + 1:]) if value is not None]
         if not nums:
             continue
         table_text = _clean(table.get_text(" ", strip=True)).lower()
@@ -148,13 +154,11 @@ def _jpm_cet1_ratio(soup: BeautifulSoup, filing: Dict[str, Any]) -> List[Dict[st
     for table, cells in _table_rows(soup):
         if not cells:
             continue
-        label = cells[0].lower()
+        label_index=next((i for i, cell in enumerate(cells) if "capital ratio" in cell.lower() and any(term in cell.lower() for term in patterns)), None)
         table_text = _clean(table.get_text(" ", strip=True)).lower()
-        if "standardized" not in table_text:
+        if label_index is None or "standardized" not in table_text:
             continue
-        if "capital ratio" not in label or not any(term in label for term in patterns):
-            continue
-        nums = [value for value in (_number(cell) for cell in cells[1:]) if value is not None]
+        nums = [value for value in (_number(cell) for cell in cells[label_index + 1:]) if value is not None]
         if not nums:
             continue
         value = nums[0]
@@ -190,13 +194,18 @@ def _netflix_paid_memberships(soup: BeautifulSoup, filing: Dict[str, Any]) -> Li
     }
     by_region: Dict[str, float] = {}
     for table, cells in _table_rows(soup):
-        if not cells or "paid memberships at end of period" not in cells[0].lower():
+        label_index=_label_index(cells, "paid memberships at end of period")
+        if label_index is None:
             continue
         table_text = _clean(table.get_text(" ", strip=True)).lower()
         region = next((key for key, tokens in region_tokens.items() if any(token in table_text for token in tokens)), None)
         if not region:
+            previous=table.find_previous(string=re.compile(r"United States and Canada|UCAN|Europe, Middle East|EMEA|Latin America|LATAM|Asia-Pacific|APAC", re.I))
+            context=(table_text + " " + _clean(previous)).lower()
+            region = next((key for key, tokens in region_tokens.items() if any(token in context for token in tokens)), None)
+        if not region:
             continue
-        nums = [value for value in (_number(cell) for cell in cells[1:]) if value is not None]
+        nums = [value for value in (_number(cell) for cell in cells[label_index + 1:]) if value is not None]
         if nums:
             # Filing tables state memberships in thousands.
             by_region[region] = nums[0] * 1_000.0
