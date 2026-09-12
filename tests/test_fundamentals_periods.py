@@ -160,6 +160,31 @@ class PeriodEngineTests(unittest.TestCase):
         self.assertEqual(result["metrics"]["cash"]["ttm_semantics"], "point_in_time")
         self.assertTrue(all(point["calculation"] == "point_in_time" for point in result["metrics"]["cash"]["series"]))
 
+    def test_basis_transition_is_flagged_not_fabricated(self):
+        normalized = fixture()
+        # Add an explicitly reported Q4 on the older concept basis while the FY value
+        # is later restated upward under a different concept. The engine must preserve
+        # the reported Q4, flag the year, and not manufacture a balancing quarter.
+        normalized["revenue"]["observations"].append(
+            flow_row(115, "2024-10-01", "2024-12-31", 91, form="10-K", fp="FY", concept="LegacyRevenue")
+        )
+        annual = next(
+            row for row in normalized["revenue"]["observations"]
+            if row["start"] == "2024-01-01" and row["end"] == "2024-12-31" and row["duration_days"] == 365
+        )
+        annual["value"] = 500
+        annual["concept"] = "RestatedRevenue"
+
+        quarterly = build_period_view(normalized, period="quarterly", metrics=["revenue"])
+        rows = quarterly["metrics"]["revenue"]["series"]
+        self.assertEqual([point["value"] for point in rows], [100, 110, 120, 115])
+        self.assertTrue(all(point["reconciliation_status"] == "basis_mismatch" for point in rows))
+        self.assertTrue(all("concept_basis_change" in point["quality_flags"] for point in rows))
+        self.assertEqual(quarterly["metrics"]["revenue"]["quality"]["reconciliation_points"]["basis_mismatch"], 4)
+
+        ttm = build_period_view(normalized, period="ttm", metrics=["revenue"])
+        self.assertEqual(ttm["metrics"]["revenue"]["series"], [])
+
     def test_open_fiscal_year_supports_partial_quarters(self):
         normalized = fixture()
         normalized["revenue"]["observations"].extend(

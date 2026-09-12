@@ -558,6 +558,54 @@ def _flow_quarterly_series(
                             components=[annual] + [quarter_values[q] for q in (1, 2, 3)],
                         )
 
+        # A concept/taxonomy change can leave historical standalone quarters on a
+        # different accounting basis from a later-restated annual fact. Never invent
+        # a balancing quarter merely to force the identity. Preserve the reported
+        # quarters, flag the mismatch, and let TTM skip contaminated windows.
+        if period["completed"] and all(q in quarter_values for q in (1, 2, 3, 4)):
+            annual_reference = _annual_flow_row(payload, period)
+            annual_value = _finite((annual_reference or {}).get("value"))
+            if annual_value is not None:
+                quarter_total = sum(float(quarter_values[q]["value"]) for q in (1, 2, 3, 4))
+                gap = quarter_total - annual_value
+                tolerance = max(1.0, abs(annual_value) * 1e-6)
+                status = "reconciled" if abs(gap) <= tolerance else "basis_mismatch"
+                annual_concept = (
+                    f"{annual_reference.get('taxonomy')}:{annual_reference.get('concept')}"
+                    if annual_reference and annual_reference.get("taxonomy") and annual_reference.get("concept")
+                    else None
+                )
+                quarter_concepts = sorted(
+                    {
+                        f"{component.get('taxonomy')}:{component.get('concept')}"
+                        for q in (1, 2, 3, 4)
+                        for component in (quarter_values[q].get("components") or [])
+                        if isinstance(component, dict)
+                        and component.get("taxonomy")
+                        and component.get("concept")
+                    }
+                )
+                basis_change = bool(
+                    status == "basis_mismatch"
+                    and annual_concept
+                    and quarter_concepts
+                    and annual_concept not in quarter_concepts
+                )
+                for q in (1, 2, 3, 4):
+                    quarter_values[q]["reconciliation_status"] = status
+                    quarter_values[q]["annual_reference_value"] = annual_value
+                    quarter_values[q]["annual_reconciliation_gap"] = gap
+                    quarter_values[q]["annual_reconciliation_gap_pct"] = (
+                        gap / annual_value if annual_value != 0 else None
+                    )
+                    if status == "basis_mismatch":
+                        flags = ["annual_reconciliation_mismatch"]
+                        if basis_change:
+                            flags.append("concept_basis_change")
+                        quarter_values[q]["quality_flags"] = flags
+                        quarter_values[q]["annual_reference_concept"] = annual_concept
+                        quarter_values[q]["quarter_source_concepts"] = quarter_concepts
+
         for quarter in sorted(quarter_values):
             point = quarter_values[quarter]
             point["_sequence"] = period["sequence"] * 4 + quarter
@@ -725,6 +773,19 @@ def _combine_ratio_points(
         )
         if "_sequence" in numerator:
             point["_sequence"] = numerator["_sequence"]
+        statuses = {
+            value
+            for value in (
+                numerator.get("reconciliation_status"),
+                denominator.get("reconciliation_status"),
+            )
+            if value
+        }
+        if "basis_mismatch" in statuses:
+            point["reconciliation_status"] = "basis_mismatch"
+            point["quality_flags"] = ["component_reconciliation_mismatch"]
+        elif statuses == {"reconciled"}:
+            point["reconciliation_status"] = "reconciled"
         output.append(point)
     return output
 
@@ -759,7 +820,12 @@ def _ratio_quarterly_series(
 
 def _consecutive_windows(points: Sequence[Dict[str, Any]]) -> Iterable[List[Dict[str, Any]]]:
     ordered = sorted(
-        [point for point in points if point.get("_sequence") is not None],
+        [
+            point
+            for point in points
+            if point.get("_sequence") is not None
+            and point.get("reconciliation_status") != "basis_mismatch"
+        ],
         key=lambda point: int(point["_sequence"]),
     )
     for index in range(3, len(ordered)):
@@ -863,6 +929,10 @@ def _metric_result(
     clean = _strip_internal(points, limit)
     ends = [point["end"] for point in clean if point.get("end")]
     calculations = sorted({str(point.get("calculation")) for point in clean if point.get("calculation")})
+    reconciliation_counts = {
+        "reconciled": sum(1 for point in clean if point.get("reconciliation_status") == "reconciled"),
+        "basis_mismatch": sum(1 for point in clean if point.get("reconciliation_status") == "basis_mismatch"),
+    }
     result = {
         "metric": metric,
         "label": payload.get("label"),
@@ -875,6 +945,7 @@ def _metric_result(
             "latest_end": max(ends) if ends else None,
         },
         "calculations": calculations,
+        "quality": {"reconciliation_points": reconciliation_counts},
         "series": clean,
     }
     if payload.get("formula"):
