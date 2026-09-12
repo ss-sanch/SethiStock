@@ -3,6 +3,10 @@ from pathlib import Path
 path = Path('sec_fundamentals.py')
 text = path.read_text()
 
+if '@router.get("/{ticker}/fundamentals/series")' in text:
+    print('Phase 2D routes already present; no patch required.')
+    raise SystemExit(0)
+
 old_import = '''import fundamentals_store\nfrom fundamentals_normalizer import (\n'''
 new_import = '''import fundamentals_store\nfrom fundamentals_periods import (\n    PERIOD_ENGINE_VERSION,\n    build_period_view,\n    get_period_engine_schema,\n)\nfrom fundamentals_normalizer import (\n'''
 if text.count(old_import) != 1:
@@ -45,9 +49,6 @@ def sec_fundamental_series(
             detail=f"Unknown normalised metrics: {', '.join(sorted(set(unknown)))}",
         )
 
-    # Always load the full metric set internally. Revenue/Net Income/OCF histories
-    # provide the common fiscal calendar and ratio metrics need their source
-    # components. The persisted 2C snapshot makes this a database read on warm paths.
     normalized_response = sec_normalized_fundamentals(
         ticker=ticker,
         metrics=None,
@@ -77,7 +78,5 @@ def sec_fundamental_series(
     }
 '''
 
-if '@router.get("/{ticker}/fundamentals/series")' in text:
-    raise SystemExit('series route already present')
 text = text.rstrip() + append + '\n'
 path.write_text(text)
