@@ -15,7 +15,9 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Dict, List
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
+
+import company_driver_filings
 
 
 router = APIRouter(prefix="/api/drivers", tags=["Company Drivers"])
@@ -311,6 +313,78 @@ def company_driver_companies():
         "count": len(companies),
         "companies": companies,
     }
+
+
+def _driver_metric_definition(ticker: str, metric_key: str):
+    registry = get_company_driver_registry(ticker)
+    key = str(metric_key or "").strip().lower()
+    for metric in registry["metrics"]:
+        if metric["key"].lower() == key:
+            return registry, metric
+    raise HTTPException(
+        status_code=404,
+        detail=f"Company Driver metric '{metric_key}' is not registered for {registry['ticker']}.",
+    )
+
+
+@router.get("/extraction/schema")
+def company_driver_extraction_schema():
+    """Describe the Phase 3B filing extraction/discovery contract."""
+    return company_driver_filings.extraction_schema()
+
+
+@router.get("/{ticker}/filings")
+def company_driver_filings_route(
+    ticker: str,
+    limit: int = Query(6, ge=1, le=12),
+):
+    """List recent periodic filings available to the Company Drivers extractor."""
+    try:
+        registry = get_company_driver_registry(ticker)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Company Drivers registry is not yet available for {str(ticker).strip().upper()}.",
+        ) from exc
+    filings = company_driver_filings.recent_periodic_filings(registry["ticker"], limit=limit)
+    return {
+        "ticker": registry["ticker"],
+        "company": registry["company"],
+        "schema_version": DRIVER_SCHEMA_VERSION,
+        "extraction_version": company_driver_filings.DRIVER_EXTRACTION_VERSION,
+        "count": len(filings),
+        "filings": filings,
+    }
+
+
+@router.get("/{ticker}/discover/{metric_key}")
+def company_driver_discover_metric(
+    ticker: str,
+    metric_key: str,
+    filings: int = Query(4, ge=1, le=12),
+    limit: int = Query(80, ge=1, le=500),
+):
+    """Return sourced Inline XBRL candidates for one registered operating KPI."""
+    try:
+        registry, metric = _driver_metric_definition(ticker, metric_key)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Company Drivers registry is not yet available for {str(ticker).strip().upper()}.",
+        ) from exc
+    result = company_driver_filings.discover_metric_candidates(
+        registry["ticker"],
+        metric,
+        filing_limit=filings,
+        candidate_limit=limit,
+    )
+    result.update({
+        "company": registry["company"],
+        "theme": registry["theme"],
+        "registry_schema_version": DRIVER_SCHEMA_VERSION,
+        "metric_definition": metric,
+    })
+    return result
 
 
 @router.get("/{ticker}")
