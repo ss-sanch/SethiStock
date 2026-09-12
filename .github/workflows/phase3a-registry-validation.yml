@@ -1,0 +1,74 @@
+name: Phase 3A Registry Validation
+
+on:
+  push:
+    branches: [phase3a-registry-validation]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate production Company Drivers registry
+        run: |
+          python - <<'PY'
+          import json
+          import urllib.error
+          import urllib.request
+
+          base = 'https://sethistock-api.onrender.com/api/drivers'
+
+          def get(path):
+              with urllib.request.urlopen(base + path, timeout=30) as response:
+                  return response.status, json.load(response)
+
+          status, schema = get('/schema')
+          assert status == 200
+          assert schema['schema_version'] == '3a-v1'
+          assert schema['phase'] == '3A'
+          assert schema['data_state'] == 'registry_only'
+          assert schema['company_count'] == 10
+          assert schema['metric_count'] >= 40
+          assert 'observation_contract' in schema
+          assert 'source_url' in schema['observation_contract']['required']
+
+          status, companies = get('/companies')
+          assert status == 200
+          tickers = {row['ticker'] for row in companies['companies']}
+          expected = {'AAPL','MSFT','GOOGL','AMZN','META','NVDA','TSLA','NFLX','JPM','V'}
+          assert tickers == expected, (tickers, expected)
+
+          for ticker in sorted(expected):
+              status, payload = get('/' + ticker)
+              assert status == 200
+              assert payload['ticker'] == ticker
+              assert payload['schema_version'] == '3a-v1'
+              assert payload['data_state'] == 'registry_only'
+              assert payload['metric_count'] == len(payload['metrics'])
+              assert payload['metric_count'] >= 4
+              keys = [m['key'] for m in payload['metrics']]
+              assert len(keys) == len(set(keys))
+              for metric in payload['metrics']:
+                  for field in ['key','label','category','description','unit','value_kind','period_semantics','expected_frequency','continuity','display_format','source_priority']:
+                      assert field in metric, (ticker, metric.get('key'), field)
+                  assert metric['source_priority']
+
+          status, goog = get('/GOOG')
+          assert status == 200
+          assert goog['ticker'] == 'GOOGL'
+          assert goog['requested_ticker'] == 'GOOG'
+
+          try:
+              get('/ZZZZ')
+          except urllib.error.HTTPError as exc:
+              assert exc.code == 404
+          else:
+              raise AssertionError('Unsupported ticker should return 404')
+
+          print(json.dumps({
+              'schema_version': schema['schema_version'],
+              'companies': schema['company_count'],
+              'metrics': schema['metric_count'],
+              'tickers': sorted(tickers),
+          }))
+          print('PHASE3A_PRODUCTION_OK')
+          PY
