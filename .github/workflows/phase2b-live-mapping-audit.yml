@@ -9,7 +9,7 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
-      - name: Audit real SEC concept availability
+      - name: Probe cost-of-revenue concepts
         run: |
           python - <<'PY'
           import json
@@ -18,27 +18,12 @@ jobs:
           import urllib.request
 
           base = 'https://sethistock-api.onrender.com'
-          concepts = [
-              ('us-gaap', 'RevenueFromContractWithCustomerExcludingAssessedTax'),
-              ('us-gaap', 'Revenues'),
-              ('us-gaap', 'SalesRevenueNet'),
-              ('us-gaap', 'NetIncomeLoss'),
-              ('us-gaap', 'ProfitLoss'),
-              ('us-gaap', 'NetCashProvidedByUsedInOperatingActivities'),
-              ('us-gaap', 'PaymentsToAcquirePropertyPlantAndEquipment'),
-              ('us-gaap', 'CashAndCashEquivalentsAtCarryingValue'),
-              ('us-gaap', 'CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents'),
-              ('dei', 'EntityCommonStockSharesOutstanding'),
-              ('us-gaap', 'CommonStockSharesOutstanding'),
-              ('us-gaap', 'GrossProfit'),
-              ('us-gaap', 'OperatingIncomeLoss'),
-              ('us-gaap', 'LongTermDebtCurrent'),
-              ('us-gaap', 'LongTermDebtAndFinanceLeaseObligationsCurrent'),
-              ('us-gaap', 'LongTermDebtNoncurrent'),
-              ('us-gaap', 'LongTermDebtAndFinanceLeaseObligationsNoncurrent'),
-              ('us-gaap', 'ShortTermBorrowings'),
-              ('us-gaap', 'ShortTermDebt'),
-              ('us-gaap', 'CommercialPaper'),
+          candidates = [
+              'CostOfRevenue',
+              'CostOfGoodsAndServicesSold',
+              'CostOfGoodsSold',
+              'CostOfServices',
+              'CostOfSales',
           ]
 
           def get(path):
@@ -50,22 +35,22 @@ jobs:
                   try:
                       return exc.code, json.loads(body)
                   except Exception:
-                      return exc.code, {'raw': body[:200]}
+                      return exc.code, {'raw': body[:300]}
 
           for ticker in ['AAPL', 'MSFT', 'GOOGL']:
-              available = []
-              missing = []
-              for taxonomy, concept in concepts:
-                  q = urllib.parse.urlencode({'taxonomy': taxonomy, 'concept': concept, 'limit': 1})
+              found = []
+              for concept in candidates:
+                  q = urllib.parse.urlencode({'taxonomy': 'us-gaap', 'concept': concept, 'limit': 1})
                   status, payload = get(f'/api/sec/{ticker}/concept?' + q)
                   if status == 200:
-                      unit_counts = {unit: len(rows) for unit, rows in (payload.get('units') or {}).items()}
-                      available.append((taxonomy, concept, unit_counts))
-                  elif status == 404:
-                      missing.append((taxonomy, concept))
-                  else:
-                      raise AssertionError((ticker, taxonomy, concept, status, payload))
-              print(ticker + '_AVAILABLE=' + json.dumps(available))
-              print(ticker + '_MISSING=' + json.dumps(missing))
-          print('PHASE2B_LIVE_MAPPING_AUDIT_OK')
+                      found.append((concept, list((payload.get('units') or {}).keys()), payload.get('label')))
+                  elif status != 404:
+                      raise AssertionError((ticker, concept, status, payload))
+              q = urllib.parse.urlencode({'taxonomy': 'us-gaap', 'q': 'cost of revenue', 'limit': 100})
+              status, search = get(f'/api/sec/{ticker}/concepts?' + q)
+              assert status == 200, (ticker, status, search)
+              named = [item.get('concept') for item in search.get('concepts', [])]
+              print(ticker + '_COST_CANDIDATES=' + json.dumps(found))
+              print(ticker + '_COST_SEARCH=' + json.dumps(named))
+          print('PHASE2B_COST_AUDIT_OK')
           PY
