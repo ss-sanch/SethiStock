@@ -520,8 +520,7 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
         if not is_peer:
             cached_analysis, cache_state = _cache_get_swr("stock_analysis", ticker, CACHE_STALE_STOCK)
             if isinstance(cached_analysis, dict):
-                if cache_state == "stale":
-                    _schedule_cache_refresh(background_tasks, f"stock_analysis:{ticker}", "stock_analysis", get_stock_data, ticker, None, False)
+                should_refresh_analysis = cache_state == "stale"
                 cached_analysis = copy.deepcopy(cached_analysis)
                 try:
                     live_quote = get_stock_quote(ticker, background_tasks)
@@ -533,6 +532,8 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
                         cached_analysis["stats"]["mkt_cap"] = live_quote.get("market_cap", cached_analysis["stats"].get("mkt_cap", "N/A"))
                 except Exception:
                     pass
+                if should_refresh_analysis:
+                    _schedule_cache_refresh(background_tasks, f"stock_analysis:{ticker}", "stock_analysis", get_stock_data, ticker, None, False)
                 return cached_analysis
         
         f_info, fin, cf, bs, info = None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}
