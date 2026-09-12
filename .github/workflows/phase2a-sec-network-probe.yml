@@ -1,0 +1,34 @@
+name: Phase 2A SEC Network Probe
+
+on:
+  push:
+    branches:
+      - phase2a-sec-data-foundation
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe SEC endpoints
+        run: |
+          python - <<'PY'
+          import requests
+
+          urls = [
+              'https://www.sec.gov/files/company_tickers.json',
+              'https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json',
+              'https://data.sec.gov/submissions/CIK0000320193.json',
+          ]
+          agents = [
+              'SethiStock-Phase2A https://github.com/ss-sanch/SethiStock',
+              'SethiStock-Phase2A github-actions[bot]@users.noreply.github.com',
+          ]
+          for ua in agents:
+              print('UA=' + ua)
+              for url in urls:
+                  try:
+                      r = requests.get(url, headers={'User-Agent': ua, 'Accept-Encoding': 'gzip, deflate'}, timeout=20)
+                      print(r.status_code, url, r.headers.get('content-type'), len(r.content))
+                  except Exception as exc:
+                      print('ERROR', url, repr(exc))
+          PY
