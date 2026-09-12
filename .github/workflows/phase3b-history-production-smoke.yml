@@ -1,0 +1,94 @@
+name: Phase 3B History Production Smoke
+
+on:
+  push:
+    branches: [phase3b-history-production-smoke]
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate live verified KPI histories
+        run: |
+          python - <<'PY'
+          import json
+          import time
+          import urllib.request
+
+          base='https://sethistock-api.onrender.com/api/drivers'
+
+          def get(path, timeout=180):
+              with urllib.request.urlopen(base+path, timeout=timeout) as r:
+                  return json.load(r)
+
+          # Wait for the merged history routes to be deployed on Render.
+          deadline=time.time()+360
+          last=None
+          while time.time()<deadline:
+              try:
+                  schema=get('/history/schema')
+                  if schema.get('version')=='3b-history-v1':
+                      break
+                  last=schema
+              except Exception as exc:
+                  last=repr(exc)
+              time.sleep(12)
+          else:
+              raise AssertionError(('history deployment not observed',last))
+
+          expected_latest={
+              ('AMZN','aws_revenue'): 42232000000.0,
+              ('GOOGL','google_cloud_revenue'): 24768000000.0,
+              ('NVDA','data_center_revenue'): 89023000000.0,
+          }
+          summary={}
+          for (ticker,metric),latest_expected in expected_latest.items():
+              payload=get(f'/{ticker}/history/{metric}?filings=8&period=quarterly&limit=30', timeout=240)
+              assert payload['history_version']=='3b-history-v1'
+              assert payload['data_state']=='verified_history'
+              assert payload['verified'] is True
+              assert payload['observation_count']>=5, (ticker,payload['observation_count'])
+              assert payload['coverage']['start'] and payload['coverage']['end']
+              ends=[row.get('end') for row in payload['observations']]
+              assert len(ends)==len(set(ends)), (ticker,ends)
+              assert payload['derived_q4_count']>=1, (ticker,payload['derived_q4_count'])
+
+              for row in payload['observations']:
+                  assert row.get('value') is not None
+                  assert row.get('qualified_concept')
+                  assert row.get('filing_date')
+                  assert row.get('accession')
+                  assert (row.get('source_url') or '').startswith('https://www.sec.gov/Archives/edgar/data/')
+                  if row.get('derived'):
+                      assert row.get('extraction_method')=='derived_q4_fy_minus_9m'
+                      assert row.get('derivation',{}).get('formula')=='FY - 9M'
+                      assert row['derivation']['annual'].get('accession')
+                      assert row['derivation']['ytd_9m'].get('accession')
+                  else:
+                      assert row.get('extraction_method')=='sec_inline_xbrl_verified_rule'
+
+              latest=payload['observations'][-1]
+              assert abs(float(latest['value'])-latest_expected)<1, (ticker,latest)
+
+              annual=get(f'/{ticker}/history/{metric}?filings=8&period=annual&limit=10', timeout=240)
+              assert annual['verified'] is True
+              assert annual['observation_count']>=1
+              assert all(row['period_type']=='annual' for row in annual['observations'])
+
+              summary[ticker]={
+                  'metric':metric,
+                  'quarters':payload['observation_count'],
+                  'coverage':payload['coverage'],
+                  'derived_q4':payload['derived_q4_count'],
+                  'latest':latest,
+                  'annual_points':annual['observation_count'],
+              }
+
+          unsupported=get('/AAPL/history/installed_device_base?filings=2&period=quarterly&limit=10')
+          assert unsupported['data_state']=='not_verified_for_history'
+          assert unsupported['verified'] is False
+          assert unsupported['observation_count']==0
+
+          print(json.dumps(summary,indent=2))
+          print('PHASE3B_HISTORY_PRODUCTION_OK')
+          PY
