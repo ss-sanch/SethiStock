@@ -1,0 +1,41 @@
+name: Phase 1 Stability Hotfix
+
+on:
+  push:
+    branches:
+      - phase1-stability-hotfix
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: phase1-stability-hotfix
+      - name: Apply backend stability patch
+        run: python .phase1_stability_patch.py
+      - name: Validate Python syntax
+        run: python -m py_compile app.py
+      - name: Test chart sanitiser and heavy refresh cap
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+          text = Path('app.py').read_text()
+          assert 'CACHE_MAX_HEAVY_REFRESHES' in text
+          assert 'def _sanitize_chart_payload' in text
+          assert 'close is None or close <= 0' in text
+          assert 'heavy_inflight' in text
+          ast.parse(text)
+          print('STATIC_OK')
+          PY
+      - name: Commit backend hotfix
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add app.py
+          git commit -m "Stabilise chart data and background refreshes"
+          git push
