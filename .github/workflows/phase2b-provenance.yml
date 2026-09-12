@@ -1,0 +1,74 @@
+name: Phase 2B Provenance Validation
+
+on:
+  push:
+    branches:
+      - phase2b-fundamentals-normalisation
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: phase2b-fundamentals-normalisation
+
+      - name: Apply provenance patch
+        run: python .phase2b_provenance_patch.py
+
+      - name: Validate recursive provenance
+        run: |
+          python -m py_compile fundamentals_normalizer.py sec_fundamentals.py
+          python - <<'PY'
+          import fundamentals_normalizer as fn
+
+          def row(val, start=None, end='2024-12-31'):
+              out = {'val': val, 'end': end, 'filed': '2025-02-01', 'form': '10-K', 'fy': 2024, 'fp': 'FY', 'accn': 'x'}
+              if start is not None:
+                  out['start'] = start
+              return out
+
+          def concept(rows):
+              return {'label': 'x', 'description': 'x', 'units': {'USD': rows}}
+
+          period = ('2024-01-01', '2024-12-31')
+          facts = {'facts': {'us-gaap': {
+              'RevenueFromContractWithCustomerExcludingAssessedTax': concept([row(100, *period)]),
+              'CostOfRevenue': concept([row(60, *period)]),
+              'LongTermDebtCurrent': concept([row(2)]),
+              'LongTermDebtNoncurrent': concept([row(8)]),
+              'CommercialPaper': concept([row(1)]),
+          }}}
+          metrics = fn.build_normalized_fundamentals(facts, metrics=['gross_margin', 'debt'])
+          gm = metrics['gross_margin']
+          assert set(gm['coverage']['concepts_used']) == {
+              'us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax',
+              'us-gaap:CostOfRevenue',
+          }, gm['coverage']
+          nested = gm['observations'][0]['components'][0]
+          assert nested['metric'] == 'gross_profit'
+          assert nested.get('components') and len(nested['components']) == 2, nested
+          assert {x['concept'] for x in nested['components']} == {
+              'RevenueFromContractWithCustomerExcludingAssessedTax', 'CostOfRevenue'
+          }
+
+          debt = metrics['debt']
+          assert set(debt['coverage']['concepts_used']) == {
+              'us-gaap:LongTermDebtCurrent',
+              'us-gaap:LongTermDebtNoncurrent',
+              'us-gaap:CommercialPaper',
+          }, debt['coverage']
+          print('PHASE2B_PROVENANCE_OK')
+          PY
+
+      - name: Commit provenance improvements
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add fundamentals_normalizer.py
+          git commit -m "Preserve recursive SEC provenance in normalized metrics" || true
+          git pull --rebase origin phase2b-fundamentals-normalisation
+          git push
