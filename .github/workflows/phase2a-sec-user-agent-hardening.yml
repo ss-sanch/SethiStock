@@ -1,0 +1,62 @@
+name: Phase 2A SEC User-Agent Hardening
+
+on:
+  push:
+    branches:
+      - phase2a-sec-user-agent-hardening
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: phase2a-sec-user-agent-hardening
+
+      - name: Apply SEC User-Agent hardening
+        run: python .phase2a_ua_patch.py
+
+      - name: Validate syntax and readiness behavior
+        run: |
+          python -m py_compile sec_fundamentals.py app.py
+          pip install -q -r requirements.txt
+          python - <<'PY'
+          import os
+          from fastapi.testclient import TestClient
+          import sec_fundamentals as sec
+          import app
+
+          assert sec._sec_user_agent_configured() is False
+          try:
+              sec._require_sec_user_agent()
+          except Exception as exc:
+              assert getattr(exc, 'status_code', None) == 503
+          else:
+              raise AssertionError('Missing SEC_USER_AGENT should fail closed')
+
+          client = TestClient(app.app)
+          status = client.get('/api/sec/status')
+          assert status.status_code == 200, status.text
+          body = status.json()
+          assert body['configured'] is False
+          assert body['max_requests_per_second'] <= 10
+
+          # Reconfigure in-process to prove declared contact detection without making a network call.
+          sec.SEC_USER_AGENT = 'SethiStock test-contact@example.com'
+          assert sec._sec_user_agent_configured() is True
+          status = client.get('/api/sec/status')
+          assert status.json()['configured'] is True
+          print('SEC_UA_HARDENING_OK')
+          PY
+
+      - name: Commit hardening
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add sec_fundamentals.py
+          git commit -m "Require declared SEC contact User-Agent"
+          git pull --rebase origin phase2a-sec-user-agent-hardening
+          git push
