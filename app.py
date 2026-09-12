@@ -39,6 +39,7 @@ CACHE_STALE_CHART = int(os.getenv("SETHISTOCK_CACHE_STALE_CHART", "1800"))
 CACHE_STALE_PEERS = int(os.getenv("SETHISTOCK_CACHE_STALE_PEERS", "3600"))
 CACHE_STALE_STOCK = int(os.getenv("SETHISTOCK_CACHE_STALE_STOCK", "86400"))
 CACHE_STALE_TICKER = int(os.getenv("SETHISTOCK_CACHE_STALE_TICKER", "15552000"))
+CACHE_MAX_HEAVY_REFRESHES = max(1, int(os.getenv("SETHISTOCK_CACHE_MAX_HEAVY_REFRESHES", "1")))
 CACHE_HTTP_TIMEOUT = float(os.getenv("SETHISTOCK_CACHE_HTTP_TIMEOUT", "2.5"))
 
 _CACHE_REFRESH_LOCK = threading.Lock()
@@ -178,6 +179,10 @@ def _schedule_cache_refresh(background_tasks, refresh_key: str, bypass_namespace
     with _CACHE_REFRESH_LOCK:
         if refresh_key in _CACHE_REFRESH_INFLIGHT:
             return False
+        if bypass_namespace == "stock_analysis":
+            heavy_inflight = sum(1 for key in _CACHE_REFRESH_INFLIGHT if key.startswith("stock_analysis:"))
+            if heavy_inflight >= CACHE_MAX_HEAVY_REFRESHES:
+                return False
         _CACHE_REFRESH_INFLIGHT.add(refresh_key)
     background_tasks.add_task(_run_cache_refresh, refresh_key, bypass_namespace, refresh_callable, *args, **kwargs)
     return True
@@ -508,6 +513,7 @@ def cache_status():
             "ticker_resolution": CACHE_STALE_TICKER,
         },
         "refreshes_inflight": len(_CACHE_REFRESH_INFLIGHT),
+        "max_heavy_refreshes": CACHE_MAX_HEAVY_REFRESHES,
     }
 
 
@@ -1108,6 +1114,36 @@ def get_peer_snapshots(tickers: str, background_tasks: BackgroundTasks = None):
     return result
 
 
+def _sanitize_chart_payload(payload):
+    empty = {"dates": [], "opens": [], "highs": [], "lows": [], "closes": []}
+    if not isinstance(payload, dict):
+        return empty
+
+    dates = payload.get("dates") or []
+    opens = payload.get("opens") or []
+    highs = payload.get("highs") or []
+    lows = payload.get("lows") or []
+    closes = payload.get("closes") or []
+    size = min(len(dates), len(opens), len(highs), len(lows), len(closes))
+    if size <= 0:
+        return empty
+
+    clean = {"dates": [], "opens": [], "highs": [], "lows": [], "closes": []}
+    for i in range(size):
+        close = _peer_safe_float(closes[i])
+        if close is None or close <= 0:
+            continue
+        open_price = _peer_safe_float(opens[i], close)
+        high = _peer_safe_float(highs[i], close)
+        low = _peer_safe_float(lows[i], close)
+        clean["dates"].append(dates[i])
+        clean["opens"].append(open_price if open_price is not None else close)
+        clean["highs"].append(high if high is not None else close)
+        clean["lows"].append(low if low is not None else close)
+        clean["closes"].append(close)
+    return clean
+
+
 @app.get("/api/chart/{raw_ticker}")
 def get_chart_data(raw_ticker: str, period: str = "1y", interval: str = "1d", background_tasks: BackgroundTasks = None):
     try:
@@ -1115,10 +1151,11 @@ def get_chart_data(raw_ticker: str, period: str = "1y", interval: str = "1d", ba
         cache_identity = f"{ticker.upper()}:{period}:{interval}"
         cached_chart, cache_state = _cache_get_swr("chart", cache_identity, CACHE_STALE_CHART)
         if isinstance(cached_chart, dict):
+            clean_cached_chart = _sanitize_chart_payload(cached_chart)
             if cache_state == "stale":
                 _schedule_cache_refresh(background_tasks, f"chart:{cache_identity}", "chart", get_chart_data, ticker, period, interval, None)
-            return cached_chart
-        
+            return clean_cached_chart
+
         hist = pd.DataFrame()
         try:
             stock = yf.Ticker(ticker.upper())
@@ -1126,16 +1163,21 @@ def get_chart_data(raw_ticker: str, period: str = "1y", interval: str = "1d", ba
         except Exception:
             pass
 
-        if hist is None or hist.empty: 
+        if hist is None or hist.empty:
             return {"dates": [], "opens": [], "highs": [], "lows": [], "closes": []}
-            
-        if period == "max": hist = hist.loc['2000':]
-        result = {
+
+        if period == "max":
+            hist = hist.loc['2000':]
+
+        result = _sanitize_chart_payload({
             "dates": hist.index.strftime('%Y-%m-%d %H:%M:%S').tolist(),
-            "opens": hist['Open'].tolist(), "highs": hist['High'].tolist(),
-            "lows": hist['Low'].tolist(), "closes": hist['Close'].tolist()
-        }
-        _cache_write("chart", cache_identity, result, CACHE_TTL_CHART, ticker=ticker)
+            "opens": hist['Open'].tolist(),
+            "highs": hist['High'].tolist(),
+            "lows": hist['Low'].tolist(),
+            "closes": hist['Close'].tolist(),
+        })
+        if result["closes"]:
+            _cache_write("chart", cache_identity, result, CACHE_TTL_CHART, ticker=ticker)
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
