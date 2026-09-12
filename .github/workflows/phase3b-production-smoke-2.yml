@@ -13,17 +13,28 @@ jobs:
           python - <<'PY'
           import json, time, urllib.request
           base='https://sethistock-api.onrender.com/api/drivers'
-          def get(path, attempts=12):
-              last=None
-              for attempt in range(attempts):
-                  try:
-                      with urllib.request.urlopen(base+path, timeout=120) as r:
-                          return json.load(r)
-                  except Exception as e:
-                      last=e
-                      if attempt<attempts-1: time.sleep(min(8+attempt*4,30))
-              raise last
-          get('/extraction/schema')
+          def get(path):
+              with urllib.request.urlopen(base+path, timeout=120) as r:
+                  return json.load(r)
+
+          # Render may still serve the previous process briefly after a merge. Wait until
+          # the new semantic scorer is observable through the AWS result itself.
+          deadline=time.time()+300
+          last=None
+          while time.time()<deadline:
+              try:
+                  r=get('/AMZN/discover/aws_revenue?filings=1&limit=20')
+                  best=r['candidates'][0] if r.get('candidates') else {}
+                  concept=(best.get('qualified_concept') or '').lower()
+                  if any(x in concept for x in ('revenue','revenues','sales')):
+                      break
+                  last=best
+              except Exception as exc:
+                  last=repr(exc)
+              time.sleep(12)
+          else:
+              raise AssertionError(('semantic deployment not observed',last))
+
           checks=[('AMZN','aws_revenue'),('GOOGL','google_cloud_revenue'),('NVDA','data_center_revenue')]
           out={}
           for ticker,metric in checks:
