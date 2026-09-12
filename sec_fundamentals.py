@@ -26,10 +26,7 @@ router = APIRouter(prefix="/api/sec", tags=["SEC Fundamentals"])
 
 SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 SEC_COMPANYFACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
-SEC_USER_AGENT = os.getenv(
-    "SEC_USER_AGENT",
-    "SethiStock/2A https://github.com/ss-sanch/SethiStock",
-).strip()
+SEC_USER_AGENT = os.getenv("SEC_USER_AGENT", "").strip()
 SEC_REQUEST_TIMEOUT = float(os.getenv("SEC_REQUEST_TIMEOUT", "12"))
 SEC_MIN_REQUEST_INTERVAL = max(0.11, float(os.getenv("SEC_MIN_REQUEST_INTERVAL", "0.125")))
 SEC_TICKER_MAP_TTL = int(os.getenv("SEC_TICKER_MAP_TTL", "86400"))
@@ -45,6 +42,19 @@ _SEC_RATE_LOCK = threading.Lock()
 _SEC_LAST_REQUEST_AT = 0.0
 _SEC_CACHE_LOCK = threading.Lock()
 _SEC_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+def _sec_user_agent_configured():
+    """SEC asks automated clients to declare an organisation and contact email."""
+    return bool(SEC_USER_AGENT and "@" in SEC_USER_AGENT and " " in SEC_USER_AGENT)
+
+
+def _require_sec_user_agent():
+    if not _sec_user_agent_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="SEC_USER_AGENT is not configured. Set it to an organisation name and monitored contact email before enabling SEC requests.",
+        )
 
 
 def _cache_get(key: str, ttl_seconds: int):
@@ -77,6 +87,7 @@ def _wait_for_rate_slot():
 
 def _sec_get_json(url: str):
     """Fetch SEC JSON with fair-access pacing and bounded retry/backoff."""
+    _require_sec_user_agent()
     last_error: Optional[Exception] = None
     for attempt in range(SEC_MAX_RETRIES + 1):
         try:
@@ -228,6 +239,18 @@ def _concept_payload(companyfacts: Dict[str, Any], taxonomy: str, concept: str, 
         "label": concept_payload.get("label"),
         "description": concept_payload.get("description"),
         "units": units_out,
+    }
+
+
+@router.get("/status")
+def sec_status():
+    """Expose SEC readiness without leaking the configured contact address."""
+    return {
+        "configured": _sec_user_agent_configured(),
+        "source": "SEC EDGAR Company Facts",
+        "max_requests_per_second": round(1.0 / SEC_MIN_REQUEST_INTERVAL, 2),
+        "ticker_map_ttl_seconds": SEC_TICKER_MAP_TTL,
+        "companyfacts_ttl_seconds": SEC_COMPANYFACTS_TTL,
     }
 
 
