@@ -23,6 +23,11 @@ import requests
 from fastapi import APIRouter, HTTPException, Query
 
 import fundamentals_store
+from fundamentals_periods import (
+    PERIOD_ENGINE_VERSION,
+    build_period_view,
+    get_period_engine_schema,
+)
 from fundamentals_normalizer import (
     NORMALIZATION_SCHEMA_VERSION,
     NORMALIZED_METRIC_ORDER,
@@ -264,6 +269,10 @@ def sec_status():
             "ready": fundamentals_store.probe(),
             "ttl_seconds": fundamentals_store.FUNDAMENTALS_TTL_SECONDS,
             "sync_limit": fundamentals_store.FUNDAMENTALS_SYNC_LIMIT,
+        },
+        "period_engine": {
+            "version": PERIOD_ENGINE_VERSION,
+            "periods": ["annual", "quarterly", "ttm"],
         },
     }
 
@@ -519,4 +528,60 @@ def sec_normalized_fundamentals(
         limit,
         "unconfigured",
     )
+
+
+@router.get("/periods/schema")
+def sec_period_engine_schema():
+    """Describe Phase 2D Annual / Quarterly / TTM accounting semantics."""
+    return get_period_engine_schema()
+
+
+@router.get("/{ticker}/fundamentals/series")
+def sec_fundamental_series(
+    ticker: str,
+    period: str = Query("annual", pattern="^(annual|quarterly|ttm)$"),
+    metrics: Optional[str] = Query(None, max_length=300),
+    limit: int = Query(80, ge=1, le=200),
+):
+    """Return chart-ready Annual, Quarterly or TTM fundamentals.
+
+    Phase 2D derives these views from the canonical Phase 2B observations stored by
+    Phase 2C. The stored data remains raw-period normalized SEC history; this layer
+    classifies and derives accounting periods without mutating the database.
+    """
+    requested = _parse_requested_metrics(metrics)
+    unknown = [metric for metric in (requested or []) if metric not in NORMALIZED_METRIC_ORDER]
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown normalised metrics: {', '.join(sorted(set(unknown)))}",
+        )
+
+    normalized_response = sec_normalized_fundamentals(
+        ticker=ticker,
+        metrics=None,
+        limit=fundamentals_store.FUNDAMENTALS_SYNC_LIMIT,
+    )
+
+    try:
+        classified = build_period_view(
+            normalized_response.get("metrics") or {},
+            period=period,
+            metrics=requested or NORMALIZED_METRIC_ORDER,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    return {
+        "ticker": normalized_response.get("ticker"),
+        "cik": normalized_response.get("cik"),
+        "cik_padded": normalized_response.get("cik_padded"),
+        "title": normalized_response.get("title"),
+        "entity_name": normalized_response.get("entity_name"),
+        "schema_version": normalized_response.get("schema_version"),
+        **classified,
+        "source": normalized_response.get("source") or "SEC EDGAR Company Facts",
+        "storage": normalized_response.get("storage"),
+    }
 
