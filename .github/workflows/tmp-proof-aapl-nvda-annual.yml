@@ -1,0 +1,82 @@
+name: Focused AAPL NVDA Annual Driver proof
+
+on:
+  push:
+    branches: [proof-aapl-nvda-annual-fast]
+
+permissions:
+  contents: read
+
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Warm and verify AAPL and NVDA Annual Drivers
+        run: |
+          python - <<'PY'
+          import concurrent.futures
+          import json
+          import time
+          import urllib.parse
+          import urllib.request
+
+          base='https://sethistock-api.onrender.com'
+          headers={'User-Agent':'SethiStock focused annual proof'}
+
+          def get(path, timeout=240, attempts=4):
+              last=None
+              for attempt in range(1, attempts+1):
+                  try:
+                      req=urllib.request.Request(base+path,headers=headers)
+                      with urllib.request.urlopen(req,timeout=timeout) as r:
+                          return json.load(r)
+                  except Exception as exc:
+                      last=exc
+                      if attempt<attempts:
+                          time.sleep(3*attempt)
+              raise RuntimeError(f'{path}: {last!r}')
+
+          tasks=[]
+          for ticker in ('AAPL','NVDA'):
+              coverage=get(f'/api/drivers/{ticker}/coverage',90)
+              metrics=[row['key'] for row in coverage.get('metrics',[]) if row.get('verified') is True]
+              assert metrics, coverage
+              for metric in metrics:
+                  tasks.append((ticker,metric))
+
+          def path_for(ticker,metric):
+              return f'/api/drivers/{ticker}/history/{urllib.parse.quote(metric)}?filings=16&period=annual&limit=40'
+
+          def warm(item):
+              ticker,metric=item
+              started=time.time()
+              first=get(path_for(ticker,metric))
+              if first.get('cache_state') in {'stale_while_revalidate','stale','stale_refreshing','refreshing'}:
+                  time.sleep(5)
+              second=get(path_for(ticker,metric),120,2)
+              result={
+                  'ticker':ticker,
+                  'metric':metric,
+                  'first_state':first.get('cache_state'),
+                  'second_state':second.get('cache_state'),
+                  'persistent':second.get('cache_persistent'),
+                  'verified':second.get('verified'),
+                  'observations':second.get('observation_count',len(second.get('observations') or [])),
+                  'seconds':round(time.time()-started,3),
+              }
+              print('ANNUAL_PROOF='+json.dumps(result,separators=(',',':')),flush=True)
+              assert result['verified'] is True, result
+              assert result['persistent'] is True, result
+              assert result['second_state'] in {'fresh','fresh_after_wait'}, result
+              return result
+
+          with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+              results=list(pool.map(warm,tasks))
+
+          by_ticker={ticker:[r for r in results if r['ticker']==ticker] for ticker in ('AAPL','NVDA')}
+          assert all(by_ticker.values()), by_ticker
+          print('AAPL_ANNUAL_FRESH_OK='+str(len(by_ticker['AAPL'])),flush=True)
+          print('NVDA_ANNUAL_FRESH_OK='+str(len(by_ticker['NVDA'])),flush=True)
+          print('AAPL_NVDA_ANNUAL_FAST_PATH_OK',flush=True)
+          PY
