@@ -31,7 +31,8 @@ jobs:
           import urllib.request
 
           base = os.environ['SETHISTOCK_API'].rstrip('/')
-          headers = {'User-Agent': 'SethiStock Company Driver cache warmer/1.0'}
+          headers = {'User-Agent': 'SethiStock Company Driver cache warmer/1.1'}
+          warm_periods = ('quarterly', 'annual')
 
           def get_json(path, timeout=180, attempts=4):
               last = None
@@ -65,15 +66,17 @@ jobs:
               verified = [row['key'] for row in coverage.get('metrics', []) if row.get('verified') is True]
               coverage_summary[ticker] = verified
               for metric in verified:
-                  tasks.append((ticker, metric))
+                  for period in warm_periods:
+                      tasks.append((ticker, metric, period))
 
           print('WARM_TARGETS=' + json.dumps({k: len(v) for k, v in coverage_summary.items()}, sort_keys=True), flush=True)
+          print('WARM_PERIODS=' + ','.join(warm_periods), flush=True)
 
           def warm_one(item):
-              ticker, metric = item
+              ticker, metric, period = item
               path = (
                   f'/api/drivers/{urllib.parse.quote(ticker)}/history/{urllib.parse.quote(metric)}'
-                  '?filings=16&period=quarterly&limit=40'
+                  f'?filings=16&period={urllib.parse.quote(period)}&limit=40'
               )
               started = time.time()
               payload = get_json(path)
@@ -90,6 +93,7 @@ jobs:
               return {
                   'ticker': ticker,
                   'metric': metric,
+                  'period': period,
                   'verified': payload.get('verified'),
                   'observations': payload.get('observation_count', len(payload.get('observations') or [])),
                   'cache_state': state,
@@ -108,17 +112,25 @@ jobs:
                       results.append(result)
                       print('WARM_OK=' + json.dumps(result, separators=(',', ':')), flush=True)
                   except Exception as exc:
-                      failures.append({'ticker': item[0], 'metric': item[1], 'error': repr(exc)})
+                      failures.append({'ticker': item[0], 'metric': item[1], 'period': item[2], 'error': repr(exc)})
                       print('WARM_FAIL=' + json.dumps(failures[-1], separators=(',', ':')), flush=True)
 
           persistent = sum(1 for row in results if row.get('persistent') is True)
           verified = sum(1 for row in results if row.get('verified') is True)
+          by_period = {
+              period: {
+                  'completed': sum(1 for row in results if row.get('period') == period),
+                  'persistent': sum(1 for row in results if row.get('period') == period and row.get('persistent') is True),
+              }
+              for period in warm_periods
+          }
           summary = {
               'companies': len(companies),
               'targets': len(tasks),
               'completed': len(results),
               'verified': verified,
               'persistent': persistent,
+              'periods': by_period,
               'failures': len(failures),
           }
           print('COMPANY_DRIVER_WARMER_SUMMARY=' + json.dumps(summary, separators=(',', ':')), flush=True)
@@ -127,5 +139,8 @@ jobs:
               raise AssertionError(f'Company Driver warmer failures: {failures}')
           if verified != len(results) or persistent != len(results):
               raise AssertionError(f'Unexpected non-persistent/non-verified histories: {summary}')
+          for period in warm_periods:
+              if by_period[period]['completed'] != len(tasks) // len(warm_periods):
+                  raise AssertionError(f'Incomplete {period} warmer coverage: {summary}')
           print('COMPANY_DRIVER_CACHE_WARM_OK', flush=True)
           PY
