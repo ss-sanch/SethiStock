@@ -1,0 +1,102 @@
+name: One-off Annual Company Driver warm
+
+on:
+  push:
+    branches: [oneoff-warm-annual-drivers]
+
+permissions:
+  contents: read
+
+jobs:
+  warm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Warm all verified Annual Company Drivers now
+        run: |
+          python - <<'PY'
+          import concurrent.futures
+          import json
+          import time
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          base='https://sethistock-api.onrender.com'
+          headers={'User-Agent':'SethiStock one-off annual warmer'}
+
+          def get(path, timeout=240, attempts=4):
+              last=None
+              for attempt in range(1, attempts+1):
+                  try:
+                      req=urllib.request.Request(base+path, headers=headers)
+                      with urllib.request.urlopen(req, timeout=timeout) as response:
+                          return json.load(response)
+                  except Exception as exc:
+                      last=exc
+                      if attempt < attempts:
+                          time.sleep(4*attempt)
+              raise RuntimeError(f'{path}: {last!r}')
+
+          companies=[row['ticker'] for row in get('/api/drivers/companies',60).get('companies',[])]
+          assert len(companies)==10, companies
+          tasks=[]
+          for ticker in companies:
+              coverage=get(f'/api/drivers/{urllib.parse.quote(ticker)}/coverage',90)
+              for row in coverage.get('metrics',[]):
+                  if row.get('verified') is True:
+                      tasks.append((ticker,row['key']))
+          assert len(tasks)==25, tasks
+
+          def warm(item):
+              ticker,metric=item
+              path=f'/api/drivers/{urllib.parse.quote(ticker)}/history/{urllib.parse.quote(metric)}?filings=16&period=annual&limit=40'
+              started=time.time()
+              payload=get(path)
+              state=payload.get('cache_state')
+              if state in {'stale_while_revalidate','stale','stale_refreshing','refreshing'}:
+                  time.sleep(5)
+                  payload=get(path,120,2)
+                  state=payload.get('cache_state')
+              result={
+                  'ticker':ticker,
+                  'metric':metric,
+                  'verified':payload.get('verified'),
+                  'persistent':payload.get('cache_persistent'),
+                  'observations':payload.get('observation_count',len(payload.get('observations') or [])),
+                  'cache_state':state,
+                  'seconds':round(time.time()-started,3),
+              }
+              print('ANNUAL_OK='+json.dumps(result,separators=(',',':')),flush=True)
+              return result
+
+          results=[]
+          failures=[]
+          with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+              future_map={pool.submit(warm,item):item for item in tasks}
+              for future in concurrent.futures.as_completed(future_map):
+                  item=future_map[future]
+                  try:
+                      results.append(future.result())
+                  except Exception as exc:
+                      failures.append({'ticker':item[0],'metric':item[1],'error':repr(exc)})
+                      print('ANNUAL_FAIL='+json.dumps(failures[-1],separators=(',',':')),flush=True)
+
+          assert not failures, failures
+          assert len(results)==25
+          assert all(row['verified'] is True for row in results), results
+          assert all(row['persistent'] is True for row in results), results
+
+          for ticker in ('AAPL','NVDA'):
+              ticker_rows=[row for row in results if row['ticker']==ticker]
+              assert ticker_rows, ticker
+              for row in ticker_rows:
+                  metric=row['metric']
+                  path=f'/api/drivers/{ticker}/history/{urllib.parse.quote(metric)}?filings=16&period=annual&limit=40'
+                  second=get(path,120,2)
+                  assert second.get('cache_persistent') is True, second
+                  assert second.get('cache_state') in {'fresh','fresh_after_wait'}, second
+              print(f'{ticker}_ANNUAL_SECOND_HIT_FRESH',flush=True)
+
+          print('ANNUAL_25_OF_25_PERSISTED_OK',flush=True)
+          PY
