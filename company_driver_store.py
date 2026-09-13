@@ -18,6 +18,7 @@ from uuid import uuid4
 import requests
 
 
+STORE_VERSION = "3d-driver-store-v1"
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").replace("/rest/v1", "").rstrip("/")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 OBSERVATIONS_TABLE = os.getenv("SETHISTOCK_DRIVER_OBSERVATIONS_TABLE", "sethistock_driver_observations")
@@ -57,7 +58,14 @@ def _table_url(table: str) -> str:
     return f"{SUPABASE_URL}/rest/v1/{table}"
 
 
-def _request(method: str, table: str, *, params: Optional[Dict[str, str]] = None, payload: Any = None, prefer: Optional[str] = None):
+def _request(
+    method: str,
+    table: str,
+    *,
+    params: Optional[Dict[str, str]] = None,
+    payload: Any = None,
+    prefer: Optional[str] = None,
+):
     if not is_configured():
         raise DriverStoreError("Supabase Company Driver storage is not configured.")
     try:
@@ -98,11 +106,11 @@ def _parse_timestamp(value: Any) -> Optional[datetime]:
         return None
 
 
-def _key(ticker: str, metric: str, history_version: str, period: str, filing_limit: int) -> str:
+def _key(ticker: str, metric: str, period: str, filing_limit: int) -> str:
     return "|".join([
         str(ticker or "").strip().upper(),
         str(metric or "").strip().lower(),
-        str(history_version or ""),
+        STORE_VERSION,
         str(period or "").strip().lower(),
         str(int(filing_limit)),
     ])
@@ -145,7 +153,14 @@ def _delete_sync_rows(sync_id: str) -> None:
         pass
 
 
-def get_sync_state(ticker: str, metric: str, history_version: str, period: str, filing_limit: int) -> Optional[Dict[str, Any]]:
+def get_sync_state(
+    ticker: str,
+    metric: str,
+    period: str,
+    filing_limit: int,
+    *,
+    store_version: str = STORE_VERSION,
+) -> Optional[Dict[str, Any]]:
     if not is_configured():
         return None
     response = _request(
@@ -154,7 +169,7 @@ def get_sync_state(ticker: str, metric: str, history_version: str, period: str, 
         params={
             "ticker": f"eq.{str(ticker).strip().upper()}",
             "metric": f"eq.{str(metric).strip().lower()}",
-            "history_version": f"eq.{history_version}",
+            "history_version": f"eq.{store_version}",
             "period": f"eq.{str(period).strip().lower()}",
             "filing_limit": f"eq.{int(filing_limit)}",
             "select": "ticker,metric,history_version,period,filing_limit,active_sync_id,source_mode,data_state,history_meta,observation_count,coverage_start,coverage_end,source_latest_filing,synced_at,expires_at",
@@ -218,19 +233,29 @@ def _restore_observation(row: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
-def load_history(*, ticker: str, metric: str, history_version: str, period: str, filing_limit: int, observation_limit: int) -> Optional[Dict[str, Any]]:
-    state = get_sync_state(ticker, metric, history_version, period, filing_limit)
+def load_history(
+    *,
+    ticker: str,
+    metric: str,
+    period: str,
+    filing_limit: int,
+    observation_limit: int,
+) -> Optional[Dict[str, Any]]:
+    state = get_sync_state(ticker, metric, period, filing_limit)
     if not state or not state.get("active_sync_id"):
         return None
     raw_rows = _read_observations(str(state["active_sync_id"]))
     observations = [_restore_observation(row) for row in raw_rows]
     observations = observations[-max(1, min(int(observation_limit), MAX_STORED_OBSERVATIONS)):]
-    dates = [str(row.get("end") or row.get("instant") or "") for row in observations if row.get("end") or row.get("instant")]
+    dates = [
+        str(row.get("end") or row.get("instant") or "")
+        for row in observations
+        if row.get("end") or row.get("instant")
+    ]
     payload = dict(state.get("history_meta") or {})
     payload.update({
         "ticker": str(ticker).strip().upper(),
         "metric": str(metric).strip().lower(),
-        "history_version": history_version,
         "period": str(period).strip().lower(),
         "data_state": state.get("data_state") or payload.get("data_state") or "verified_history",
         "source_mode": state.get("source_mode") or payload.get("source_mode"),
@@ -242,6 +267,7 @@ def load_history(*, ticker: str, metric: str, history_version: str, period: str,
             "end": max(dates) if dates else None,
         },
         "cache_persistent": True,
+        "cache_store_version": str(state.get("history_version") or STORE_VERSION),
         "cache_synced_at": state.get("synced_at"),
         "cache_expires_at": state.get("expires_at"),
         "cache_total_observation_count": int(state.get("observation_count") or 0),
@@ -251,7 +277,12 @@ def load_history(*, ticker: str, metric: str, history_version: str, period: str,
     return payload
 
 
-def persist_history(history: Dict[str, Any], *, filing_limit: int, ttl_seconds: int = DRIVER_TTL_SECONDS) -> Dict[str, Any]:
+def persist_history(
+    history: Dict[str, Any],
+    *,
+    filing_limit: int,
+    ttl_seconds: int = DRIVER_TTL_SECONDS,
+) -> Dict[str, Any]:
     if not is_configured():
         raise DriverStoreError("Supabase Company Driver storage is not configured.")
     if not history.get("verified") or history.get("data_state") != "verified_history":
@@ -259,15 +290,15 @@ def persist_history(history: Dict[str, Any], *, filing_limit: int, ttl_seconds: 
 
     ticker = str(history.get("ticker") or "").strip().upper()
     metric = str(history.get("metric") or "").strip().lower()
-    history_version = str(history.get("history_version") or "").strip()
+    extractor_history_version = str(history.get("history_version") or "").strip()
     period = str(history.get("period") or "").strip().lower()
     observations = list(history.get("observations") or [])
-    if not ticker or not metric or not history_version or period not in {"quarterly", "annual", "reported"}:
+    if not ticker or not metric or not extractor_history_version or period not in {"quarterly", "annual", "reported"}:
         raise DriverStoreError("Company Driver history identity is incomplete.")
     if not observations:
         raise DriverStoreError("Refusing to persist an empty Company Driver history.")
 
-    previous = get_sync_state(ticker, metric, history_version, period, filing_limit)
+    previous = get_sync_state(ticker, metric, period, filing_limit)
     previous_sync_id = previous.get("active_sync_id") if previous else None
     sync_id = str(uuid4())
     records: List[Dict[str, Any]] = []
@@ -285,7 +316,7 @@ def persist_history(history: Dict[str, Any], *, filing_limit: int, ttl_seconds: 
             "observation_key": _observation_key(row),
             "ticker": ticker,
             "metric": metric,
-            "history_version": history_version,
+            "history_version": STORE_VERSION,
             "period": period,
             "filing_limit": int(filing_limit),
             "period_type": row.get("period_type"),
@@ -309,21 +340,28 @@ def persist_history(history: Dict[str, Any], *, filing_limit: int, ttl_seconds: 
     if not records:
         raise DriverStoreError("No persistable Company Driver observations were produced.")
 
+    # Keep the extractor's own history_version here as provenance. The DB key uses
+    # STORE_VERSION so Inline XBRL, derived ratios and filing-table histories all
+    # share one persistence schema instead of fragmenting the cache by source mode.
     history_meta = {
         key: value for key, value in history.items()
         if key not in {
             "observations", "observation_count", "coverage", "ticker", "metric",
-            "history_version", "period", "cache_state", "cache_fresh",
-            "cache_persistent", "cache_synced_at", "cache_expires_at",
+            "period", "cache_state", "cache_fresh", "cache_persistent",
+            "cache_store_version", "cache_synced_at", "cache_expires_at",
             "cache_total_observation_count",
         }
     }
-    coverage_dates = [str(row.get("end") or row.get("instant") or "") for row in observations if row.get("end") or row.get("instant")]
+    coverage_dates = [
+        str(row.get("end") or row.get("instant") or "")
+        for row in observations
+        if row.get("end") or row.get("instant")
+    ]
     now = datetime.now(timezone.utc)
     sync_row = {
         "ticker": ticker,
         "metric": metric,
-        "history_version": history_version,
+        "history_version": STORE_VERSION,
         "period": period,
         "filing_limit": int(filing_limit),
         "active_sync_id": sync_id,
@@ -353,6 +391,8 @@ def persist_history(history: Dict[str, Any], *, filing_limit: int, ttl_seconds: 
         _delete_sync_rows(sync_id)
         raise
 
+    # Delete only the snapshot that was active before this refresh began. A newer
+    # snapshot activated by another worker can therefore never be removed here.
     if previous_sync_id and str(previous_sync_id) != sync_id:
         _delete_sync_rows(str(previous_sync_id))
 
@@ -360,7 +400,8 @@ def persist_history(history: Dict[str, Any], *, filing_limit: int, ttl_seconds: 
         "sync_id": sync_id,
         "ticker": ticker,
         "metric": metric,
-        "history_version": history_version,
+        "store_version": STORE_VERSION,
+        "extractor_history_version": extractor_history_version,
         "period": period,
         "filing_limit": int(filing_limit),
         "observation_count": len(records),
@@ -369,43 +410,66 @@ def persist_history(history: Dict[str, Any], *, filing_limit: int, ttl_seconds: 
     }
 
 
-def _build_and_persist(*, ticker: str, metric: Dict[str, Any], history_version: str, filing_limit: int, period: str, builder: Callable[..., Dict[str, Any]]) -> Dict[str, Any]:
-    result = builder(
+def _build_history(
+    *,
+    ticker: str,
+    metric: Dict[str, Any],
+    filing_limit: int,
+    period: str,
+    builder: Callable[..., Dict[str, Any]],
+) -> Dict[str, Any]:
+    return builder(
         ticker,
         metric,
         filing_limit=filing_limit,
         period=period,
         observation_limit=MAX_STORED_OBSERVATIONS,
     )
-    if result.get("verified") and result.get("data_state") == "verified_history" and result.get("observations"):
-        persist_history(result, filing_limit=filing_limit)
-    return result
 
 
-def _background_refresh(key: str, *, ticker: str, metric: Dict[str, Any], history_version: str, filing_limit: int, period: str, builder: Callable[..., Dict[str, Any]]) -> None:
+def _background_refresh(
+    key: str,
+    *,
+    ticker: str,
+    metric: Dict[str, Any],
+    filing_limit: int,
+    period: str,
+    builder: Callable[..., Dict[str, Any]],
+) -> None:
     try:
         lock = _lock_for(key)
         if not lock.acquire(blocking=False):
             return
         try:
-            _build_and_persist(
+            result = _build_history(
                 ticker=ticker,
                 metric=metric,
-                history_version=history_version,
                 filing_limit=filing_limit,
                 period=period,
                 builder=builder,
             )
+            if result.get("verified") and result.get("data_state") == "verified_history" and result.get("observations"):
+                persist_history(result, filing_limit=filing_limit)
         finally:
             lock.release()
     except Exception:
+        # A stale snapshot is preferable to turning a background refresh failure
+        # into a user-facing error. The next request can retry after the same TTL.
         pass
     finally:
         with _REFRESHING_GUARD:
             _REFRESHING.discard(key)
 
 
-def get_or_refresh_history(*, ticker: str, metric: Dict[str, Any], history_version: str, filing_limit: int, period: str, observation_limit: int, builder: Callable[..., Dict[str, Any]]) -> Dict[str, Any]:
+def get_or_refresh_history(
+    *,
+    ticker: str,
+    metric: Dict[str, Any],
+    filing_limit: int,
+    period: str,
+    observation_limit: int,
+    builder: Callable[..., Dict[str, Any]],
+) -> Dict[str, Any]:
     """Return persistent history with fresh-hit, SWR, miss-refresh and fail-open states."""
     symbol = str(ticker or "").strip().upper()
     metric_key = str(metric.get("key") or "").strip().lower()
@@ -414,16 +478,25 @@ def get_or_refresh_history(*, ticker: str, metric: Dict[str, Any], history_versi
     observation_limit = max(1, min(int(observation_limit), MAX_STORED_OBSERVATIONS))
 
     if not is_configured():
-        result = builder(symbol, metric, filing_limit=filing_limit, period=period_key, observation_limit=observation_limit)
-        result.update({"cache_state": "store_not_configured", "cache_persistent": False})
+        result = builder(
+            symbol,
+            metric,
+            filing_limit=filing_limit,
+            period=period_key,
+            observation_limit=observation_limit,
+        )
+        result.update({
+            "cache_state": "store_not_configured",
+            "cache_persistent": False,
+            "cache_store_version": STORE_VERSION,
+        })
         return result
 
-    cache_key = _key(symbol, metric_key, history_version, period_key, filing_limit)
+    cache_key = _key(symbol, metric_key, period_key, filing_limit)
     try:
         cached = load_history(
             ticker=symbol,
             metric=metric_key,
-            history_version=history_version,
             period=period_key,
             filing_limit=filing_limit,
             observation_limit=observation_limit,
@@ -447,7 +520,6 @@ def get_or_refresh_history(*, ticker: str, metric: Dict[str, Any], history_versi
                     "key": cache_key,
                     "ticker": symbol,
                     "metric": metric,
-                    "history_version": history_version,
                     "filing_limit": filing_limit,
                     "period": period_key,
                     "builder": builder,
@@ -460,11 +532,12 @@ def get_or_refresh_history(*, ticker: str, metric: Dict[str, Any], history_versi
 
     lock = _lock_for(cache_key)
     with lock:
+        # Another request in this Render process may have filled the cache while we
+        # waited for the single-flight lock.
         try:
             cached = load_history(
                 ticker=symbol,
                 metric=metric_key,
-                history_version=history_version,
                 period=period_key,
                 filing_limit=filing_limit,
                 observation_limit=observation_limit,
@@ -474,42 +547,57 @@ def get_or_refresh_history(*, ticker: str, metric: Dict[str, Any], history_versi
         if cached and cached.get("cache_fresh"):
             cached["cache_state"] = "fresh_after_wait"
             return cached
+
+        # Build once. If Supabase subsequently fails, return this already-built SEC
+        # result rather than repeating an expensive filing extraction.
+        result = _build_history(
+            ticker=symbol,
+            metric=metric,
+            filing_limit=filing_limit,
+            period=period_key,
+            builder=builder,
+        )
+        if not (result.get("verified") and result.get("data_state") == "verified_history" and result.get("observations")):
+            result.update({
+                "cache_state": "not_persisted",
+                "cache_persistent": False,
+                "cache_store_version": STORE_VERSION,
+            })
+            result["observations"] = list(result.get("observations") or [])[-observation_limit:]
+            result["observation_count"] = len(result["observations"])
+            return result
+
         try:
-            result = _build_and_persist(
+            persist_history(result, filing_limit=filing_limit)
+            persisted = load_history(
                 ticker=symbol,
-                metric=metric,
-                history_version=history_version,
-                filing_limit=filing_limit,
+                metric=metric_key,
                 period=period_key,
-                builder=builder,
+                filing_limit=filing_limit,
+                observation_limit=observation_limit,
             )
-            if result.get("verified") and result.get("observations"):
-                try:
-                    persisted = load_history(
-                        ticker=symbol,
-                        metric=metric_key,
-                        history_version=history_version,
-                        period=period_key,
-                        filing_limit=filing_limit,
-                        observation_limit=observation_limit,
-                    )
-                except DriverStoreError:
-                    persisted = None
-                if persisted:
-                    persisted["cache_state"] = "miss_refreshed"
-                    return persisted
-            result.update({"cache_state": "not_persisted", "cache_persistent": False})
-            return result
         except DriverStoreError:
-            result = builder(symbol, metric, filing_limit=filing_limit, period=period_key, observation_limit=observation_limit)
-            result.update({"cache_state": "store_error_fallback", "cache_persistent": False})
-            return result
+            persisted = None
+
+        if persisted:
+            persisted["cache_state"] = "miss_refreshed"
+            return persisted
+
+        result["observations"] = list(result.get("observations") or [])[-observation_limit:]
+        result["observation_count"] = len(result["observations"])
+        result.update({
+            "cache_state": "store_error_fallback",
+            "cache_persistent": False,
+            "cache_store_version": STORE_VERSION,
+        })
+        return result
 
 
 def storage_status() -> Dict[str, Any]:
     return {
         "configured": is_configured(),
         "reachable": probe() if is_configured() else False,
+        "store_version": STORE_VERSION,
         "ttl_seconds": DRIVER_TTL_SECONDS,
         "max_stored_observations": MAX_STORED_OBSERVATIONS,
         "observations_table": OBSERVATIONS_TABLE,
