@@ -1,0 +1,131 @@
+name: Company Driver Cache Warmer
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 */12 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sethistock-company-driver-cache-warmer
+  cancel-in-progress: false
+
+jobs:
+  warm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Warm verified flagship Company Drivers
+        env:
+          SETHISTOCK_API: https://sethistock-api.onrender.com
+        run: |
+          python - <<'PY'
+          import concurrent.futures
+          import json
+          import os
+          import time
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          base = os.environ['SETHISTOCK_API'].rstrip('/')
+          headers = {'User-Agent': 'SethiStock Company Driver cache warmer/1.0'}
+
+          def get_json(path, timeout=180, attempts=4):
+              last = None
+              for attempt in range(1, attempts + 1):
+                  try:
+                      req = urllib.request.Request(base + path, headers=headers)
+                      with urllib.request.urlopen(req, timeout=timeout) as response:
+                          return json.load(response)
+                  except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ConnectionError) as exc:
+                      last = repr(exc)
+                      if attempt < attempts:
+                          time.sleep(4 * attempt)
+              raise RuntimeError(f'{path}: {last}')
+
+          companies_payload = get_json('/api/drivers/companies', timeout=60)
+          companies = [row['ticker'] for row in companies_payload.get('companies', [])]
+          assert len(companies) == 10, companies_payload
+          assert 'GOOGL' in companies, companies
+
+          # GOOG and GOOGL share one Alphabet filing history. Validate the public
+          # alias on every warmer run so both share the same persisted cache keys.
+          goog = get_json('/api/drivers/GOOG', timeout=60)
+          assert goog.get('ticker') == 'GOOGL', goog
+          assert goog.get('requested_ticker') == 'GOOG', goog
+          print('GOOG_ALIAS_OK=GOOG->GOOGL', flush=True)
+
+          tasks = []
+          coverage_summary = {}
+          for ticker in companies:
+              coverage = get_json(f'/api/drivers/{urllib.parse.quote(ticker)}/coverage', timeout=90)
+              verified = [row['key'] for row in coverage.get('metrics', []) if row.get('verified') is True]
+              coverage_summary[ticker] = verified
+              for metric in verified:
+                  tasks.append((ticker, metric))
+
+          print('WARM_TARGETS=' + json.dumps({k: len(v) for k, v in coverage_summary.items()}, sort_keys=True), flush=True)
+
+          def warm_one(item):
+              ticker, metric = item
+              path = (
+                  f'/api/drivers/{urllib.parse.quote(ticker)}/history/{urllib.parse.quote(metric)}'
+                  '?filings=16&period=quarterly&limit=40'
+              )
+              started = time.time()
+              payload = get_json(path)
+              state = payload.get('cache_state')
+
+              # Stale snapshots are already instant for users and start SWR refresh.
+              # Touch the key again after a short wait so the next user normally sees
+              # the refreshed snapshot rather than being the request that initiates it.
+              if state in {'stale_while_revalidate', 'stale', 'stale_refreshing', 'refreshing'}:
+                  time.sleep(5)
+                  payload = get_json(path, timeout=120, attempts=2)
+                  state = payload.get('cache_state')
+
+              return {
+                  'ticker': ticker,
+                  'metric': metric,
+                  'verified': payload.get('verified'),
+                  'observations': payload.get('observation_count', len(payload.get('observations') or [])),
+                  'cache_state': state,
+                  'persistent': payload.get('cache_persistent'),
+                  'seconds': round(time.time() - started, 3),
+              }
+
+          results = []
+          failures = []
+          with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+              future_map = {pool.submit(warm_one, item): item for item in tasks}
+              for future in concurrent.futures.as_completed(future_map):
+                  item = future_map[future]
+                  try:
+                      result = future.result()
+                      results.append(result)
+                      print('WARM_OK=' + json.dumps(result, separators=(',', ':')), flush=True)
+                  except Exception as exc:
+                      failures.append({'ticker': item[0], 'metric': item[1], 'error': repr(exc)})
+                      print('WARM_FAIL=' + json.dumps(failures[-1], separators=(',', ':')), flush=True)
+
+          persistent = sum(1 for row in results if row.get('persistent') is True)
+          verified = sum(1 for row in results if row.get('verified') is True)
+          summary = {
+              'companies': len(companies),
+              'targets': len(tasks),
+              'completed': len(results),
+              'verified': verified,
+              'persistent': persistent,
+              'failures': len(failures),
+          }
+          print('COMPANY_DRIVER_WARMER_SUMMARY=' + json.dumps(summary, separators=(',', ':')), flush=True)
+
+          if failures:
+              raise AssertionError(f'Company Driver warmer failures: {failures}')
+          if verified != len(results) or persistent != len(results):
+              raise AssertionError(f'Unexpected non-persistent/non-verified histories: {summary}')
+          print('COMPANY_DRIVER_CACHE_WARM_OK', flush=True)
+          PY
