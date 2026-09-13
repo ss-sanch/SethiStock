@@ -1,0 +1,117 @@
+name: Temporary Phase 3E cache final proof
+
+on:
+  push:
+    branches: [phase3e-cache-final-proof]
+
+permissions:
+  contents: read
+
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Verify JPM fix and all flagship Driver caches in production
+        run: |
+          python - <<'PY'
+          import concurrent.futures
+          import json
+          import time
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          base='https://sethistock-api.onrender.com'
+          headers={'User-Agent':'SethiStock Phase3E final cache proof'}
+
+          def get(path, timeout=180):
+              req=urllib.request.Request(base+path,headers=headers)
+              with urllib.request.urlopen(req,timeout=timeout) as r:
+                  return json.load(r)
+
+          # Wait for Render to serve the merged JPM large-filing path. Old production
+          # returns 413 here; the new deployment returns verified persisted history.
+          jpm_path='/api/drivers/JPM/history/cet1_ratio?filings=16&period=quarterly&limit=40'
+          deadline=time.time()+900
+          jpm=None
+          last=None
+          while time.time()<deadline:
+              try:
+                  candidate=get(jpm_path,timeout=240)
+                  if candidate.get('verified') is True and candidate.get('observation_count',0)>0:
+                      jpm=candidate
+                      break
+                  last=candidate
+              except urllib.error.HTTPError as exc:
+                  last=f'HTTP {exc.code}: '+exc.read().decode('utf-8','replace')[:300]
+              except Exception as exc:
+                  last=repr(exc)
+              print('WAITING_FOR_JPM_DEPLOY',last,flush=True)
+              time.sleep(20)
+          assert jpm is not None, ('JPM CET1 deployment did not become ready',last)
+          assert jpm.get('cache_persistent') is True, jpm
+          assert jpm.get('source_mode')=='sec_filing_table', jpm
+          assert any(row.get('extraction_method')=='sec_filing_table_raw_row' for row in jpm.get('observations',[])), jpm
+          print('JPM_CET1_PERSISTED_OK='+json.dumps({
+              'cache_state':jpm.get('cache_state'),
+              'observations':jpm.get('observation_count'),
+              'coverage':jpm.get('coverage'),
+              'latest':(jpm.get('observations') or [{}])[-1].get('value'),
+          },separators=(',',':')),flush=True)
+
+          time.sleep(3)
+          jpm2=get(jpm_path,timeout=120)
+          assert jpm2.get('cache_persistent') is True and jpm2.get('observation_count',0)>0, jpm2
+          assert jpm2.get('cache_state') in {'fresh','fresh_after_wait'}, jpm2
+          print('JPM_CET1_SECOND_HIT_OK='+str(jpm2.get('cache_state')),flush=True)
+
+          goog=get('/api/drivers/GOOG',timeout=60)
+          assert goog.get('ticker')=='GOOGL' and goog.get('requested_ticker')=='GOOG', goog
+          print('GOOG_ALIAS_OK=GOOG->GOOGL',flush=True)
+
+          companies_payload=get('/api/drivers/companies',timeout=60)
+          companies=[row['ticker'] for row in companies_payload.get('companies',[])]
+          assert len(companies)==10, companies
+          targets=[]
+          for ticker in companies:
+              coverage=get(f'/api/drivers/{urllib.parse.quote(ticker)}/coverage',timeout=90)
+              for row in coverage.get('metrics',[]):
+                  if row.get('verified') is True:
+                      targets.append((ticker,row['key']))
+          assert len(targets)==25, targets
+
+          def check(item):
+              ticker,metric=item
+              path=f'/api/drivers/{urllib.parse.quote(ticker)}/history/{urllib.parse.quote(metric)}?filings=16&period=quarterly&limit=40'
+              payload=get(path,timeout=300)
+              return {
+                  'ticker':ticker,
+                  'metric':metric,
+                  'verified':payload.get('verified'),
+                  'persistent':payload.get('cache_persistent'),
+                  'observations':payload.get('observation_count',len(payload.get('observations') or [])),
+                  'cache_state':payload.get('cache_state'),
+              }
+
+          results=[]
+          failures=[]
+          with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+              future_map={pool.submit(check,item):item for item in targets}
+              for future in concurrent.futures.as_completed(future_map):
+                  item=future_map[future]
+                  try:
+                      result=future.result()
+                      results.append(result)
+                      print('DRIVER_OK='+json.dumps(result,separators=(',',':')),flush=True)
+                  except Exception as exc:
+                      failures.append({'ticker':item[0],'metric':item[1],'error':repr(exc)})
+                      print('DRIVER_FAIL='+json.dumps(failures[-1],separators=(',',':')),flush=True)
+
+          assert not failures, failures
+          assert len(results)==25, len(results)
+          assert all(row['verified'] is True for row in results), results
+          assert all(row['persistent'] is True for row in results), results
+          assert all(row['observations']>0 for row in results), results
+          print('PHASE3E_25_OF_25_CACHE_OK')
+          PY
