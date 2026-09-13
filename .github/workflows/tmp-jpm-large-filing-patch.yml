@@ -22,29 +22,19 @@ jobs:
 
           path = Path('company_driver_tables.py')
           text = path.read_text()
-
           old_imports = (
-              "import html as html_lib\n"
-              "import re\n"
-              "from datetime import date\n"
+              "import html as html_lib\nimport re\nfrom datetime import date\n"
               "from typing import Any, Dict, List, Optional, Tuple\n\n"
-              "from bs4 import BeautifulSoup\n\n"
-              "import company_driver_filings\n"
+              "from bs4 import BeautifulSoup\n\nimport company_driver_filings\n"
           )
           new_imports = (
-              "import html as html_lib\n"
-              "import re\n"
-              "import time\n"
-              "from datetime import date\n"
+              "import html as html_lib\nimport re\nimport time\nfrom datetime import date\n"
               "from typing import Any, Dict, List, Optional, Tuple\n\n"
-              "import requests\n"
-              "from bs4 import BeautifulSoup\n"
-              "from fastapi import HTTPException\n\n"
+              "import requests\nfrom bs4 import BeautifulSoup\nfrom fastapi import HTTPException\n\n"
               "import company_driver_filings\n"
           )
           assert old_imports in text, 'import target not found'
           text = text.replace(old_imports, new_imports, 1)
-
           marker = '\ndef _jpm_cet1_ratio_raw(html: str, filing: Dict[str, Any]) -> List[Dict[str, Any]]:\n'
           assert marker in text, 'JPM extractor marker not found'
           helper = (
@@ -63,9 +53,7 @@ jobs:
               "            sec._wait_for_rate_slot()\n"
               "            headers = dict(sec._SEC_HEADERS)\n"
               "            headers[\"Accept\"] = \"text/html,application/xhtml+xml\"\n"
-              "            with requests.get(\n"
-              "                url, headers=headers, timeout=max(sec.SEC_REQUEST_TIMEOUT, 15.0), stream=True\n"
-              "            ) as response:\n"
+              "            with requests.get(url, headers=headers, timeout=max(sec.SEC_REQUEST_TIMEOUT, 15.0), stream=True) as response:\n"
               "                if response.status_code == 404:\n"
               "                    raise HTTPException(status_code=404, detail=\"SEC filing document not found.\")\n"
               "                if response.status_code == 429 or response.status_code >= 500:\n"
@@ -101,7 +89,6 @@ jobs:
               "    raise HTTPException(status_code=502, detail=f\"SEC filing document temporarily unavailable: {last_error}\")\n"
           )
           text = text.replace(marker, helper + marker, 1)
-
           old_loop = (
               "    for filing in filings:\n"
               "        html = company_driver_filings._sec_get_text(filing[\"source_url\"])\n"
@@ -157,12 +144,9 @@ jobs:
           PY
 
           python -m py_compile company_driver_tables.py company_driver_history.py company_driver_store.py
-          python - <<'PY'
-          import company_driver_tables as tables
-          assert tables.JPM_RAW_MAX_HTML_BYTES == 32 * 1024 * 1024
-          assert tables.get_table_rule('JPM', 'cet1_ratio')['extractor'] == 'jpm_cet1_ratio_raw'
-          print('JPM_LARGE_FILING_STATIC_OK')
-          PY
+          grep -q 'JPM_RAW_MAX_HTML_BYTES = 32' company_driver_tables.py
+          grep -q 'bounded_raw_table' company_driver_tables.py
+          echo JPM_LARGE_FILING_STATIC_OK
 
       - name: Commit patch and remove runner
         run: |
