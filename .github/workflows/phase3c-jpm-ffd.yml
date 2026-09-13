@@ -1,0 +1,28 @@
+name: Phase 3C JPM FFD Diagnostic
+
+on:
+  push:
+    branches: [phase3c-jpm-ffd-diagnostic]
+
+jobs:
+  diagnostic:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Inspect JPM banking taxonomies
+        run: |
+          python - <<'PY'
+          import json, urllib.parse, urllib.request
+          base='https://sethistock-api.onrender.com/api/sec/JPM'
+          def get(path):
+              with urllib.request.urlopen(base+path, timeout=180) as r: return json.load(r)
+          for taxonomy in ['ffd','ecd','srt']:
+              for q in ['', 'common', 'equity', 'tier', 'capital', 'ratio', 'risk weighted']:
+                  path='/concepts?taxonomy='+urllib.parse.quote(taxonomy)+'&limit=100'
+                  if q:
+                      path+='&q='+urllib.parse.quote(q)
+                  try:
+                      data=get(path)
+                      print('SEARCH',taxonomy,repr(q),json.dumps(data,separators=(',',':')))
+                  except Exception as exc:
+                      print('ERROR',taxonomy,repr(q),repr(exc))
+          PY
