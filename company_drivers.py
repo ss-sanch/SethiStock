@@ -19,6 +19,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 import company_driver_filings
 import company_driver_history
+import company_driver_store
 
 
 router = APIRouter(prefix="/api/drivers", tags=["Company Drivers"])
@@ -422,6 +423,15 @@ def company_driver_history_schema():
     return company_driver_history.history_schema()
 
 
+@router.get("/storage/status")
+def company_driver_storage_status():
+    """Report Phase 3D persistent Company Driver storage readiness."""
+    return {
+        "phase": "3D",
+        **company_driver_store.storage_status(),
+    }
+
+
 @router.get("/{ticker}/history/{metric_key}")
 def company_driver_metric_history(
     ticker: str,
@@ -439,12 +449,13 @@ def company_driver_metric_history(
             detail=f"Company Drivers registry is not yet available for {str(ticker).strip().upper()}.",
         ) from exc
     try:
-        result = company_driver_history.build_verified_history(
-            registry["ticker"],
-            metric,
+        result = company_driver_store.get_or_refresh_history(
+            ticker=registry["ticker"],
+            metric=metric,
             filing_limit=filings,
             period=period,
             observation_limit=limit,
+            builder=company_driver_history.build_verified_history,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
