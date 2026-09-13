@@ -10,10 +10,13 @@ from __future__ import annotations
 
 import html as html_lib
 import re
+import time
 from datetime import date
 from typing import Any, Dict, List, Optional, Tuple
 
+import requests
 from bs4 import BeautifulSoup
+from fastapi import HTTPException
 
 import company_driver_filings
 
@@ -162,6 +165,60 @@ def _visa_processed_transactions(soup: BeautifulSoup, filing: Dict[str, Any]) ->
     return observations
 
 
+
+
+JPM_RAW_MAX_HTML_BYTES = 32 * 1024 * 1024
+
+
+def _sec_get_raw_table_text(url: str, max_bytes: int = JPM_RAW_MAX_HTML_BYTES) -> str:
+    """Fetch a large filing for a verified raw-row extractor without building a DOM.
+
+    The normal Phase 3B parser remains capped at 12 MB. This path is deliberately
+    limited to filing-table adapters that scan raw HTML and is itself hard-capped
+    so unexpectedly large SEC documents cannot consume unbounded memory.
+    """
+    sec = company_driver_filings.sec_fundamentals
+    sec._require_sec_user_agent()
+    last_error = None
+    for attempt in range(sec.SEC_MAX_RETRIES + 1):
+        try:
+            sec._wait_for_rate_slot()
+            headers = dict(sec._SEC_HEADERS)
+            headers["Accept"] = "text/html,application/xhtml+xml"
+            with requests.get(url, headers=headers, timeout=max(sec.SEC_REQUEST_TIMEOUT, 15.0), stream=True) as response:
+                if response.status_code == 404:
+                    raise HTTPException(status_code=404, detail="SEC filing document not found.")
+                if response.status_code == 429 or response.status_code >= 500:
+                    if attempt < sec.SEC_MAX_RETRIES:
+                        time.sleep(min(0.75 * (2 ** attempt), 6.0))
+                        continue
+                if response.status_code >= 400:
+                    raise HTTPException(status_code=502, detail=f"SEC filing request failed with status {response.status_code}.")
+                try:
+                    content_length = int(response.headers.get("Content-Length") or 0)
+                except Exception:
+                    content_length = 0
+                if content_length and content_length > max_bytes:
+                    raise HTTPException(status_code=413, detail="SEC filing exceeds the bounded raw-table extraction limit.")
+                chunks = []
+                total = 0
+                for chunk in response.iter_content(chunk_size=512 * 1024):
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise HTTPException(status_code=413, detail="SEC filing exceeds the bounded raw-table extraction limit.")
+                    chunks.append(chunk)
+                encoding = response.encoding or "utf-8"
+                return b"".join(chunks).decode(encoding, errors="replace")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            last_error = exc
+            if attempt < sec.SEC_MAX_RETRIES:
+                time.sleep(0.75 * (2 ** attempt))
+                continue
+    raise HTTPException(status_code=502, detail=f"SEC filing document temporarily unavailable: {last_error}")
 
 def _jpm_cet1_ratio_raw(html: str, filing: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Extract firm Standardized CET1 without parsing JPM's ~11 MB filing into a DOM.
@@ -324,19 +381,34 @@ def build_table_history(
     rows: List[Dict[str, Any]] = []
     checked = []
     for filing in filings:
-        html = company_driver_filings._sec_get_text(filing["source_url"])
-        if extractor_name == "jpm_cet1_ratio_raw":
-            extracted = _jpm_cet1_ratio_raw(html, filing)
-        else:
-            if extractor is None:
-                raise ValueError(f"Unknown filing-table extractor: {extractor_name}")
-            soup = BeautifulSoup(html, "html.parser")
-            extracted = extractor(soup, filing)
+        fetch_mode = "bounded_raw_table" if extractor_name == "jpm_cet1_ratio_raw" else "standard_parser"
+        try:
+            if extractor_name == "jpm_cet1_ratio_raw":
+                html = _sec_get_raw_table_text(filing["source_url"])
+                extracted = _jpm_cet1_ratio_raw(html, filing)
+            else:
+                html = company_driver_filings._sec_get_text(filing["source_url"])
+                if extractor is None:
+                    raise ValueError(f"Unknown filing-table extractor: {extractor_name}")
+                soup = BeautifulSoup(html, "html.parser")
+                extracted = extractor(soup, filing)
+        except HTTPException as exc:
+            if exc.status_code != 413:
+                raise
+            checked.append({
+                "form": filing.get("form"), "filing_date": filing.get("filing_date"),
+                "report_date": filing.get("report_date"), "accession": filing.get("accession"),
+                "source_url": filing.get("source_url"), "observation_count": 0,
+                "fetch_mode": fetch_mode, "skipped": True,
+                "skip_reason": str(exc.detail or "filing_too_large"),
+            })
+            continue
         rows.extend(extracted)
         checked.append({
             "form": filing.get("form"), "filing_date": filing.get("filing_date"),
             "report_date": filing.get("report_date"), "accession": filing.get("accession"),
             "source_url": filing.get("source_url"), "observation_count": len(extracted),
+            "fetch_mode": fetch_mode,
         })
 
     # Latest filed observation wins for a repeated economic period.
