@@ -47,68 +47,59 @@ jobs:
 
           marker = '\ndef _jpm_cet1_ratio_raw(html: str, filing: Dict[str, Any]) -> List[Dict[str, Any]]:\n'
           assert marker in text, 'JPM extractor marker not found'
-          helper = '''
-
-JPM_RAW_MAX_HTML_BYTES = 32 * 1024 * 1024
-
-
-def _sec_get_raw_table_text(url: str, max_bytes: int = JPM_RAW_MAX_HTML_BYTES) -> str:
-    """Fetch a large filing for a verified raw-row extractor without building a DOM.
-
-    The normal Phase 3B parser remains capped at 12 MB. This path is deliberately
-    limited to filing-table adapters that scan raw HTML and is itself hard-capped
-    so unexpectedly large SEC documents cannot consume unbounded memory.
-    """
-    sec = company_driver_filings.sec_fundamentals
-    sec._require_sec_user_agent()
-    last_error = None
-    for attempt in range(sec.SEC_MAX_RETRIES + 1):
-        try:
-            sec._wait_for_rate_slot()
-            headers = dict(sec._SEC_HEADERS)
-            headers["Accept"] = "text/html,application/xhtml+xml"
-            with requests.get(
-                url,
-                headers=headers,
-                timeout=max(sec.SEC_REQUEST_TIMEOUT, 15.0),
-                stream=True,
-            ) as response:
-                if response.status_code == 404:
-                    raise HTTPException(status_code=404, detail="SEC filing document not found.")
-                if response.status_code == 429 or response.status_code >= 500:
-                    if attempt < sec.SEC_MAX_RETRIES:
-                        time.sleep(min(0.75 * (2 ** attempt), 6.0))
-                        continue
-                if response.status_code >= 400:
-                    raise HTTPException(status_code=502, detail=f"SEC filing request failed with status {response.status_code}.")
-
-                try:
-                    content_length = int(response.headers.get("Content-Length") or 0)
-                except Exception:
-                    content_length = 0
-                if content_length and content_length > max_bytes:
-                    raise HTTPException(status_code=413, detail="SEC filing exceeds the bounded raw-table extraction limit.")
-
-                chunks = []
-                total = 0
-                for chunk in response.iter_content(chunk_size=512 * 1024):
-                    if not chunk:
-                        continue
-                    total += len(chunk)
-                    if total > max_bytes:
-                        raise HTTPException(status_code=413, detail="SEC filing exceeds the bounded raw-table extraction limit.")
-                    chunks.append(chunk)
-                encoding = response.encoding or "utf-8"
-                return b"".join(chunks).decode(encoding, errors="replace")
-        except HTTPException:
-            raise
-        except Exception as exc:
-            last_error = exc
-            if attempt < sec.SEC_MAX_RETRIES:
-                time.sleep(0.75 * (2 ** attempt))
-                continue
-    raise HTTPException(status_code=502, detail=f"SEC filing document temporarily unavailable: {last_error}")
-'''
+          helper = (
+              "\n\nJPM_RAW_MAX_HTML_BYTES = 32 * 1024 * 1024\n\n\n"
+              "def _sec_get_raw_table_text(url: str, max_bytes: int = JPM_RAW_MAX_HTML_BYTES) -> str:\n"
+              "    \"\"\"Fetch a large filing for a verified raw-row extractor without building a DOM.\n\n"
+              "    The normal Phase 3B parser remains capped at 12 MB. This path is deliberately\n"
+              "    limited to filing-table adapters that scan raw HTML and is itself hard-capped\n"
+              "    so unexpectedly large SEC documents cannot consume unbounded memory.\n"
+              "    \"\"\"\n"
+              "    sec = company_driver_filings.sec_fundamentals\n"
+              "    sec._require_sec_user_agent()\n"
+              "    last_error = None\n"
+              "    for attempt in range(sec.SEC_MAX_RETRIES + 1):\n"
+              "        try:\n"
+              "            sec._wait_for_rate_slot()\n"
+              "            headers = dict(sec._SEC_HEADERS)\n"
+              "            headers[\"Accept\"] = \"text/html,application/xhtml+xml\"\n"
+              "            with requests.get(\n"
+              "                url, headers=headers, timeout=max(sec.SEC_REQUEST_TIMEOUT, 15.0), stream=True\n"
+              "            ) as response:\n"
+              "                if response.status_code == 404:\n"
+              "                    raise HTTPException(status_code=404, detail=\"SEC filing document not found.\")\n"
+              "                if response.status_code == 429 or response.status_code >= 500:\n"
+              "                    if attempt < sec.SEC_MAX_RETRIES:\n"
+              "                        time.sleep(min(0.75 * (2 ** attempt), 6.0))\n"
+              "                        continue\n"
+              "                if response.status_code >= 400:\n"
+              "                    raise HTTPException(status_code=502, detail=f\"SEC filing request failed with status {response.status_code}.\")\n"
+              "                try:\n"
+              "                    content_length = int(response.headers.get(\"Content-Length\") or 0)\n"
+              "                except Exception:\n"
+              "                    content_length = 0\n"
+              "                if content_length and content_length > max_bytes:\n"
+              "                    raise HTTPException(status_code=413, detail=\"SEC filing exceeds the bounded raw-table extraction limit.\")\n"
+              "                chunks = []\n"
+              "                total = 0\n"
+              "                for chunk in response.iter_content(chunk_size=512 * 1024):\n"
+              "                    if not chunk:\n"
+              "                        continue\n"
+              "                    total += len(chunk)\n"
+              "                    if total > max_bytes:\n"
+              "                        raise HTTPException(status_code=413, detail=\"SEC filing exceeds the bounded raw-table extraction limit.\")\n"
+              "                    chunks.append(chunk)\n"
+              "                encoding = response.encoding or \"utf-8\"\n"
+              "                return b\"\".join(chunks).decode(encoding, errors=\"replace\")\n"
+              "        except HTTPException:\n"
+              "            raise\n"
+              "        except Exception as exc:\n"
+              "            last_error = exc\n"
+              "            if attempt < sec.SEC_MAX_RETRIES:\n"
+              "                time.sleep(0.75 * (2 ** attempt))\n"
+              "                continue\n"
+              "    raise HTTPException(status_code=502, detail=f\"SEC filing document temporarily unavailable: {last_error}\")\n"
+          )
           text = text.replace(marker, helper + marker, 1)
 
           old_loop = (
