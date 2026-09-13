@@ -1,10 +1,6 @@
 name: Company Driver Cache Warmer
 
 on:
-  push:
-    branches: [phase3e-driver-cache-warmer]
-    paths:
-      - '.github/workflows/company-driver-cache-warmer.yml'
   workflow_dispatch:
   schedule:
     - cron: '17 */12 * * *'
@@ -55,8 +51,8 @@ jobs:
           assert len(companies) == 10, companies_payload
           assert 'GOOGL' in companies, companies
 
-          # GOOG and GOOGL are the same Alphabet filing history. Validate the public
-          # alias explicitly so GOOG searches reuse GOOGL's persisted snapshots.
+          # GOOG and GOOGL share one Alphabet filing history. Validate the public
+          # alias on every warmer run so both share the same persisted cache keys.
           goog = get_json('/api/drivers/GOOG', timeout=60)
           assert goog.get('ticker') == 'GOOGL', goog
           assert goog.get('requested_ticker') == 'GOOG', goog
@@ -83,11 +79,11 @@ jobs:
               payload = get_json(path)
               state = payload.get('cache_state')
 
-              # A stale snapshot is already fast for users; the request also starts
-              # stale-while-revalidate. Give that refresh a short chance to complete,
-              # then touch the key again so the next user normally gets a fresh snapshot.
-              if state in {'stale', 'stale_refreshing', 'refreshing'}:
-                  time.sleep(4)
+              # Stale snapshots are already instant for users and start SWR refresh.
+              # Touch the key again after a short wait so the next user normally sees
+              # the refreshed snapshot rather than being the request that initiates it.
+              if state in {'stale_while_revalidate', 'stale', 'stale_refreshing', 'refreshing'}:
+                  time.sleep(5)
                   payload = get_json(path, timeout=120, attempts=2)
                   state = payload.get('cache_state')
 
