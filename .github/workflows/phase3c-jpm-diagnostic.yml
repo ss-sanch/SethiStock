@@ -1,0 +1,27 @@
+name: Phase 3C JPM Diagnostic
+
+on:
+  push:
+    branches: [phase3c-production-matrix]
+
+jobs:
+  diagnostic:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Inspect JPM Company Facts coverage
+        run: |
+          python - <<'PY'
+          import json, urllib.parse, urllib.request
+          base='https://sethistock-api.onrender.com/api/sec/JPM'
+          def get(path):
+              with urllib.request.urlopen(base+path, timeout=180) as r: return json.load(r)
+          overview=get('/overview')
+          print('OVERVIEW='+json.dumps(overview,separators=(',',':')))
+          for taxonomy in ['jpm','us-gaap','dei']:
+              for q in ['cet1','common equity tier','capital ratio','tier 1','common equity']:
+                  try:
+                      data=get('/concepts?taxonomy='+urllib.parse.quote(taxonomy)+'&q='+urllib.parse.quote(q)+'&limit=100')
+                      print('SEARCH',taxonomy,q,json.dumps(data,separators=(',',':')))
+                  except Exception as exc:
+                      print('ERROR',taxonomy,q,repr(exc))
+          PY
