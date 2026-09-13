@@ -1,0 +1,98 @@
+name: Phase 3C Final JPM Visa Proof
+
+on:
+  push:
+    branches: [phase3c-final-jpm-visa-proof]
+
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate JPM and Visa in production
+        run: |
+          python - <<'PY'
+          import json, time, urllib.request, urllib.error, http.client
+
+          base='https://sethistock-api.onrender.com/api/drivers'
+
+          def get(path, timeout=360, attempts=5):
+              last=None
+              for attempt in range(1, attempts+1):
+                  try:
+                      req=urllib.request.Request(base+path, headers={'User-Agent':'SethiStock Phase3C final production proof'})
+                      with urllib.request.urlopen(req, timeout=timeout) as r:
+                          return json.load(r)
+                  except urllib.error.HTTPError as exc:
+                      try:
+                          body=exc.read().decode('utf-8','replace')[:1000]
+                      except Exception:
+                          body=''
+                      last=f'HTTP {exc.code}: {body}'
+                  except (urllib.error.URLError, TimeoutError, http.client.RemoteDisconnected, ConnectionResetError) as exc:
+                      last=repr(exc)
+                  if attempt<attempts:
+                      wait=12*attempt
+                      print('RETRY',path,'attempt',attempt,'after',last,'sleep',wait,flush=True)
+                      time.sleep(wait)
+              raise AssertionError(('request_failed',path,last))
+
+          # Wait specifically for the new lightweight JPM code to reach Render.
+          deadline=time.time()+480
+          jpm=None
+          last=None
+          while time.time()<deadline:
+              try:
+                  candidate=get('/JPM/history/cet1_ratio?filings=2&period=quarterly&limit=8', timeout=300, attempts=1)
+                  observations=candidate.get('observations') or []
+                  if candidate.get('verified') and observations and observations[-1].get('extraction_method')=='sec_filing_table_raw_row':
+                      jpm=candidate
+                      break
+                  last=candidate
+              except Exception as exc:
+                  last=repr(exc)
+              time.sleep(15)
+          if jpm is None:
+              raise AssertionError(('lightweight JPM deployment not observed',last))
+
+          assert jpm['data_state']=='verified_history', jpm
+          assert jpm.get('source_mode')=='sec_filing_table', jpm
+          assert jpm['observation_count']>=1, jpm
+          jrows=jpm['observations']
+          jdates=[str(r.get('end') or r.get('instant') or '') for r in jrows]
+          assert jdates==sorted(jdates) and len(jdates)==len(set(jdates)), jdates
+          jlatest=jrows[-1]
+          assert abs(float(jlatest['value'])-14.2)<=0.25, jlatest
+          assert jlatest.get('unit_ref')=='percent', jlatest
+          assert jlatest.get('filing_date') and jlatest.get('accession'), jlatest
+          assert (jlatest.get('source_url') or '').startswith('https://www.sec.gov/Archives/edgar/data/'), jlatest
+          assert jlatest.get('extraction_method')=='sec_filing_table_raw_row', jlatest
+          print('PHASE3C_JPM_OK='+json.dumps({
+              'observation_count':jpm['observation_count'],'coverage':jpm.get('coverage'),
+              'latest_period':jdates[-1],'latest_value':jlatest['value'],
+              'extraction_method':jlatest['extraction_method']
+          },separators=(',',':')),flush=True)
+
+          time.sleep(5)
+
+          visa=get('/V/history/processed_transactions?filings=3&period=quarterly&limit=12', timeout=360, attempts=4)
+          assert visa.get('verified') is True, visa
+          assert visa.get('data_state')=='verified_history', visa
+          assert visa.get('source_mode')=='sec_filing_table', visa
+          assert visa.get('observation_count',0)>=1, visa
+          vrows=visa['observations']
+          vdates=[str(r.get('end') or r.get('instant') or '') for r in vrows]
+          assert vdates==sorted(vdates) and len(vdates)==len(set(vdates)), vdates
+          vlatest=vrows[-1]
+          assert 1_000_000_000 < float(vlatest['value']) < 500_000_000_000, vlatest
+          assert vlatest.get('unit_ref')=='transactions', vlatest
+          assert vlatest.get('filing_date') and vlatest.get('accession'), vlatest
+          assert (vlatest.get('source_url') or '').startswith('https://www.sec.gov/Archives/edgar/data/'), vlatest
+          assert 'filing_table' in str(vlatest.get('extraction_method') or ''), vlatest
+          print('PHASE3C_VISA_OK='+json.dumps({
+              'observation_count':visa['observation_count'],'coverage':visa.get('coverage'),
+              'latest_period':vdates[-1],'latest_value':vlatest['value'],
+              'extraction_method':vlatest['extraction_method']
+          },separators=(',',':')),flush=True)
+
+          print('PHASE3C_FINAL_PRODUCTION_OK')
+          PY
