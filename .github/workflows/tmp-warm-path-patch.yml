@@ -1,8 +1,9 @@
-name: Temporary warm-path patch
+name: Temporary warm path patch
 
 on:
-  pull_request:
-    branches: [main]
+  push:
+    branches:
+      - sethistock-warm-path-latency
     paths:
       - '.github/workflows/tmp-warm-path-patch.yml'
 
@@ -15,14 +16,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.head_ref }}
           fetch-depth: 0
       - name: Patch cached analysis warm path
+        shell: bash
         run: |
           python - <<'PY'
           from pathlib import Path
-          p = Path('app.py')
-          text = p.read_text()
+
+          path = Path('app.py')
+          text = path.read_text()
 
           old_telemetry = '''        if not is_peer and not getattr(_CACHE_REFRESH_CONTEXT, "suppress_telemetry", False):
             log_telemetry_event(project="SethiStock", action="ticker_search", ticker=raw_ticker)
@@ -36,7 +38,8 @@ jobs:
                 threading.Thread(target=log_telemetry_event, kwargs=telemetry_kwargs, daemon=True).start()
         ticker = _resolve_ticker_cached(raw_ticker, background_tasks)
 '''
-          assert old_telemetry in text, 'telemetry target not found'
+          if old_telemetry not in text:
+              raise SystemExit('telemetry target not found')
           text = text.replace(old_telemetry, new_telemetry, 1)
 
           old_quote = '''                cached_analysis = copy.deepcopy(cached_analysis)
@@ -55,20 +58,22 @@ jobs:
           new_quote = '''                cached_analysis = copy.deepcopy(cached_analysis)
                 cached_analysis["analysis_cache_state"] = cache_state
                 cached_analysis["analysis_cache_hit"] = True
-                # Live price hydration is deliberately handled by /api/quote in parallel on
-                # the SethiStock frontend. Do not turn a persistent analysis-cache hit into
-                # another blocking Yahoo request before returning the heavy analysis payload.
+                # The frontend hydrates the live quote independently via /api/quote.
+                # Do not block a persistent analysis-cache hit on another Yahoo call.
                 if should_refresh_analysis:
 '''
-          assert old_quote in text, 'cached quote hydration target not found'
+          if old_quote not in text:
+              raise SystemExit('cached quote hydration target not found')
           text = text.replace(old_quote, new_quote, 1)
-          p.write_text(text)
+
+          path.write_text(text)
           PY
           python -m py_compile app.py
       - name: Commit backend patch
+        shell: bash
         run: |
           git config user.name "ss-sanch"
           git config user.email "mlgsanchit@gmail.com"
           git add app.py
           git commit -m "Return cached stock analysis without blocking live quote"
-          git push origin HEAD:${{ github.head_ref }}
+          git push origin HEAD:sethistock-warm-path-latency
