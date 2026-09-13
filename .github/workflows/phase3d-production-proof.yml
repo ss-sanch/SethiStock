@@ -1,0 +1,125 @@
+name: Phase 3D Production Proof
+
+on:
+  push:
+    branches: [phase3d-production-proof]
+
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate persistent Company Driver cache in production
+        run: |
+          python - <<'PY'
+          import json, time, urllib.request, urllib.error, http.client
+
+          base='https://sethistock-api.onrender.com/api/drivers'
+
+          def get(path, timeout=420, attempts=5):
+              last=None
+              for attempt in range(1, attempts+1):
+                  started=time.time()
+                  try:
+                      req=urllib.request.Request(base+path, headers={'User-Agent':'SethiStock Phase3D production proof'})
+                      with urllib.request.urlopen(req, timeout=timeout) as r:
+                          return json.load(r), time.time()-started
+                  except urllib.error.HTTPError as exc:
+                      try:
+                          body=exc.read().decode('utf-8','replace')[:1000]
+                      except Exception:
+                          body=''
+                      last=f'HTTP {exc.code}: {body}'
+                  except (urllib.error.URLError, TimeoutError, http.client.RemoteDisconnected, ConnectionResetError) as exc:
+                      last=repr(exc)
+                  if attempt<attempts:
+                      wait=12*attempt
+                      print('RETRY',path,'attempt',attempt,'after',last,'sleep',wait,flush=True)
+                      time.sleep(wait)
+              raise AssertionError(('request_failed',path,last))
+
+          # Wait until the merged 3D app layer is live and can reach its backend-only tables.
+          deadline=time.time()+600
+          status=None
+          last=None
+          while time.time()<deadline:
+              try:
+                  candidate,_=get('/storage/status',timeout=90,attempts=1)
+                  if candidate.get('store_version')=='3d-driver-store-v1' and candidate.get('configured') and candidate.get('reachable'):
+                      status=candidate
+                      break
+                  last=candidate
+              except Exception as exc:
+                  last=repr(exc)
+              time.sleep(15)
+          if status is None:
+              raise AssertionError(('Phase 3D deployment/storage not ready',last))
+          forbidden={'service_key','SUPABASE_SERVICE_KEY','apikey','authorization'}
+          assert not (forbidden & {str(k).lower() for k in status}), status
+          assert status['ttl_seconds']==86400, status
+          print('PHASE3D_STORAGE_OK='+json.dumps(status,separators=(',',':')),flush=True)
+
+          cases=[
+              ('AAPL','services_revenue',2,8,'inline'),
+              ('V','processed_transactions',2,8,'table'),
+              ('NVDA','gross_margin',3,8,'derived'),
+          ]
+          results=[]
+          for ticker,metric,filings,limit,kind in cases:
+              path=f'/{ticker}/history/{metric}?filings={filings}&period=quarterly&limit={limit}'
+              first,t1=get(path)
+              assert first.get('verified') is True, (ticker,first)
+              assert first.get('data_state')=='verified_history', (ticker,first)
+              assert first.get('cache_persistent') is True, (ticker,first)
+              assert first.get('cache_store_version')=='3d-driver-store-v1', (ticker,first)
+              assert first.get('cache_state') in {'miss_refreshed','fresh','fresh_after_wait'}, (ticker,first)
+              assert first.get('observation_count',0)>=1, (ticker,first)
+              frows=first['observations']
+              for row in frows:
+                  assert row.get('value') is not None
+                  assert row.get('filing_date')
+                  assert row.get('accession')
+                  assert (row.get('source_url') or '').startswith('https://www.sec.gov/Archives/edgar/data/')
+
+              time.sleep(3)
+              second,t2=get(path)
+              assert second.get('verified') is True, (ticker,second)
+              assert second.get('cache_state')=='fresh', (ticker,second)
+              assert second.get('cache_persistent') is True, (ticker,second)
+              assert second.get('cache_fresh') is True, (ticker,second)
+              assert second.get('cache_store_version')=='3d-driver-store-v1', (ticker,second)
+              assert second.get('cache_synced_at') and second.get('cache_expires_at'), (ticker,second)
+              assert second.get('history_version') and second.get('history_version')!='3d-driver-store-v1', (ticker,second)
+              srows=second['observations']
+              assert len(srows)==len(frows), (ticker,len(frows),len(srows))
+              assert [r.get('value') for r in srows]==[r.get('value') for r in frows], ticker
+              assert [r.get('accession') for r in srows]==[r.get('accession') for r in frows], ticker
+              assert [r.get('extraction_method') for r in srows]==[r.get('extraction_method') for r in frows], ticker
+
+              if kind=='table':
+                  assert second.get('source_mode')=='sec_filing_table', second
+                  assert 'filing_table' in str(srows[-1].get('extraction_method') or ''), srows[-1]
+              elif kind=='derived':
+                  assert second.get('source_mode')=='derived_sec_ratio', second
+                  assert srows[-1].get('derived') is True, srows[-1]
+                  assert srows[-1].get('extraction_method')=='derived_ratio_from_sec_facts', srows[-1]
+                  assert isinstance(srows[-1].get('derivation'),dict), srows[-1]
+              else:
+                  assert srows[-1].get('extraction_method') in {'sec_inline_xbrl_verified_rule','derived_q4_fy_minus_9m'}, srows[-1]
+
+              summary={
+                  'ticker':ticker,'metric':metric,'first_cache_state':first.get('cache_state'),
+                  'second_cache_state':second.get('cache_state'),'cold_seconds':round(t1,3),
+                  'warm_seconds':round(t2,3),'observation_count':second.get('observation_count'),
+                  'history_version':second.get('history_version'),'cache_store_version':second.get('cache_store_version'),
+                  'latest_period':srows[-1].get('end') or srows[-1].get('instant'),
+                  'latest_value':srows[-1].get('value'),'latest_accession':srows[-1].get('accession'),
+                  'extraction_method':srows[-1].get('extraction_method'),
+              }
+              results.append(summary)
+              print('PHASE3D_CASE_OK='+json.dumps(summary,separators=(',',':')),flush=True)
+              time.sleep(5)
+
+          assert len(results)==3
+          print('PHASE3D_PRODUCTION_OK')
+          print(json.dumps(results,indent=2))
+          PY
