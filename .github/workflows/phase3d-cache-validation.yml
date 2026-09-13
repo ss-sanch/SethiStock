@@ -1,0 +1,178 @@
+name: Phase 3D Driver Cache Validation
+
+on:
+  push:
+    branches: [phase3d-driver-cache-integration]
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: phase3d-driver-cache-integration
+      - name: Install validation dependencies
+        run: pip install fastapi requests beautifulsoup4
+      - name: Apply route integration
+        run: python .phase3d_route_patch.py
+      - name: Validate Phase 3D cache semantics
+        run: |
+          python -m py_compile company_driver_store.py company_drivers.py company_driver_history.py company_driver_tables.py
+          python - <<'PY'
+          from datetime import datetime, timedelta, timezone
+          import company_driver_store as s
+          import company_drivers as routes
+
+          def observation(value=1.0):
+              return {
+                  'period_type':'quarter','start':'2026-01-01','end':'2026-03-31','instant':None,
+                  'value':value,'unit_ref':'USD','qualified_concept':'test:Revenue','dimensions':[],
+                  'form':'10-Q','filing_date':'2026-04-20','report_date':'2026-03-31',
+                  'accession':'0000000000-26-000001','source_url':'https://www.sec.gov/Archives/edgar/data/1/test.htm',
+                  'extraction_method':'sec_filing_table_verified_row','score':1,'derived':False,
+              }
+
+          # Persistence schema version must be independent of the extractor version.
+          original_get_sync=s.get_sync_state
+          original_request=s._request
+          captured=[]
+          s.get_sync_state=lambda *a,**k: None
+          class Response:
+              def json(self): return []
+          def fake_request(method,table,**kwargs):
+              captured.append((method,table,kwargs))
+              return Response()
+          s._request=fake_request
+          source={
+              'ticker':'V','metric':'processed_transactions','history_version':'table-history-test-v9',
+              'period':'quarterly','data_state':'verified_history','verified':True,
+              'source_mode':'sec_filing_table','metric_label':'Processed Transactions',
+              'observations':[observation(71_662_000_000)],
+          }
+          persisted=s.persist_history(source,filing_limit=3)
+          observation_post=next(item for item in captured if item[0]=='POST' and item[1]==s.OBSERVATIONS_TABLE)
+          sync_post=next(item for item in captured if item[0]=='POST' and item[1]==s.SYNCS_TABLE)
+          assert observation_post[2]['payload'][0]['history_version']==s.STORE_VERSION
+          assert sync_post[2]['payload']['history_version']==s.STORE_VERSION
+          assert sync_post[2]['payload']['history_meta']['history_version']=='table-history-test-v9'
+          assert persisted['extractor_history_version']=='table-history-test-v9'
+          s.get_sync_state=original_get_sync
+          s._request=original_request
+
+          # Loading a snapshot restores the source extractor version, not the store version.
+          original_get_sync=s.get_sync_state
+          original_read=s._read_observations
+          future=(datetime.now(timezone.utc)+timedelta(hours=1)).isoformat()
+          s.get_sync_state=lambda *a,**k:{
+              'active_sync_id':'00000000-0000-0000-0000-000000000001',
+              'history_version':s.STORE_VERSION,'source_mode':'sec_filing_table','data_state':'verified_history',
+              'history_meta':{'history_version':'table-history-test-v9','metric_label':'Processed Transactions'},
+              'observation_count':1,'synced_at':datetime.now(timezone.utc).isoformat(),'expires_at':future,
+          }
+          s._read_observations=lambda sync_id:[{
+              'period_type':'quarter','period_start':'2026-01-01','period_end':'2026-03-31','instant':None,
+              'value':71_662_000_000,'unit_ref':'transactions','qualified_concept':None,'dimensions':[],
+              'form':'10-Q','filing_date':'2026-04-20','report_date':'2026-03-31','accession':'a',
+              'source_url':'https://www.sec.gov/Archives/edgar/data/1/a.htm','extraction_method':'sec_filing_table_verified_row',
+              'score':None,'derived':False,'derivation':None,
+          }]
+          loaded=s.load_history(ticker='V',metric='processed_transactions',period='quarterly',filing_limit=3,observation_limit=40)
+          assert loaded['history_version']=='table-history-test-v9', loaded
+          assert loaded['cache_store_version']==s.STORE_VERSION
+          assert loaded['cache_fresh'] is True
+          s.get_sync_state=original_get_sync
+          s._read_observations=original_read
+
+          # A fresh hit must not call the expensive filing builder.
+          original_configured=s.is_configured
+          original_load=s.load_history
+          s.is_configured=lambda: True
+          s.load_history=lambda **kwargs:{'cache_fresh':True,'observations':[observation()],'observation_count':1}
+          def forbidden_builder(*a,**k): raise AssertionError('builder ran on fresh cache hit')
+          hit=s.get_or_refresh_history(ticker='AAPL',metric={'key':'services_revenue'},filing_limit=3,period='quarterly',observation_limit=10,builder=forbidden_builder)
+          assert hit['cache_state']=='fresh'
+
+          # Cold miss builds once, persists, then serves the persistent snapshot.
+          original_persist=s.persist_history
+          calls={'build':0,'load':0,'persist':0}
+          def seq_load(**kwargs):
+              calls['load']+=1
+              if calls['load']<3: return None
+              return {'cache_fresh':True,'history_version':'3c-history-v1','observations':[observation(2)],'observation_count':1}
+          def builder(*args,**kwargs):
+              calls['build']+=1
+              return {'ticker':'AAPL','metric':'services_revenue','history_version':'3c-history-v1','period':'quarterly','data_state':'verified_history','verified':True,'observations':[observation(2)]}
+          def fake_persist(*args,**kwargs):
+              calls['persist']+=1
+              return {'sync_id':'x'}
+          s.load_history=seq_load
+          s.persist_history=fake_persist
+          miss=s.get_or_refresh_history(ticker='AAPL',metric={'key':'services_revenue'},filing_limit=3,period='quarterly',observation_limit=10,builder=builder)
+          assert calls['build']==1 and calls['persist']==1, calls
+          assert miss['cache_state']=='miss_refreshed', miss
+
+          # Store failure after extraction must fail open without rebuilding SEC data.
+          calls={'build':0}
+          s.load_history=lambda **kwargs: None
+          def one_builder(*args,**kwargs):
+              calls['build']+=1
+              return {'ticker':'AAPL','metric':'services_revenue','history_version':'3c-history-v1','period':'quarterly','data_state':'verified_history','verified':True,'observations':[observation(3)]}
+          def broken_persist(*args,**kwargs): raise s.DriverStoreError('simulated store outage')
+          s.persist_history=broken_persist
+          fallback=s.get_or_refresh_history(ticker='AAPL',metric={'key':'services_revenue'},filing_limit=4,period='quarterly',observation_limit=10,builder=one_builder)
+          assert calls['build']==1, calls
+          assert fallback['cache_state']=='store_error_fallback', fallback
+          assert fallback['observations'][-1]['value']==3
+
+          # Stale snapshots return immediately and schedule one background refresh.
+          class DummyThread:
+              starts=0
+              def __init__(self,*a,**k): pass
+              def start(self): DummyThread.starts+=1
+          original_thread=s.threading.Thread
+          s._REFRESHING.clear()
+          s.load_history=lambda **kwargs:{'cache_fresh':False,'observations':[observation(4)],'observation_count':1}
+          s.threading.Thread=DummyThread
+          stale=s.get_or_refresh_history(ticker='MSFT',metric={'key':'intelligent_cloud_revenue'},filing_limit=3,period='quarterly',observation_limit=10,builder=forbidden_builder)
+          assert stale['cache_state']=='stale_while_revalidate'
+          assert DummyThread.starts==1
+          s._REFRESHING.clear()
+          s.threading.Thread=original_thread
+
+          # Restore store helpers before route test.
+          s.is_configured=original_configured
+          s.load_history=original_load
+          s.persist_history=original_persist
+
+          # Existing public history route must delegate through the Phase 3D layer.
+          original_route_cache=routes.company_driver_store.get_or_refresh_history
+          route_calls=[]
+          def route_cache(**kwargs):
+              route_calls.append(kwargs)
+              return {'ticker':'AAPL','metric':'services_revenue','history_version':'3c-history-v1','period':'quarterly','data_state':'verified_history','verified':True,'observations':[observation(5)],'observation_count':1,'cache_state':'fresh'}
+          routes.company_driver_store.get_or_refresh_history=route_cache
+          response=routes.company_driver_metric_history('AAPL','services_revenue',filings=3,period='quarterly',limit=5)
+          assert len(route_calls)==1
+          assert route_calls[0]['builder'] is routes.company_driver_history.build_verified_history
+          assert response['cache_state']=='fresh'
+          assert response['company']=='Apple'
+          assert response['metric_definition']['key']=='services_revenue'
+          routes.company_driver_store.get_or_refresh_history=original_route_cache
+
+          status=s.storage_status()
+          assert status['store_version']==s.STORE_VERSION
+          assert 'service_key' not in status and 'SUPABASE_SERVICE_KEY' not in status
+          print('PHASE3D_CACHE_VALIDATION_OK')
+          PY
+      - name: Commit permanent integration and remove temporary validation files
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git rm .phase3d_route_patch.py .github/workflows/phase3d-cache-validation.yml
+          git add company_drivers.py company_driver_store.py
+          git commit -m "Wire persistent Company Driver history cache" || true
+          git pull --rebase origin phase3d-driver-cache-integration
+          git push
