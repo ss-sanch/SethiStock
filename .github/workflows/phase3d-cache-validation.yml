@@ -35,10 +35,13 @@ jobs:
                   'extraction_method':'sec_filing_table_verified_row','score':1,'derived':False,
               }
 
+          original_configured=s.is_configured
+
           # Persistence schema version must be independent of the extractor version.
           original_get_sync=s.get_sync_state
           original_request=s._request
           captured=[]
+          s.is_configured=lambda: True
           s.get_sync_state=lambda *a,**k: None
           class Response:
               def json(self): return []
@@ -87,9 +90,7 @@ jobs:
           s._read_observations=original_read
 
           # A fresh hit must not call the expensive filing builder.
-          original_configured=s.is_configured
           original_load=s.load_history
-          s.is_configured=lambda: True
           s.load_history=lambda **kwargs:{'cache_fresh':True,'observations':[observation()],'observation_count':1}
           def forbidden_builder(*a,**k): raise AssertionError('builder ran on fresh cache hit')
           hit=s.get_or_refresh_history(ticker='AAPL',metric={'key':'services_revenue'},filing_limit=3,period='quarterly',observation_limit=10,builder=forbidden_builder)
