@@ -1,0 +1,183 @@
+name: Temporary JPM large-filing patch runner
+
+on:
+  push:
+    branches: [fix-jpm-cet1-large-filings]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix-jpm-cet1-large-filings
+      - name: Patch bounded raw JPM filing path
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('company_driver_tables.py')
+          text = path.read_text()
+
+          old_imports = '''import html as html_lib
+          import re
+          from datetime import date
+          from typing import Any, Dict, List, Optional, Tuple
+
+          from bs4 import BeautifulSoup
+
+          import company_driver_filings
+          '''.replace('          ', '')
+          new_imports = '''import html as html_lib
+          import re
+          import time
+          from datetime import date
+          from typing import Any, Dict, List, Optional, Tuple
+
+          import requests
+          from bs4 import BeautifulSoup
+          from fastapi import HTTPException
+
+          import company_driver_filings
+          '''.replace('          ', '')
+          assert old_imports in text, 'import target not found'
+          text = text.replace(old_imports, new_imports, 1)
+
+          marker = '\ndef _jpm_cet1_ratio_raw(html: str, filing: Dict[str, Any]) -> List[Dict[str, Any]]:\n'
+          assert marker in text, 'JPM extractor marker not found'
+          helper = r'''
+
+          JPM_RAW_MAX_HTML_BYTES = 32 * 1024 * 1024
+
+
+          def _sec_get_raw_table_text(url: str, max_bytes: int = JPM_RAW_MAX_HTML_BYTES) -> str:
+              """Fetch a large filing for a verified raw-row extractor without building a DOM.
+
+              The normal Phase 3B parser remains capped at 12 MB. This path is deliberately
+              limited to filing-table adapters that scan raw HTML and is itself hard-capped
+              so unexpectedly large SEC documents cannot consume unbounded memory.
+              """
+              sec = company_driver_filings.sec_fundamentals
+              sec._require_sec_user_agent()
+              last_error = None
+              for attempt in range(sec.SEC_MAX_RETRIES + 1):
+                  try:
+                      sec._wait_for_rate_slot()
+                      headers = dict(sec._SEC_HEADERS)
+                      headers["Accept"] = "text/html,application/xhtml+xml"
+                      with requests.get(
+                          url,
+                          headers=headers,
+                          timeout=max(sec.SEC_REQUEST_TIMEOUT, 15.0),
+                          stream=True,
+                      ) as response:
+                          if response.status_code == 404:
+                              raise HTTPException(status_code=404, detail="SEC filing document not found.")
+                          if response.status_code == 429 or response.status_code >= 500:
+                              if attempt < sec.SEC_MAX_RETRIES:
+                                  time.sleep(min(0.75 * (2 ** attempt), 6.0))
+                                  continue
+                          if response.status_code >= 400:
+                              raise HTTPException(status_code=502, detail=f"SEC filing request failed with status {response.status_code}.")
+
+                          try:
+                              content_length = int(response.headers.get("Content-Length") or 0)
+                          except Exception:
+                              content_length = 0
+                          if content_length and content_length > max_bytes:
+                              raise HTTPException(status_code=413, detail="SEC filing exceeds the bounded raw-table extraction limit.")
+
+                          chunks = []
+                          total = 0
+                          for chunk in response.iter_content(chunk_size=512 * 1024):
+                              if not chunk:
+                                  continue
+                              total += len(chunk)
+                              if total > max_bytes:
+                                  raise HTTPException(status_code=413, detail="SEC filing exceeds the bounded raw-table extraction limit.")
+                              chunks.append(chunk)
+                          encoding = response.encoding or "utf-8"
+                          return b"".join(chunks).decode(encoding, errors="replace")
+                  except HTTPException:
+                      raise
+                  except Exception as exc:
+                      last_error = exc
+                      if attempt < sec.SEC_MAX_RETRIES:
+                          time.sleep(0.75 * (2 ** attempt))
+                          continue
+              raise HTTPException(status_code=502, detail=f"SEC filing document temporarily unavailable: {last_error}")
+          '''.replace('          ', '')
+          text = text.replace(marker, helper + marker, 1)
+
+          old_loop = '''    for filing in filings:
+              html = company_driver_filings._sec_get_text(filing["source_url"])
+              if extractor_name == "jpm_cet1_ratio_raw":
+                  extracted = _jpm_cet1_ratio_raw(html, filing)
+              else:
+                  if extractor is None:
+                      raise ValueError(f"Unknown filing-table extractor: {extractor_name}")
+                  soup = BeautifulSoup(html, "html.parser")
+                  extracted = extractor(soup, filing)
+              rows.extend(extracted)
+              checked.append({
+                  "form": filing.get("form"), "filing_date": filing.get("filing_date"),
+                  "report_date": filing.get("report_date"), "accession": filing.get("accession"),
+                  "source_url": filing.get("source_url"), "observation_count": len(extracted),
+              })
+          '''.replace('          ', '')
+          new_loop = '''    for filing in filings:
+              fetch_mode = "bounded_raw_table" if extractor_name == "jpm_cet1_ratio_raw" else "standard_parser"
+              try:
+                  if extractor_name == "jpm_cet1_ratio_raw":
+                      html = _sec_get_raw_table_text(filing["source_url"])
+                      extracted = _jpm_cet1_ratio_raw(html, filing)
+                  else:
+                      html = company_driver_filings._sec_get_text(filing["source_url"])
+                      if extractor is None:
+                          raise ValueError(f"Unknown filing-table extractor: {extractor_name}")
+                      soup = BeautifulSoup(html, "html.parser")
+                      extracted = extractor(soup, filing)
+              except HTTPException as exc:
+                  if exc.status_code != 413:
+                      raise
+                  checked.append({
+                      "form": filing.get("form"), "filing_date": filing.get("filing_date"),
+                      "report_date": filing.get("report_date"), "accession": filing.get("accession"),
+                      "source_url": filing.get("source_url"), "observation_count": 0,
+                      "fetch_mode": fetch_mode, "skipped": True,
+                      "skip_reason": str(exc.detail or "filing_too_large"),
+                  })
+                  continue
+              rows.extend(extracted)
+              checked.append({
+                  "form": filing.get("form"), "filing_date": filing.get("filing_date"),
+                  "report_date": filing.get("report_date"), "accession": filing.get("accession"),
+                  "source_url": filing.get("source_url"), "observation_count": len(extracted),
+                  "fetch_mode": fetch_mode,
+              })
+          '''.replace('          ', '')
+          assert old_loop in text, 'history loop target not found'
+          text = text.replace(old_loop, new_loop, 1)
+          path.write_text(text)
+          PY
+
+          python -m py_compile company_driver_tables.py company_driver_history.py company_driver_store.py
+          python - <<'PY'
+          import company_driver_tables as tables
+          assert tables.JPM_RAW_MAX_HTML_BYTES == 32 * 1024 * 1024
+          assert tables.get_table_rule('JPM', 'cet1_ratio')['extractor'] == 'jpm_cet1_ratio_raw'
+          print('JPM_LARGE_FILING_STATIC_OK')
+          PY
+
+      - name: Commit patch and remove runner
+        run: |
+          rm .github/workflows/tmp-jpm-large-filing-patch.yml
+          git config user.name "ss-sanch"
+          git config user.email "mlgsanchit@gmail.com"
+          git add company_driver_tables.py .github/workflows/tmp-jpm-large-filing-patch.yml
+          git commit -m "Handle large JPM CET1 filings with bounded raw extraction"
+          git push origin HEAD:fix-jpm-cet1-large-filings
