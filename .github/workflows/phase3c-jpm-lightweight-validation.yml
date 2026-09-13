@@ -1,0 +1,55 @@
+name: Phase 3C JPM Lightweight Validation
+
+on:
+  push:
+    branches: [phase3c-jpm-lightweight-fix]
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: phase3c-jpm-lightweight-fix
+      - name: Install dependencies
+        run: pip install beautifulsoup4 requests fastapi
+      - name: Apply patch
+        run: python .phase3c_jpm_lightweight_patch.py
+      - name: Validate lightweight CET1 parser
+        run: |
+          python -m py_compile company_driver_tables.py company_driver_history.py company_drivers.py
+          python - <<'PY'
+          import company_driver_tables as t
+          import company_driver_filings as f
+
+          filing={'form':'10-Q','filing_date':'2026-08-06','report_date':'2026-06-30','accession':'0001628280-26-054343','source_url':'https://www.sec.gov/Archives/edgar/data/19617/test/jpm.htm'}
+          html='''<html><body><table><tr><td>Selected ratios</td></tr><tr><td>Common equity Tier 1 (“CET1”) capital ratio – Standardized<sup>(d)</sup></td><td><ix:nonfraction>14.2</ix:nonfraction></td><td>14.3</td><td>14.6</td></tr></table></body></html>'''
+          rows=t._jpm_cet1_ratio_raw(html,filing)
+          assert len(rows)==1, rows
+          assert rows[0]['value']==14.2, rows
+          assert rows[0]['extraction_method']=='sec_filing_table_raw_row'
+
+          fallback='''<table><tr><td>Risk-based capital metrics - Standardized</td></tr><tr><td>CET1 capital ratio</td><td>14.2%</td><td>15.0%</td></tr></table>'''
+          rows=t._jpm_cet1_ratio_raw(fallback,filing)
+          assert len(rows)==1 and rows[0]['value']==14.2, rows
+
+          # Ensure build_table_history does not construct a BeautifulSoup DOM for JPM.
+          t.BeautifulSoup=lambda *a,**k: (_ for _ in ()).throw(AssertionError('BeautifulSoup must not run for JPM CET1'))
+          f.recent_periodic_filings=lambda *a,**k:[filing]
+          f._sec_get_text=lambda url: html
+          out=t.build_table_history('JPM',{'key':'cet1_ratio','label':'CET1 Ratio'},1,'quarterly',10)
+          assert out['verified'] and out['observation_count']==1, out
+          assert out['observations'][0]['value']==14.2, out
+          print('PHASE3C_JPM_LIGHTWEIGHT_OK')
+          PY
+      - name: Commit permanent fix
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add company_driver_tables.py
+          git commit -m "Use lightweight JPM CET1 filing parser" || true
+          git pull --rebase origin phase3c-jpm-lightweight-fix
+          git push
