@@ -1,0 +1,28 @@
+name: Temporary JPM CET1 depth probe
+
+on:
+  push:
+    branches: [diagnose-jpm-cet1-depth]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Probe filing depths
+        shell: bash
+        run: |
+          set +e
+          API='https://sethistock-api.onrender.com/api/drivers/JPM/history/cet1_ratio'
+          for depth in 4 6 8 10 12 16; do
+            echo "===== filings=$depth ====="
+            curl -L -sS --connect-timeout 10 --max-time 180 \
+              -o "/tmp/jpm-$depth.json" \
+              -w 'http=%{http_code} start=%{time_starttransfer}s total=%{time_total}s bytes=%{size_download}\n' \
+              "$API?filings=$depth&period=quarterly&limit=40"
+            head -c 500 "/tmp/jpm-$depth.json" || true
+            echo
+          done
