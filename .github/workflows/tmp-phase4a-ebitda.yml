@@ -1,0 +1,56 @@
+name: Temporary Phase 4A EBITDA patch
+
+on:
+  push:
+    branches: [phase4a-financial-dashboard-12charts]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: phase4a-financial-dashboard-12charts
+          fetch-depth: 0
+      - name: Apply EBITDA patch
+        run: python .github/phase4a_ebitda_patch.py
+      - name: Compile backend modules
+        run: python -m py_compile fundamentals_normalizer.py fundamentals_periods.py sec_fundamentals.py
+      - name: Smoke-test EBITDA derivation
+        run: |
+          python - <<'PY'
+          from fundamentals_normalizer import build_normalized_fundamentals, NORMALIZATION_SCHEMA_VERSION
+          facts = {
+              'facts': {
+                  'us-gaap': {
+                      'OperatingIncomeLoss': {'units': {'USD': [{
+                          'val': 100.0, 'start': '2025-01-01', 'end': '2025-12-31',
+                          'filed': '2026-02-01', 'fy': 2025, 'fp': 'FY', 'form': '10-K',
+                          'frame': 'CY2025', 'accn': 'test-op'
+                      }]}},
+                      'DepreciationDepletionAndAmortization': {'units': {'USD': [{
+                          'val': 20.0, 'start': '2025-01-01', 'end': '2025-12-31',
+                          'filed': '2026-02-01', 'fy': 2025, 'fp': 'FY', 'form': '10-K',
+                          'frame': 'CY2025', 'accn': 'test-da'
+                      }]}}
+                  }
+              }
+          }
+          result = build_normalized_fundamentals(facts, metrics=['ebitda'])
+          assert NORMALIZATION_SCHEMA_VERSION == '2b-v2'
+          assert result['ebitda']['derived'] is True
+          assert result['ebitda']['formula'] == 'operating_income + depreciation_amortization'
+          assert result['ebitda']['observations'][0]['value'] == 120.0
+          print('EBITDA_DERIVATION_OK')
+          PY
+      - name: Commit backend feature
+        run: |
+          git config user.name "ss-sanch"
+          git config user.email "mlgsanchit@gmail.com"
+          git rm .github/workflows/tmp-phase4a-ebitda.yml .github/phase4a_ebitda_patch.py
+          git add fundamentals_normalizer.py
+          git commit -m "Add SEC-derived historical EBITDA"
+          git push origin phase4a-financial-dashboard-12charts
