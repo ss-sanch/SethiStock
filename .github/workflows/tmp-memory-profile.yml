@@ -1,0 +1,57 @@
+name: Temporary SethiStock memory profile
+on:
+  push:
+    branches: [diagnostic-memory-profile-2026-09-14]
+permissions:
+  contents: read
+jobs:
+  profile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: diagnostic-memory-profile-2026-09-14
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: Profile process RSS across stock analyses
+        run: |
+          python - <<'PY'
+          import gc, os, time
+
+          def rss_mb():
+              try:
+                  with open('/proc/self/status') as f:
+                      for line in f:
+                          if line.startswith('VmRSS:'):
+                              return round(int(line.split()[1]) / 1024, 1)
+              except Exception:
+                  return None
+
+          print({'stage':'python_start','rss_mb':rss_mb()})
+          import app
+          print({'stage':'after_import_app','rss_mb':rss_mb()})
+
+          for ticker in ('AMZN','UBER','SPGI'):
+              start=time.perf_counter()
+              before=rss_mb()
+              try:
+                  result=app.get_stock_data(ticker, None, False)
+                  status='ok'
+                  payload={
+                      'ticker': result.get('ticker'),
+                      'years': len((result.get('financials') or {}).get('years') or []),
+                      'research_events': len(((result.get('research') or {}).get('earnings_reaction') or {}).get('events') or []),
+                      'chart_points': len((result.get('chart_preview') or {}).get('closes') or []),
+                  }
+              except Exception as exc:
+                  status=f'error:{type(exc).__name__}:{exc}'
+                  payload={}
+              after=rss_mb()
+              print({'stage':'analysis','ticker':ticker,'seconds':round(time.perf_counter()-start,2),'rss_before_mb':before,'rss_after_mb':after,'delta_mb':None if before is None or after is None else round(after-before,1),'status':status,**payload})
+              gc.collect()
+              time.sleep(1)
+              print({'stage':'post_gc','ticker':ticker,'rss_mb':rss_mb()})
+          PY
