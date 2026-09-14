@@ -1,0 +1,66 @@
+name: Temporary Phase 4A initial data validation
+on:
+  push:
+    paths:
+      - '.github/workflows/tmp-phase4a-initial-data-validation.yml'
+permissions:
+  contents: write
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: phase4a-fast-initial-dashboard
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install runtime dependencies
+        run: pip install -r requirements.txt
+      - name: Validate unified initial payload against live market data
+        env:
+          SEC_USER_AGENT: 'SethiStock validation validation@example.com'
+        shell: bash
+        run: |
+          python - <<'PY'
+          import time
+          import app
+
+          for ticker in ('GOOGL', 'UBER'):
+              start = time.perf_counter()
+              result = app.get_stock_data(ticker, None, False)
+              elapsed = time.perf_counter() - start
+              fin = result.get('financials') or {}
+              research = result.get('research') or {}
+              preview = result.get('chart_preview') or {}
+              ebitda = [v for v in (fin.get('ebitda') or []) if isinstance(v, (int, float)) and v != 0]
+              valuation = research.get('valuation_bands') or {}
+              earnings = research.get('earnings_reaction') or {}
+              print({
+                  'ticker': ticker,
+                  'seconds': round(elapsed, 2),
+                  'years': len(fin.get('years') or []),
+                  'ebitda_points': len(ebitda),
+                  'pe_observations': len(valuation.get('observations') or []),
+                  'earnings_events': len(earnings.get('events') or []),
+                  'chart_points': len(preview.get('closes') or []),
+              })
+              assert len(fin.get('ebitda') or []) == len(fin.get('years') or [])
+              assert len(preview.get('closes') or []) >= 100
+              assert isinstance(research, dict) and 'valuation_bands' in research and 'earnings_reaction' in research
+              if ticker == 'GOOGL':
+                  assert len(ebitda) >= 3, 'GOOGL should expose recent EBITDA in initial payload'
+                  assert len(valuation.get('observations') or []) >= 4, 'GOOGL should expose P/E observations'
+                  assert len(earnings.get('events') or []) >= 4, 'GOOGL should expose earnings events'
+          print('PHASE4A_INITIAL_DATA_LIVE_OK')
+          PY
+      - name: Remove temporary validation workflow
+        if: always()
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/tmp-phase4a-initial-data-validation.yml
+          git commit -m 'Remove temporary initial dashboard validation' || true
+          git push origin HEAD:phase4a-fast-initial-dashboard
