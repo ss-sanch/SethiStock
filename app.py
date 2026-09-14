@@ -537,6 +537,19 @@ def _analysis_cache_payload_valid(payload):
         for value in stats.values():
             if isinstance(value, str) and ("nan" in value.lower() or "inf" in value.lower()):
                 return False
+
+    # Phase 4A initial-dashboard payload contract. Old six-hour analysis cache rows
+    # predate these fields; treating them as invalid refreshes only stock_analysis
+    # while preserving the independent quote/chart/ticker caches.
+    financials = payload.get("financials")
+    research = payload.get("research")
+    chart_preview = payload.get("chart_preview")
+    if not isinstance(financials, dict) or not isinstance(financials.get("ebitda"), list):
+        return False
+    if not isinstance(research, dict) or "valuation_bands" not in research or "earnings_reaction" not in research:
+        return False
+    if not isinstance(chart_preview, dict) or not isinstance(chart_preview.get("closes"), list):
+        return False
     return True
 
 
