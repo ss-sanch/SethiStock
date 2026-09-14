@@ -14,7 +14,7 @@ import math
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
-NORMALIZATION_SCHEMA_VERSION = "2b-v1"
+NORMALIZATION_SCHEMA_VERSION = "2b-v2"
 SOURCE_NAME = "SEC EDGAR Company Facts"
 
 ACCEPTED_FORMS = {
@@ -109,6 +109,17 @@ DIRECT_METRICS: Dict[str, Dict[str, Any]] = {
         "unit": "USD",
         "candidates": [("us-gaap", "OperatingIncomeLoss")],
     },
+    "depreciation_amortization": {
+        "label": "Depreciation & Amortization",
+        "kind": "flow",
+        "unit": "USD",
+        "candidates": [
+            ("us-gaap", "DepreciationDepletionAndAmortization"),
+            ("us-gaap", "DepreciationDepletionAndAmortizationPropertyPlantAndEquipment"),
+            ("us-gaap", "DepreciationAndAmortization"),
+            ("us-gaap", "Depreciation"),
+        ],
+    },
 }
 
 # Debt is a derived instant metric. Each component group selects at most one concept
@@ -132,6 +143,7 @@ DEBT_COMPONENTS: Dict[str, List[Tuple[str, str]]] = {
 NORMALIZED_METRIC_ORDER = [
     "revenue",
     "net_income",
+    "ebitda",
     "operating_cash_flow",
     "capex",
     "free_cash_flow",
@@ -144,6 +156,12 @@ NORMALIZED_METRIC_ORDER = [
 ]
 
 DERIVED_METRIC_INFO = {
+    "ebitda": {
+        "label": "EBITDA",
+        "kind": "flow",
+        "unit": "USD",
+        "formula": "operating_income + depreciation_amortization",
+    },
     "free_cash_flow": {
         "label": "Free Cash Flow",
         "kind": "flow",
@@ -419,6 +437,46 @@ def _derived_flow_row(
     }
 
 
+def derive_ebitda(
+    operating_income: Dict[str, Any],
+    depreciation_amortization: Dict[str, Any],
+    limit: int = 250,
+) -> Dict[str, Any]:
+    operating_by_period = _by_period(operating_income["observations"])
+    da_by_period = _by_period(depreciation_amortization["observations"])
+    rows = []
+    for period, operating_row in operating_by_period.items():
+        da_row = da_by_period.get(period)
+        if da_row is None:
+            continue
+        value = float(operating_row["value"]) + abs(float(da_row["value"]))
+        if not math.isfinite(value):
+            continue
+        rows.append(
+            _derived_flow_row(
+                value=value,
+                unit="USD",
+                components=[
+                    ("operating_income", operating_row),
+                    ("depreciation_amortization", da_row),
+                ],
+                formula=DERIVED_METRIC_INFO["ebitda"]["formula"],
+            )
+        )
+    rows.sort(key=lambda row: (str(row.get("end") or ""), str(row.get("start") or "")))
+    if limit > 0 and len(rows) > limit:
+        rows = rows[-limit:]
+    return _metric_payload(
+        metric="ebitda",
+        label="EBITDA",
+        kind="flow",
+        unit="USD",
+        observations=rows,
+        derived=True,
+        formula=DERIVED_METRIC_INFO["ebitda"]["formula"],
+    )
+
+
 def derive_free_cash_flow(
     operating_cash_flow: Dict[str, Any],
     capex: Dict[str, Any],
@@ -685,6 +743,8 @@ def build_normalized_fundamentals(
     for metric in requested:
         if metric in DIRECT_METRICS:
             required_direct.add(metric)
+        elif metric == "ebitda":
+            required_direct.update({"operating_income", "depreciation_amortization"})
         elif metric == "free_cash_flow":
             required_direct.update({"operating_cash_flow", "capex"})
         elif metric == "gross_margin":
@@ -712,6 +772,10 @@ def build_normalized_fundamentals(
                 observations=observations,
                 derived=False,
                 formula=None,
+            )
+        elif metric == "ebitda":
+            output[metric] = derive_ebitda(
+                direct["operating_income"], direct["depreciation_amortization"], limit=limit
             )
         elif metric == "free_cash_flow":
             output[metric] = derive_free_cash_flow(
