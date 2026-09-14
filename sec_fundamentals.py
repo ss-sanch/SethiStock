@@ -557,10 +557,14 @@ def sec_fundamental_series(
             detail=f"Unknown normalised metrics: {', '.join(sorted(set(unknown)))}",
         )
 
+    raw_limit = min(
+        fundamentals_store.FUNDAMENTALS_SYNC_LIMIT,
+        max(200, limit * 4),
+    )
     normalized_response = sec_normalized_fundamentals(
         ticker=ticker,
-        metrics=None,
-        limit=fundamentals_store.FUNDAMENTALS_SYNC_LIMIT,
+        metrics=metrics,
+        limit=raw_limit,
     )
 
     try:

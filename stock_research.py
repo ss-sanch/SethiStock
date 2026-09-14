@@ -190,7 +190,7 @@ def _earnings_reaction_study(events):
     }
 
 
-def _historical_valuation_bands(stock, prices, events):
+def _historical_valuation_bands(stock, prices, events, current_pe_override=None):
     reported_events = [e for e in events if e.get("reported_eps") is not None]
     observations = []
 
@@ -212,17 +212,18 @@ def _historical_valuation_bands(stock, prices, events):
             "price": round(price, 2),
         })
 
-    current_pe = None
-    try:
-        info = stock.info or {}
-        current_pe = _safe_float(info.get("trailingPE"))
-        if current_pe is None:
-            trailing_eps = _safe_float(info.get("trailingEps"))
-            current_price = _safe_float(prices["Close"].iloc[-1]) if not prices.empty else None
-            if trailing_eps and trailing_eps > 0 and current_price:
-                current_pe = current_price / trailing_eps
-    except Exception:
-        current_pe = None
+    current_pe = _safe_float(current_pe_override)
+    if current_pe is None:
+        try:
+            info = stock.info or {}
+            current_pe = _safe_float(info.get("trailingPE"))
+            if current_pe is None:
+                trailing_eps = _safe_float(info.get("trailingEps"))
+                current_price = _safe_float(prices["Close"].iloc[-1]) if not prices.empty else None
+                if trailing_eps and trailing_eps > 0 and current_price:
+                    current_pe = current_price / trailing_eps
+        except Exception:
+            current_pe = None
 
     historical_values = np.array([obs["pe"] for obs in observations], dtype=float)
     if historical_values.size < 4:
@@ -268,18 +269,21 @@ def _historical_valuation_bands(stock, prices, events):
     }
 
 
-def _calculate_stock_research(ticker):
-    stock = yf.Ticker(ticker)
-    try:
-        prices = _normalise_price_history(stock.history(period="5y", interval="1d", auto_adjust=False))
-    except Exception:
-        prices = pd.DataFrame()
+def _calculate_stock_research(ticker, stock=None, prices=None, current_pe=None):
+    stock = stock or yf.Ticker(ticker)
+    if prices is None:
+        try:
+            prices = _normalise_price_history(stock.history(period="5y", interval="1d", auto_adjust=False))
+        except Exception:
+            prices = pd.DataFrame()
+    else:
+        prices = _normalise_price_history(prices)
 
     events = _build_earnings_events(stock, prices)
     return {
         "ticker": ticker,
         "earnings_reaction": _earnings_reaction_study(events),
-        "valuation_bands": _historical_valuation_bands(stock, prices, events),
+        "valuation_bands": _historical_valuation_bands(stock, prices, events, current_pe_override=current_pe),
         "methodology": {
             "earnings_reaction": "Close-to-close reaction around historical earnings releases; five-day return is measured from the same pre-release baseline.",
             "valuation_bands": "P/E is reconstructed after each earnings release using the latest four reported quarterly EPS figures. It is an historical comparison tool, not a live consensus forecast.",
@@ -288,9 +292,8 @@ def _calculate_stock_research(ticker):
     }
 
 
-@router.get("/{raw_ticker}")
-def get_stock_research(raw_ticker: str):
-    ticker = raw_ticker.strip().upper()
+def get_stock_research_payload(ticker, stock=None, prices=None, current_pe=None):
+    ticker = str(ticker or '').strip().upper()
     if not ticker or len(ticker) > 20:
         return {"ticker": ticker, "earnings_reaction": {"available": False}, "valuation_bands": {"available": False}}
 
@@ -300,7 +303,7 @@ def get_stock_research(raw_ticker: str):
         return cached[1]
 
     try:
-        result = _calculate_stock_research(ticker)
+        result = _calculate_stock_research(ticker, stock=stock, prices=prices, current_pe=current_pe)
     except Exception as exc:
         result = {
             "ticker": ticker,
@@ -311,3 +314,8 @@ def get_stock_research(raw_ticker: str):
 
     _RESEARCH_CACHE[ticker] = (now, result)
     return result
+
+
+@router.get("/{raw_ticker}")
+def get_stock_research(raw_ticker: str):
+    return get_stock_research_payload(raw_ticker)
