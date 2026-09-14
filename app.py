@@ -14,7 +14,6 @@ from datetime import datetime, timezone, timedelta
 import math
 import copy
 import threading
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from scipy.stats import norm
 from scipy.optimize import minimize
 import market_risk_lab
@@ -48,7 +47,47 @@ CACHE_HTTP_TIMEOUT = float(os.getenv("SETHISTOCK_CACHE_HTTP_TIMEOUT", "2.5"))
 _CACHE_REFRESH_LOCK = threading.Lock()
 _CACHE_REFRESH_INFLIGHT = set()
 _CACHE_REFRESH_CONTEXT = threading.local()
-_RESEARCH_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="sethistock-research")
+STOCK_ANALYSIS_MAX_CONCURRENT = max(1, int(os.getenv("SETHISTOCK_MAX_STOCK_ANALYSES", "1")))
+STOCK_ANALYSIS_QUEUE_TIMEOUT = max(1.0, float(os.getenv("SETHISTOCK_ANALYSIS_QUEUE_TIMEOUT", "20")))
+_STOCK_ANALYSIS_GATE = threading.BoundedSemaphore(STOCK_ANALYSIS_MAX_CONCURRENT)
+_STOCK_ANALYSIS_STATE_LOCK = threading.Lock()
+_STOCK_ANALYSIS_ACTIVE = 0
+_STOCK_ANALYSIS_PEAK = 0
+_STOCK_ANALYSIS_TOTAL = 0
+_STOCK_ANALYSIS_ACTIVE_TICKERS = {}
+
+
+def _process_rss_mb():
+    try:
+        with open("/proc/self/status", "r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("VmRSS:"):
+                    return round(int(line.split()[1]) / 1024.0, 1)
+    except Exception:
+        return None
+    return None
+
+
+def _stock_analysis_started(ticker):
+    global _STOCK_ANALYSIS_ACTIVE, _STOCK_ANALYSIS_PEAK, _STOCK_ANALYSIS_TOTAL
+    symbol = str(ticker or "").upper()
+    with _STOCK_ANALYSIS_STATE_LOCK:
+        _STOCK_ANALYSIS_ACTIVE += 1
+        _STOCK_ANALYSIS_TOTAL += 1
+        _STOCK_ANALYSIS_PEAK = max(_STOCK_ANALYSIS_PEAK, _STOCK_ANALYSIS_ACTIVE)
+        _STOCK_ANALYSIS_ACTIVE_TICKERS[symbol] = _STOCK_ANALYSIS_ACTIVE_TICKERS.get(symbol, 0) + 1
+
+
+def _stock_analysis_finished(ticker):
+    global _STOCK_ANALYSIS_ACTIVE
+    symbol = str(ticker or "").upper()
+    with _STOCK_ANALYSIS_STATE_LOCK:
+        _STOCK_ANALYSIS_ACTIVE = max(0, _STOCK_ANALYSIS_ACTIVE - 1)
+        count = _STOCK_ANALYSIS_ACTIVE_TICKERS.get(symbol, 0) - 1
+        if count > 0:
+            _STOCK_ANALYSIS_ACTIVE_TICKERS[symbol] = count
+        else:
+            _STOCK_ANALYSIS_ACTIVE_TICKERS.pop(symbol, None)
 
 
 def _cache_base_url():
@@ -523,6 +562,25 @@ def cache_status():
     }
 
 
+@app.get("/api/runtime/status")
+def runtime_status():
+    with _STOCK_ANALYSIS_STATE_LOCK:
+        active = _STOCK_ANALYSIS_ACTIVE
+        peak = _STOCK_ANALYSIS_PEAK
+        total = _STOCK_ANALYSIS_TOTAL
+        tickers = dict(_STOCK_ANALYSIS_ACTIVE_TICKERS)
+    return {
+        "rss_mb": _process_rss_mb(),
+        "stock_analyses_active": active,
+        "stock_analyses_peak": peak,
+        "stock_analyses_total": total,
+        "active_tickers": tickers,
+        "max_concurrent_stock_analyses": STOCK_ANALYSIS_MAX_CONCURRENT,
+        "analysis_queue_timeout_seconds": STOCK_ANALYSIS_QUEUE_TIMEOUT,
+        "cache_refreshes_inflight": len(_CACHE_REFRESH_INFLIGHT),
+    }
+
+
 def _analysis_cache_payload_valid(payload):
     if not isinstance(payload, dict):
         return False
@@ -578,6 +636,22 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
                     _schedule_cache_refresh(background_tasks, f"stock_analysis:{ticker}", "stock_analysis", get_stock_data, ticker, None, False)
                 return cached_analysis
         
+        analysis_slot_acquired = False
+        if not is_peer:
+            if not _STOCK_ANALYSIS_GATE.acquire(timeout=STOCK_ANALYSIS_QUEUE_TIMEOUT):
+                raise HTTPException(status_code=503, detail="SethiStock analysis is busy. Please retry shortly.")
+            analysis_slot_acquired = True
+            _stock_analysis_started(ticker)
+
+            # A previous queued request may have populated this exact ticker while we waited.
+            queued_cached, _queued_state = _cache_get_swr("stock_analysis", ticker, CACHE_STALE_STOCK)
+            if _analysis_cache_payload_valid(queued_cached):
+                queued_cached = copy.deepcopy(queued_cached)
+                _stock_analysis_finished(ticker)
+                _STOCK_ANALYSIS_GATE.release()
+                analysis_slot_acquired = False
+                return queued_cached
+
         f_info, fin, cf, bs, info = None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}
         q_fin = pd.DataFrame() 
         
@@ -622,28 +696,17 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
         recent_hist = shared_hist.tail(5).copy() if shared_hist is not None and not shared_hist.empty else pd.DataFrame()
 
         # Reuse the already-fetched five-year price history for valuation/earnings research.
-        # This replaces the frontend's second five-year Yahoo download and lets the three
-        # supplementary financial charts arrive inside the main analysis payload.
-        research_future = None
+        # Keep this inside the bounded stock-analysis request rather than spawning another
+        # worker that can overlap memory-heavy pandas/yfinance work on a small Render instance.
+        current_pe_hint = None
         try:
-            current_pe_hint = None
-            try:
-                raw_pe = (info or {}).get("trailingPE")
-                if raw_pe is not None:
-                    current_pe_hint = float(raw_pe)
-                    if not np.isfinite(current_pe_hint) or current_pe_hint <= 0:
-                        current_pe_hint = None
-            except Exception:
-                current_pe_hint = None
-            research_future = _RESEARCH_EXECUTOR.submit(
-                stock_research.get_stock_research_payload,
-                ticker,
-                yf.Ticker(ticker),
-                shared_hist.copy() if shared_hist is not None else pd.DataFrame(),
-                current_pe_hint,
-            )
+            raw_pe = (info or {}).get("trailingPE")
+            if raw_pe is not None:
+                current_pe_hint = float(raw_pe)
+                if not np.isfinite(current_pe_hint) or current_pe_hint <= 0:
+                    current_pe_hint = None
         except Exception:
-            research_future = None
+            current_pe_hint = None
 
         # 2. RUN THE FINVIZ SCRAPER TO FILL IN THE BLANKS
         fv_stats, fv_insiders, fv_summary = scrape_finviz_data(ticker)
@@ -1018,13 +1081,12 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
             "earnings_reaction": {"available": False},
             "valuation_bands": {"available": False},
         }
-        if research_future is not None:
-            try:
-                research_payload = research_future.result(timeout=2.5)
-            except FuturesTimeoutError:
-                pass
-            except Exception:
-                pass
+        try:
+            research_payload = stock_research.get_stock_research_payload(
+                ticker, stock, shared_hist, current_pe_hint
+            )
+        except Exception:
+            pass
 
         chart_preview = {"dates": [], "opens": [], "highs": [], "lows": [], "closes": []}
         try:
@@ -1054,8 +1116,22 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
         }
         if not is_peer:
             _cache_write("stock_analysis", ticker, result, CACHE_TTL_STOCK, ticker=ticker)
+        if analysis_slot_acquired:
+            _stock_analysis_finished(ticker)
+            _STOCK_ANALYSIS_GATE.release()
+            analysis_slot_acquired = False
         return result
+    except HTTPException:
+        if locals().get("analysis_slot_acquired", False):
+            _stock_analysis_finished(locals().get("ticker", raw_ticker))
+            _STOCK_ANALYSIS_GATE.release()
+            analysis_slot_acquired = False
+        raise
     except Exception as e:
+        if locals().get("analysis_slot_acquired", False):
+            _stock_analysis_finished(locals().get("ticker", raw_ticker))
+            _STOCK_ANALYSIS_GATE.release()
+            analysis_slot_acquired = False
         raise HTTPException(status_code=500, detail=str(e))
 
 # --- SETHISTOCK: LIGHTWEIGHT PEER SNAPSHOT API ---
