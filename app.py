@@ -14,6 +14,7 @@ from datetime import datetime, timezone, timedelta
 import math
 import copy
 import threading
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from scipy.stats import norm
 from scipy.optimize import minimize
 import market_risk_lab
@@ -47,6 +48,7 @@ CACHE_HTTP_TIMEOUT = float(os.getenv("SETHISTOCK_CACHE_HTTP_TIMEOUT", "2.5"))
 _CACHE_REFRESH_LOCK = threading.Lock()
 _CACHE_REFRESH_INFLIGHT = set()
 _CACHE_REFRESH_CONTEXT = threading.local()
+_RESEARCH_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="sethistock-research")
 
 
 def _cache_base_url():
@@ -606,6 +608,30 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
 
         recent_hist = shared_hist.tail(5).copy() if shared_hist is not None and not shared_hist.empty else pd.DataFrame()
 
+        # Reuse the already-fetched five-year price history for valuation/earnings research.
+        # This replaces the frontend's second five-year Yahoo download and lets the three
+        # supplementary financial charts arrive inside the main analysis payload.
+        research_future = None
+        try:
+            current_pe_hint = None
+            try:
+                raw_pe = (info or {}).get("trailingPE")
+                if raw_pe is not None:
+                    current_pe_hint = float(raw_pe)
+                    if not np.isfinite(current_pe_hint) or current_pe_hint <= 0:
+                        current_pe_hint = None
+            except Exception:
+                current_pe_hint = None
+            research_future = _RESEARCH_EXECUTOR.submit(
+                stock_research.get_stock_research_payload,
+                ticker,
+                yf.Ticker(ticker),
+                shared_hist.copy() if shared_hist is not None else pd.DataFrame(),
+                current_pe_hint,
+            )
+        except Exception:
+            research_future = None
+
         # 2. RUN THE FINVIZ SCRAPER TO FILL IN THE BLANKS
         fv_stats, fv_insiders, fv_summary = scrape_finviz_data(ticker)
 
@@ -649,7 +675,7 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
         pct_change = (change / prev_close) * 100 if prev_close else 0
 
         fin_data = {
-            "years": [], "revenue": [], "operating": [], "net": [], 
+            "years": [], "revenue": [], "operating": [], "net": [], "ebitda": [],
             "gross_margin": [], "op_margin": [], "net_margin": [],
             "fcf": [], "ocf": [], "capex": [], "cash": [], "debt": [], "shares": []
         }
@@ -675,10 +701,16 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
             net = get_hist(fin, ['Net Income', 'Net Income Common Stockholders', 'Net Profit'])
             op_inc = get_hist(fin, ['Operating Income', 'Operating Profit'])
             gross = get_hist(fin, ['Gross Profit'])
+            ebitda_hist = get_hist(fin, ['EBITDA', 'Normalized EBITDA'])
+            if not any(ebitda_hist or []):
+                da_hist = get_hist(cf, ['Depreciation And Amortization', 'Depreciation', 'Reconciled Depreciation'])
+                if da_hist and len(da_hist) == len(op_inc):
+                    ebitda_hist = [o + abs(d) if (o or d) else 0 for o, d in zip(op_inc, da_hist)]
 
             fin_data["revenue"] = rev if rev else [0]*len(cols)
             fin_data["operating"] = op_inc if op_inc else [0]*len(cols)
             fin_data["net"] = net if net else [0]*len(cols)
+            fin_data["ebitda"] = ebitda_hist if ebitda_hist else [0]*len(cols)
 
             fin_data["op_margin"] = [(o/r*100) if r else 0 for o, r in zip(fin_data["operating"], fin_data["revenue"])]
             fin_data["net_margin"] = [(n/r*100) if r else 0 for n, r in zip(fin_data["net"], fin_data["revenue"])]
@@ -781,35 +813,38 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
         try:
             cash_on_hand = fin_data["cash"][-1] if fin_data["cash"] and len(fin_data["cash"]) > 0 else 0
             ev = final_mkt_cap + fallback_debt - cash_on_hand
-            ebitda = fin_data["operating"][-1] if fin_data["operating"] and len(fin_data["operating"]) > 0 else 0
+            ebitda = fin_data["ebitda"][-1] if fin_data.get("ebitda") and fin_data["ebitda"][-1] > 0 else (fin_data["operating"][-1] if fin_data["operating"] else 0)
             fallback_ev_ebitda = round(ev / ebitda, 2) if ebitda > 0 else "N/A"
         except Exception:
             fallback_ev_ebitda = "N/A"
 
         fallback_div_yield = "N/A"
-        try:
-            divs = stock.dividends
-            if divs is not None and not divs.empty:
-                recent_divs = divs[divs.index > (pd.Timestamp.now(tz=divs.index.tz) - pd.DateOffset(years=1))]
-                if not recent_divs.empty and current_price > 0:
-                    yield_pct = (recent_divs.sum() / current_price) * 100
-                    fallback_div_yield = f"{round(yield_pct, 2)}%"
-        except Exception:
-            pass
+        has_info_dividend = bool((info or {}).get("dividendYield") or (info or {}).get("trailingAnnualDividendYield"))
+        if not has_info_dividend:
+            try:
+                divs = stock.dividends
+                if divs is not None and not divs.empty:
+                    recent_divs = divs[divs.index > (pd.Timestamp.now(tz=divs.index.tz) - pd.DateOffset(years=1))]
+                    if not recent_divs.empty and current_price > 0:
+                        yield_pct = (recent_divs.sum() / current_price) * 100
+                        fallback_div_yield = f"{round(yield_pct, 2)}%"
+            except Exception:
+                pass
 
         fallback_beta = "N/A"
-        try:
-            spy_hist = yf.Ticker("SPY").history(period="1y")
-            daily_hist = shared_hist.tail(260).copy() if shared_hist is not None and not shared_hist.empty else pd.DataFrame()
-            if not daily_hist.empty and not spy_hist.empty:
-                stock_rets = daily_hist['Close'].pct_change().dropna()
-                spy_rets = spy_hist['Close'].pct_change().dropna()
-                aligned = pd.concat([stock_rets, spy_rets], axis=1).dropna()
-                covar = np.cov(aligned.iloc[:,0], aligned.iloc[:,1])[0][1]
-                spy_var = np.var(aligned.iloc[:,1])
-                fallback_beta = round(covar / spy_var, 2) if spy_var > 0 else "N/A"
-        except Exception:
-            pass
+        if not (info and info.get("beta")):
+            try:
+                spy_hist = yf.Ticker("SPY").history(period="1y")
+                daily_hist = shared_hist.tail(260).copy() if shared_hist is not None and not shared_hist.empty else pd.DataFrame()
+                if not daily_hist.empty and not spy_hist.empty:
+                    stock_rets = daily_hist['Close'].pct_change().dropna()
+                    spy_rets = spy_hist['Close'].pct_change().dropna()
+                    aligned = pd.concat([stock_rets, spy_rets], axis=1).dropna()
+                    covar = np.cov(aligned.iloc[:,0], aligned.iloc[:,1])[0][1]
+                    spy_var = np.var(aligned.iloc[:,1])
+                    fallback_beta = round(covar / spy_var, 2) if spy_var > 0 else "N/A"
+            except Exception:
+                pass
 
         def format_mkt_cap(val):
             if val >= 1e12: return f"${val/1e12:.2f}T"
@@ -965,12 +1000,41 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
         }
         peers = ticker_peers.get(ticker.upper(), ['SPY', 'QQQ', 'DIA'])
 
+        research_payload = {
+            "ticker": ticker.upper(),
+            "earnings_reaction": {"available": False},
+            "valuation_bands": {"available": False},
+        }
+        if research_future is not None:
+            try:
+                research_payload = research_future.result(timeout=2.5)
+            except FuturesTimeoutError:
+                pass
+            except Exception:
+                pass
+
+        chart_preview = {"dates": [], "opens": [], "highs": [], "lows": [], "closes": []}
+        try:
+            preview_hist = shared_hist.tail(260).copy() if shared_hist is not None and not shared_hist.empty else pd.DataFrame()
+            if not preview_hist.empty:
+                chart_preview = {
+                    "dates": preview_hist.index.strftime('%Y-%m-%d %H:%M:%S').tolist(),
+                    "opens": preview_hist['Open'].astype(float).tolist(),
+                    "highs": preview_hist['High'].astype(float).tolist(),
+                    "lows": preview_hist['Low'].astype(float).tolist(),
+                    "closes": preview_hist['Close'].astype(float).tolist(),
+                }
+        except Exception:
+            pass
+
         result = {
             "ticker": ticker.upper(), "current_price": round(current_price, 2),
             "change": round(change, 2), "pct_change": round(pct_change, 2),
             "shares": shares, "fcf": latest_fcf, "financials": fin_data, "stats": stats,
             "insiders": insider_list, "peers": peers,
             "summary": short_summary,
+            "research": research_payload,
+            "chart_preview": chart_preview,
             "dupont_analysis": dupont_metrics,            
             "risk_profile": risk_metrics,                
             "sensitivity_matrix": sensitivity_matrix     
