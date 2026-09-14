@@ -1,0 +1,47 @@
+name: Temporary Phase 4A EBITDA production smoke
+
+on:
+  push:
+    branches: [phase4a-financial-dashboard-12charts]
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for deployed EBITDA series and validate
+        run: |
+          python - <<'PY'
+          import json, time, urllib.parse, urllib.request
+
+          base = 'https://sethistock-api.onrender.com'
+          tests = [
+              ('AAPL', 'annual'),
+              ('NVDA', 'quarterly'),
+              ('MSFT', 'ttm'),
+          ]
+          last = None
+          for attempt in range(20):
+              try:
+                  successes = []
+                  for ticker, period in tests:
+                      query = urllib.parse.urlencode({'period': period, 'metrics': 'ebitda', 'limit': 40})
+                      url = f'{base}/api/sec/{ticker}/fundamentals/series?{query}'
+                      with urllib.request.urlopen(url, timeout=45) as response:
+                          payload = json.load(response)
+                      metric = (payload.get('metrics') or {}).get('ebitda') or {}
+                      series = metric.get('series') or []
+                      if payload.get('schema_version') != '2b-v2':
+                          raise RuntimeError(f'{ticker} {period}: schema={payload.get("schema_version")}')
+                      if not series:
+                          raise RuntimeError(f'{ticker} {period}: empty EBITDA series')
+                      if not all(point.get('value') is not None for point in series):
+                          raise RuntimeError(f'{ticker} {period}: null EBITDA values')
+                      successes.append((ticker, period, len(series), series[-1].get('value')))
+                  print('EBITDA_PRODUCTION_OK', successes)
+                  raise SystemExit(0)
+              except Exception as exc:
+                  last = exc
+                  print(f'Attempt {attempt + 1}/20 waiting for Render: {exc}')
+                  time.sleep(15)
+          raise SystemExit(f'Production EBITDA smoke failed: {last}')
+          PY
