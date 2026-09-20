@@ -820,7 +820,22 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
             
         sh_val = get_fast_info(f_info, 'shares')
         shares = safe_float(sh_val, safe_float(info.get('sharesOutstanding') if info else 0))
-            
+
+        # The browser requests /api/quote in parallel. If a core Yahoo source timed out,
+        # reuse that already-persisted lightweight quote rather than returning $0 basics.
+        if source_timeouts and not is_peer and (current_price <= 0 or prev_close <= 0):
+            try:
+                cached_quote_fallback, _quote_state = _cache_get_swr("quote", ticker, CACHE_STALE_QUOTE)
+                if isinstance(cached_quote_fallback, dict):
+                    quote_price = safe_float(cached_quote_fallback.get("current_price"))
+                    quote_change = safe_float(cached_quote_fallback.get("change"))
+                    if current_price <= 0 and quote_price > 0:
+                        current_price = quote_price
+                    if prev_close <= 0 and current_price > 0:
+                        prev_close = current_price - quote_change
+            except Exception:
+                pass
+
         change = current_price - prev_close
         pct_change = (change / prev_close) * 100 if prev_close else 0
 
@@ -1139,13 +1154,13 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
                 "request_ms": round((time.perf_counter() - analysis_started_at) * 1000),
                 "served_from_cache": False,
                 "research_deferred": True,
-                "analysis_degraded": bool(source_timeouts),
+                "analysis_degraded": bool(source_timeouts or source_errors),
                 "source_timeouts": source_timeouts,
                 "source_errors": source_errors,
                 "source_budget_seconds": STOCK_SOURCE_BUDGET_SECONDS,
             }
         }
-        if not is_peer and not source_timeouts:
+        if not is_peer and not source_timeouts and not source_errors:
             _cache_write("stock_analysis", ticker, result, CACHE_TTL_STOCK, ticker=ticker)
         if analysis_slot_acquired:
             _stock_analysis_finished(ticker)
@@ -1616,6 +1631,7 @@ def get_admin_metrics(secret: str):
 
         server_wake_values = _numeric_ms(load_logs, "server_wake_ms")
         server_cold_rows = [row for row in load_logs if row.get("server_state") == "cold"]
+        server_known_rows = [row for row in load_logs if row.get("server_state") in {"warm", "cold"}]
         load_performance = {
             "samples": len(load_logs),
             "avg_quote_ms": _avg(quote_values),
@@ -1626,7 +1642,7 @@ def get_admin_metrics(secret: str):
             "avg_cached_full_ms": _avg(_numeric_ms(cached_rows, "full_ms")),
             "avg_cold_full_ms": _avg(_numeric_ms(cold_rows, "full_ms")),
             "avg_server_wake_ms": _avg(server_wake_values),
-            "server_cold_rate_pct": round((len(server_cold_rows) / len(load_logs)) * 100, 1) if load_logs else 0.0,        }
+            "server_cold_rate_pct": round((len(server_cold_rows) / len(server_known_rows)) * 100, 1) if server_known_rows else 0.0,        }
 
         return {
             "total_events": total_events,
