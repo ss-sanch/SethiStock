@@ -14,6 +14,7 @@ from datetime import datetime, timezone, timedelta
 import math
 import copy
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from scipy.stats import norm
 from scipy.optimize import minimize
 import market_risk_lab
@@ -298,6 +299,16 @@ class TelemetryPayload(BaseModel):
     action: str
     ticker: Optional[str] = None
     visitor_id: Optional[str] = None # <-- NEW: Accept the anonymous ID
+
+class LoadTimingPayload(BaseModel):
+    ticker: str
+    quote_ms: Optional[int] = None
+    full_ms: Optional[int] = None
+    backend_ms: Optional[int] = None
+    cache_hit: Optional[bool] = None
+    status: str = "full"
+    visitor_id: Optional[str] = None
+    error_code: Optional[str] = None
 
 def log_telemetry_event(project: str, action: str, ticker: Optional[str] = None, visitor_id: Optional[str] = None):
     """Silently logs user interactions to Supabase without blocking requests."""
@@ -614,6 +625,8 @@ def _analysis_cache_payload_valid(payload):
 @app.get("/api/stock/{raw_ticker}")
 def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is_peer: bool = False):
     try:
+        analysis_started_at = time.perf_counter()
+
         if not is_peer and not getattr(_CACHE_REFRESH_CONTEXT, "suppress_telemetry", False):
             log_telemetry_event(project="SethiStock", action="ticker_search", ticker=raw_ticker)
         ticker = _resolve_ticker_cached(raw_ticker, background_tasks)
@@ -634,6 +647,10 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
                     pass
                 if should_refresh_analysis:
                     _schedule_cache_refresh(background_tasks, f"stock_analysis:{ticker}", "stock_analysis", get_stock_data, ticker, None, False)
+                meta = cached_analysis.get("_meta") if isinstance(cached_analysis.get("_meta"), dict) else {}
+                meta["served_from_cache"] = True
+                meta["request_ms"] = round((time.perf_counter() - analysis_started_at) * 1000)
+                cached_analysis["_meta"] = meta
                 return cached_analysis
         
         analysis_slot_acquired = False
@@ -647,6 +664,10 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
             queued_cached, _queued_state = _cache_get_swr("stock_analysis", ticker, CACHE_STALE_STOCK)
             if _analysis_cache_payload_valid(queued_cached):
                 queued_cached = copy.deepcopy(queued_cached)
+                meta = queued_cached.get("_meta") if isinstance(queued_cached.get("_meta"), dict) else {}
+                meta["served_from_cache"] = True
+                meta["request_ms"] = round((time.perf_counter() - analysis_started_at) * 1000)
+                queued_cached["_meta"] = meta
                 _stock_analysis_finished(ticker)
                 _STOCK_ANALYSIS_GATE.release()
                 analysis_slot_acquired = False
@@ -655,36 +676,63 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
         f_info, fin, cf, bs, info = None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}
         q_fin = pd.DataFrame() 
         
-        # 1. NATIVE YFINANCE FETCH
+        # 1. NATIVE MARKET-DATA FETCH
+        # Cold-cache requests used to perform Yahoo statements, quote-summary, history
+        # and Finviz calls serially. These are network-bound, so run the independent
+        # groups concurrently and keep the initial analysis latency closer to the slowest
+        # upstream call rather than the sum of every call.
         stock = yf.Ticker(ticker)
-        
-        try: f_info = stock.fast_info
-        except Exception: f_info = None
-        
-        try: fin = stock.financials
-        except Exception: fin = pd.DataFrame()
-        
-        try: cf = stock.cashflow
-        except Exception: cf = pd.DataFrame()
-        
-        try: bs = stock.balance_sheet
-        except Exception: bs = pd.DataFrame()
-        
-        try: q_fin = stock.quarterly_financials
-        except Exception: q_fin = pd.DataFrame()
-        
-        try: 
-            fetched_info = stock.info 
-            if fetched_info: info = fetched_info  
-        except Exception: pass
-        
-        # Shared daily history for price, risk, beta and technical indicators.
-        # One 5Y fetch replaces the former 5D + 5Y + 1Y + 1Y stock-history calls.
-        shared_hist = pd.DataFrame()
-        try:
-            shared_hist = stock.history(period="5y", interval="1d")
-        except Exception:
-            pass
+
+        def _fetch_statement_bundle():
+            local_fin, local_cf, local_bs, local_q_fin = pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+            try: local_fin = stock.financials
+            except Exception: pass
+            try: local_cf = stock.cashflow
+            except Exception: pass
+            try: local_bs = stock.balance_sheet
+            except Exception: pass
+            try: local_q_fin = stock.quarterly_financials
+            except Exception: pass
+            return local_fin, local_cf, local_bs, local_q_fin
+
+        def _fetch_info_and_finviz():
+            local_fast, local_info = None, {}
+            try: local_fast = stock.fast_info
+            except Exception: pass
+            try:
+                fetched = stock.info
+                if fetched: local_info = fetched
+            except Exception:
+                pass
+            try:
+                local_fv = scrape_finviz_data(ticker)
+            except Exception:
+                local_fv = ({}, [], "Company profile not currently available.")
+            return local_fast, local_info, local_fv
+
+        def _fetch_history_bundle():
+            try:
+                return stock.history(period="5y", interval="1d")
+            except Exception:
+                return pd.DataFrame()
+
+        # Three bounded network groups is deliberate: this keeps latency down without
+        # recreating the request burst that previously destabilised the small Render instance.
+        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="sethistock-core") as executor:
+            statements_future = executor.submit(_fetch_statement_bundle)
+            info_future = executor.submit(_fetch_info_and_finviz)
+            history_future = executor.submit(_fetch_history_bundle)
+
+            try: fin, cf, bs, q_fin = statements_future.result()
+            except Exception: fin, cf, bs, q_fin = pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+            try:
+                f_info, info, finviz_bundle = info_future.result()
+                fv_stats, fv_insiders, fv_summary = finviz_bundle
+            except Exception:
+                f_info, info = None, {}
+                fv_stats, fv_insiders, fv_summary = {}, [], "Company profile not currently available."
+            try: shared_hist = history_future.result()
+            except Exception: shared_hist = pd.DataFrame()
 
         # Yahoo can append an incomplete current-session row with a null Close.
         # Drop it before price, risk and technical calculations so bad rows cannot poison the 6h analysis cache.
@@ -708,8 +756,7 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
         except Exception:
             current_pe_hint = None
 
-        # 2. RUN THE FINVIZ SCRAPER TO FILL IN THE BLANKS
-        fv_stats, fv_insiders, fv_summary = scrape_finviz_data(ticker)
+        # Finviz was fetched concurrently with the Yahoo core bundle above.
 
         # =================================================================
         # --- SECURE MATH ENGINE ---
@@ -814,40 +861,10 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
         base_fcf_projections = [latest_fcf * ((1.15) ** i) for i in range(1, 6)] if latest_fcf > 0 else [0,0,0,0,0]
         sensitivity_matrix = generate_sensitivity_matrix(0.10, 15.0, base_fcf_projections, shares)
 
-        # Use Finviz Insiders if available, otherwise try Yahoo
-        insider_list = fv_insiders
-        if not insider_list:
-            try:
-                ins_df = stock.insider_transactions
-                if ins_df is not None and not ins_df.empty:
-                    ins_df = ins_df.reset_index()
-                    ins_df.columns = [str(c).strip() for c in ins_df.columns]
-                    
-                    name_col = next((c for c in ins_df.columns if 'insider' in str(c).lower() or 'name' in str(c).lower()), None)
-                    pos_col = next((c for c in ins_df.columns if 'position' in str(c).lower() or 'title' in str(c).lower()), None)
-                    shares_col = next((c for c in ins_df.columns if 'share' in str(c).lower()), None)
-                    val_col = next((c for c in ins_df.columns if 'value' in str(c).lower()), None)
-
-                    for _, row in ins_df.head(15).iterrows():
-                        raw_action = str(row.get('Text', row.get('Transaction Text', row.get('Acquisition or Disposition', row.get('Transaction', ''))))).lower()
-                        if not raw_action or raw_action == 'nan':
-                            trans_col = next((c for c in ins_df.columns if 'text' in str(c).lower() or 'action' in str(c).lower() or 'transaction' in str(c).lower()), None)
-                            if trans_col: raw_action = str(row[trans_col]).lower()
-
-                        if 'buy' in raw_action or 'purchase' in raw_action or raw_action.strip() == 'a': action = 'Buy'
-                        elif 'sell' in raw_action or 'sale' in raw_action or raw_action.strip() == 'd': action = 'Sell'
-                        elif 'grant' in raw_action or 'award' in raw_action or 'option' in raw_action: action = 'Grant'
-                        else: action = 'Execute/Other'
-
-                        insider_list.append({
-                            "name": str(row[name_col]) if name_col else "Executive",
-                            "position": str(row[pos_col]) if pos_col else "N/A",
-                            "transaction": action,
-                            "shares": safe_float(row[shares_col]),
-                            "value": safe_float(row[val_col])
-                        })
-            except Exception:
-                pass
+        # Keep first-load analysis bounded: Finviz insiders arrive with the main scrape.
+        # Yahoo insider_transactions is a separate slow network call, so do not block the
+        # initial dashboard if Finviz has no rows. A deferred endpoint can hydrate it later.
+        insider_list = fv_insiders or []
 
         # --- THE TTM FALLBACK ENGINE ---
         calc_shares = shares if shares > 0 else (fin_data["shares"][-1] if fin_data["shares"] and len(fin_data["shares"]) > 0 and fin_data["shares"][-1] > 0 else 1)
@@ -894,33 +911,11 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
         except Exception:
             fallback_ev_ebitda = "N/A"
 
+        # Avoid extra Yahoo requests on an uncached first load. If quote-summary does not
+        # provide dividend yield or beta, the UI can show N/A rather than delaying every
+        # other section for secondary fallbacks.
         fallback_div_yield = "N/A"
-        has_info_dividend = bool((info or {}).get("dividendYield") or (info or {}).get("trailingAnnualDividendYield"))
-        if not has_info_dividend:
-            try:
-                divs = stock.dividends
-                if divs is not None and not divs.empty:
-                    recent_divs = divs[divs.index > (pd.Timestamp.now(tz=divs.index.tz) - pd.DateOffset(years=1))]
-                    if not recent_divs.empty and current_price > 0:
-                        yield_pct = (recent_divs.sum() / current_price) * 100
-                        fallback_div_yield = f"{round(yield_pct, 2)}%"
-            except Exception:
-                pass
-
         fallback_beta = "N/A"
-        if not (info and info.get("beta")):
-            try:
-                spy_hist = yf.Ticker("SPY").history(period="1y")
-                daily_hist = shared_hist.tail(260).copy() if shared_hist is not None and not shared_hist.empty else pd.DataFrame()
-                if not daily_hist.empty and not spy_hist.empty:
-                    stock_rets = daily_hist['Close'].pct_change().dropna()
-                    spy_rets = spy_hist['Close'].pct_change().dropna()
-                    aligned = pd.concat([stock_rets, spy_rets], axis=1).dropna()
-                    covar = np.cov(aligned.iloc[:,0], aligned.iloc[:,1])[0][1]
-                    spy_var = np.var(aligned.iloc[:,1])
-                    fallback_beta = round(covar / spy_var, 2) if spy_var > 0 else "N/A"
-            except Exception:
-                pass
 
         def format_mkt_cap(val):
             if val >= 1e12: return f"${val/1e12:.2f}T"
@@ -1076,17 +1071,16 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
         }
         peers = ticker_peers.get(ticker.upper(), ['SPY', 'QQQ', 'DIA'])
 
+        # Historical P/E and earnings-event research is intentionally deferred to
+        # /api/research/{ticker}. The financial-history frontend already hydrates those
+        # cards independently, so computing them here only makes the first uncached stock
+        # request wait for another expensive Yahoo workflow.
         research_payload = {
             "ticker": ticker.upper(),
             "earnings_reaction": {"available": False},
             "valuation_bands": {"available": False},
+            "deferred": True,
         }
-        try:
-            research_payload = stock_research.get_stock_research_payload(
-                ticker, stock, shared_hist, current_pe_hint
-            )
-        except Exception:
-            pass
 
         chart_preview = {"dates": [], "opens": [], "highs": [], "lows": [], "closes": []}
         try:
@@ -1112,7 +1106,13 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
             "chart_preview": chart_preview,
             "dupont_analysis": dupont_metrics,            
             "risk_profile": risk_metrics,                
-            "sensitivity_matrix": sensitivity_matrix     
+            "sensitivity_matrix": sensitivity_matrix,
+            "_meta": {
+                "analysis_ms": round((time.perf_counter() - analysis_started_at) * 1000),
+                "request_ms": round((time.perf_counter() - analysis_started_at) * 1000),
+                "served_from_cache": False,
+                "research_deferred": True,
+            }
         }
         if not is_peer:
             _cache_write("stock_analysis", ticker, result, CACHE_TTL_STOCK, ticker=ticker)
@@ -1408,6 +1408,61 @@ def log_event(data: TelemetryPayload):
     log_telemetry_event(project=data.project, action=data.action, ticker=data.ticker, visitor_id=data.visitor_id)
     return {"status": "recorded"}
 
+@app.post("/api/telemetry/sethistock-load")
+def log_sethistock_load(data: LoadTimingPayload):
+    """Stores user-perceived SethiStock load timings for performance monitoring."""
+    if not SUPABASE_URL:
+        return {"status": "disabled"}
+
+    clean_status = str(data.status or "full").strip().lower()
+    if clean_status not in {"full", "partial", "error"}:
+        clean_status = "error"
+
+    def _bounded_ms(value):
+        if value is None:
+            return None
+        try:
+            numeric = int(value)
+            return max(0, min(numeric, 300000))
+        except Exception:
+            return None
+
+    ticker = str(data.ticker or "").strip().upper()[:20]
+    if not ticker:
+        raise HTTPException(status_code=400, detail="Ticker is required")
+
+    key = SUPABASE_SERVICE_KEY or SUPABASE_KEY
+    if not key:
+        return {"status": "disabled"}
+
+    try:
+        clean_url = SUPABASE_URL.replace("/rest/v1", "").rstrip("/")
+        headers = {
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "Prefer": "return=minimal",
+        }
+        payload = {
+            "ticker": ticker,
+            "quote_ms": _bounded_ms(data.quote_ms),
+            "full_ms": _bounded_ms(data.full_ms),
+            "backend_ms": _bounded_ms(data.backend_ms),
+            "cache_hit": data.cache_hit,
+            "status": clean_status,
+            "visitor_id": str(data.visitor_id)[:128] if data.visitor_id else None,
+            "error_code": str(data.error_code)[:80] if data.error_code else None,
+        }
+        response = requests.post(
+            f"{clean_url}/rest/v1/sethistock_load_telemetry",
+            headers=headers,
+            json=payload,
+            timeout=3,
+        )
+        return {"status": "recorded" if response.status_code < 400 else "ignored"}
+    except Exception:
+        return {"status": "ignored"}
+
 # --- SECURE ADMIN METRICS ENDPOINT ---
 @app.get("/api/admin/telemetry")
 def get_admin_metrics(secret: str):
@@ -1435,7 +1490,17 @@ def get_admin_metrics(secret: str):
         res_mkw = requests.get(url_mkw, headers=headers, timeout=5)
         mkw_logs = res_mkw.json() if res_mkw.status_code == 200 else []
 
-        # 3. Compute Traffic Metrics
+        # 3. Fetch SethiStock load-performance telemetry
+        admin_key = SUPABASE_SERVICE_KEY or SUPABASE_KEY
+        perf_headers = {
+            "apikey": admin_key,
+            "Authorization": f"Bearer {admin_key}",
+        }
+        url_loads = f"{clean_url}/rest/v1/sethistock_load_telemetry?select=*&order=created_at.desc&limit=500"
+        res_loads = requests.get(url_loads, headers=perf_headers, timeout=5)
+        load_logs = res_loads.json() if res_loads.status_code == 200 else []
+
+        # 4. Compute Traffic Metrics
         total_events = len(logs)
         project_counts = {}
         ticker_counts = {}
@@ -1455,13 +1520,85 @@ def get_admin_metrics(secret: str):
         sorted_tickers = sorted(ticker_counts.items(), key=lambda x: x[1], reverse=True)[:10]
         top_tickers = [{"ticker": k, "count": v} for k, v in sorted_tickers]
 
+        def _numeric_ms(rows, key):
+            values = []
+            for row in rows:
+                try:
+                    value = row.get(key)
+                    if value is not None:
+                        value = int(value)
+                        if value >= 0:
+                            values.append(value)
+                except Exception:
+                    pass
+            return values
+
+        def _avg(values):
+            return round(sum(values) / len(values)) if values else None
+
+        def _percentile(values, percentile):
+            if not values:
+                return None
+            ordered = sorted(values)
+            index = max(0, min(len(ordered) - 1, math.ceil((percentile / 100) * len(ordered)) - 1))
+            return ordered[index]
+
+        quote_values = _numeric_ms(load_logs, "quote_ms")
+        full_rows = [row for row in load_logs if row.get("status") == "full" and row.get("full_ms") is not None]
+        full_values = _numeric_ms(full_rows, "full_ms")
+        cached_rows = [row for row in full_rows if row.get("cache_hit") is True]
+        cold_rows = [row for row in full_rows if row.get("cache_hit") is False]
+        timeout_rows = [row for row in load_logs if row.get("status") == "partial"]
+
+        ticker_perf = {}
+        for row in load_logs:
+            symbol = str(row.get("ticker") or "").upper()
+            if not symbol:
+                continue
+            bucket = ticker_perf.setdefault(symbol, {"ticker": symbol, "loads": 0, "full_ms": [], "quote_ms": [], "timeouts": 0})
+            bucket["loads"] += 1
+            if row.get("status") == "partial":
+                bucket["timeouts"] += 1
+            try:
+                if row.get("full_ms") is not None:
+                    bucket["full_ms"].append(int(row["full_ms"]))
+                if row.get("quote_ms") is not None:
+                    bucket["quote_ms"].append(int(row["quote_ms"]))
+            except Exception:
+                pass
+
+        ticker_loads = []
+        for bucket in ticker_perf.values():
+            ticker_loads.append({
+                "ticker": bucket["ticker"],
+                "loads": bucket["loads"],
+                "avg_full_ms": _avg(bucket["full_ms"]),
+                "avg_quote_ms": _avg(bucket["quote_ms"]),
+                "timeouts": bucket["timeouts"],
+            })
+        ticker_loads.sort(key=lambda row: (-row["loads"], row["ticker"]))
+
+        load_performance = {
+            "samples": len(load_logs),
+            "avg_quote_ms": _avg(quote_values),
+            "avg_full_ms": _avg(full_values),
+            "p95_full_ms": _percentile(full_values, 95),
+            "timeout_rate_pct": round((len(timeout_rows) / len(load_logs)) * 100, 1) if load_logs else 0.0,
+            "cache_hit_rate_pct": round((len([r for r in load_logs if r.get("cache_hit") is True]) / len(load_logs)) * 100, 1) if load_logs else 0.0,
+            "avg_cached_full_ms": _avg(_numeric_ms(cached_rows, "full_ms")),
+            "avg_cold_full_ms": _avg(_numeric_ms(cold_rows, "full_ms")),
+        }
+
         return {
             "total_events": total_events,
             "project_breakdown": project_counts,
             "action_breakdown": action_counts,
             "top_tickers": top_tickers,
             "recent_logs": logs[:25],
-            "markowitz_logs": mkw_logs
+            "markowitz_logs": mkw_logs,
+            "load_performance": load_performance,
+            "recent_stock_loads": load_logs[:50],
+            "ticker_loads": ticker_loads[:50]
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
