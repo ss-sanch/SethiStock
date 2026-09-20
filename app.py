@@ -14,7 +14,7 @@ from datetime import datetime, timezone, timedelta
 import math
 import copy
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from scipy.stats import norm
 from scipy.optimize import minimize
 import market_risk_lab
@@ -44,6 +44,8 @@ CACHE_STALE_STOCK = int(os.getenv("SETHISTOCK_CACHE_STALE_STOCK", "86400"))
 CACHE_STALE_TICKER = int(os.getenv("SETHISTOCK_CACHE_STALE_TICKER", "15552000"))
 CACHE_MAX_HEAVY_REFRESHES = max(1, int(os.getenv("SETHISTOCK_CACHE_MAX_HEAVY_REFRESHES", "1")))
 CACHE_HTTP_TIMEOUT = float(os.getenv("SETHISTOCK_CACHE_HTTP_TIMEOUT", "2.5"))
+PROCESS_STARTED_AT = time.time()
+STOCK_SOURCE_BUDGET_SECONDS = max(5.0, float(os.getenv("SETHISTOCK_SOURCE_BUDGET_SECONDS", "12")))
 
 _CACHE_REFRESH_LOCK = threading.Lock()
 _CACHE_REFRESH_INFLIGHT = set()
@@ -309,7 +311,9 @@ class LoadTimingPayload(BaseModel):
     status: str = "full"
     visitor_id: Optional[str] = None
     error_code: Optional[str] = None
-
+    server_wake_ms: Optional[int] = None
+    server_uptime_s: Optional[int] = None
+    server_state: Optional[str] = None
 def log_telemetry_event(project: str, action: str, ticker: Optional[str] = None, visitor_id: Optional[str] = None):
     """Silently logs user interactions to Supabase without blocking requests."""
     if not SUPABASE_URL or not SUPABASE_KEY:
@@ -588,9 +592,10 @@ def runtime_status():
         "active_tickers": tickers,
         "max_concurrent_stock_analyses": STOCK_ANALYSIS_MAX_CONCURRENT,
         "analysis_queue_timeout_seconds": STOCK_ANALYSIS_QUEUE_TIMEOUT,
+        "source_budget_seconds": STOCK_SOURCE_BUDGET_SECONDS,
         "cache_refreshes_inflight": len(_CACHE_REFRESH_INFLIGHT),
+        "process_uptime_seconds": round(max(0.0, time.time() - PROCESS_STARTED_AT), 1),
     }
-
 
 def _analysis_cache_payload_valid(payload):
     if not isinstance(payload, dict):
@@ -681,26 +686,29 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
         # and Finviz calls serially. These are network-bound, so run the independent
         # groups concurrently and keep the initial analysis latency closer to the slowest
         # upstream call rather than the sum of every call.
-        stock = yf.Ticker(ticker)
+        source_timeouts = []
+        source_errors = {}
 
         def _fetch_statement_bundle():
+            local_stock = yf.Ticker(ticker)
             local_fin, local_cf, local_bs, local_q_fin = pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-            try: local_fin = stock.financials
+            try: local_fin = local_stock.financials
             except Exception: pass
-            try: local_cf = stock.cashflow
+            try: local_cf = local_stock.cashflow
             except Exception: pass
-            try: local_bs = stock.balance_sheet
+            try: local_bs = local_stock.balance_sheet
             except Exception: pass
-            try: local_q_fin = stock.quarterly_financials
+            try: local_q_fin = local_stock.quarterly_financials
             except Exception: pass
             return local_fin, local_cf, local_bs, local_q_fin
 
         def _fetch_info_and_finviz():
+            local_stock = yf.Ticker(ticker)
             local_fast, local_info = None, {}
-            try: local_fast = stock.fast_info
+            try: local_fast = local_stock.fast_info
             except Exception: pass
             try:
-                fetched = stock.info
+                fetched = local_stock.info
                 if fetched: local_info = fetched
             except Exception:
                 pass
@@ -711,29 +719,48 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
             return local_fast, local_info, local_fv
 
         def _fetch_history_bundle():
+            local_stock = yf.Ticker(ticker)
             try:
-                return stock.history(period="5y", interval="1d")
+                return local_stock.history(period="5y", interval="1d")
             except Exception:
                 return pd.DataFrame()
 
-        # Three bounded network groups is deliberate: this keeps latency down without
-        # recreating the request burst that previously destabilised the small Render instance.
-        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="sethistock-core") as executor:
-            statements_future = executor.submit(_fetch_statement_bundle)
-            info_future = executor.submit(_fetch_info_and_finviz)
-            history_future = executor.submit(_fetch_history_bundle)
+        # A single slow Yahoo/Finviz source must never own the only analysis slot forever.
+        # Collect what finishes inside one shared budget and continue with safe fallbacks.
+        source_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="sethistock-core")
+        source_futures = {
+            "statements": source_executor.submit(_fetch_statement_bundle),
+            "profile": source_executor.submit(_fetch_info_and_finviz),
+            "history": source_executor.submit(_fetch_history_bundle),
+        }
+        done, _not_done = wait(source_futures.values(), timeout=STOCK_SOURCE_BUDGET_SECONDS)
+        source_results = {}
+        for source_name, future in source_futures.items():
+            if future in done:
+                try:
+                    source_results[source_name] = future.result()
+                except Exception as exc:
+                    source_errors[source_name] = type(exc).__name__
+            else:
+                source_timeouts.append(source_name)
+                future.cancel()
 
-            try: fin, cf, bs, q_fin = statements_future.result()
-            except Exception: fin, cf, bs, q_fin = pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-            try:
-                f_info, info, finviz_bundle = info_future.result()
-                fv_stats, fv_insiders, fv_summary = finviz_bundle
-            except Exception:
-                f_info, info = None, {}
-                fv_stats, fv_insiders, fv_summary = {}, [], "Company profile not currently available."
-            try: shared_hist = history_future.result()
-            except Exception: shared_hist = pd.DataFrame()
+        # Do not wait for a late network worker during request teardown.
+        source_executor.shutdown(wait=False, cancel_futures=True)
 
+        fin, cf, bs, q_fin = source_results.get(
+            "statements",
+            (pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()),
+        )
+        f_info, info, finviz_bundle = source_results.get(
+            "profile",
+            (None, {}, ({}, [], "Company profile not currently available.")),
+        )
+        try:
+            fv_stats, fv_insiders, fv_summary = finviz_bundle
+        except Exception:
+            fv_stats, fv_insiders, fv_summary = {}, [], "Company profile not currently available."
+        shared_hist = source_results.get("history", pd.DataFrame())
         # Yahoo can append an incomplete current-session row with a null Close.
         # Drop it before price, risk and technical calculations so bad rows cannot poison the 6h analysis cache.
         if shared_hist is not None and not shared_hist.empty and 'Close' in shared_hist.columns:
@@ -1112,9 +1139,13 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
                 "request_ms": round((time.perf_counter() - analysis_started_at) * 1000),
                 "served_from_cache": False,
                 "research_deferred": True,
+                "analysis_degraded": bool(source_timeouts),
+                "source_timeouts": source_timeouts,
+                "source_errors": source_errors,
+                "source_budget_seconds": STOCK_SOURCE_BUDGET_SECONDS,
             }
         }
-        if not is_peer:
+        if not is_peer and not source_timeouts:
             _cache_write("stock_analysis", ticker, result, CACHE_TTL_STOCK, ticker=ticker)
         if analysis_slot_acquired:
             _stock_analysis_finished(ticker)
@@ -1417,6 +1448,9 @@ def log_sethistock_load(data: LoadTimingPayload):
     clean_status = str(data.status or "full").strip().lower()
     if clean_status not in {"full", "partial", "error"}:
         clean_status = "error"
+    clean_server_state = str(data.server_state or "unknown").strip().lower()
+    if clean_server_state not in {"warm", "cold", "unknown"}:
+        clean_server_state = "unknown"
 
     def _bounded_ms(value):
         if value is None:
@@ -1452,7 +1486,9 @@ def log_sethistock_load(data: LoadTimingPayload):
             "status": clean_status,
             "visitor_id": str(data.visitor_id)[:128] if data.visitor_id else None,
             "error_code": str(data.error_code)[:80] if data.error_code else None,
-        }
+            "server_wake_ms": _bounded_ms(data.server_wake_ms),
+            "server_uptime_s": _bounded_ms(data.server_uptime_s),
+            "server_state": clean_server_state,        }
         response = requests.post(
             f"{clean_url}/rest/v1/sethistock_load_telemetry",
             headers=headers,
@@ -1578,6 +1614,8 @@ def get_admin_metrics(secret: str):
             })
         ticker_loads.sort(key=lambda row: (-row["loads"], row["ticker"]))
 
+        server_wake_values = _numeric_ms(load_logs, "server_wake_ms")
+        server_cold_rows = [row for row in load_logs if row.get("server_state") == "cold"]
         load_performance = {
             "samples": len(load_logs),
             "avg_quote_ms": _avg(quote_values),
@@ -1587,7 +1625,8 @@ def get_admin_metrics(secret: str):
             "cache_hit_rate_pct": round((len([r for r in load_logs if r.get("cache_hit") is True]) / len(load_logs)) * 100, 1) if load_logs else 0.0,
             "avg_cached_full_ms": _avg(_numeric_ms(cached_rows, "full_ms")),
             "avg_cold_full_ms": _avg(_numeric_ms(cold_rows, "full_ms")),
-        }
+            "avg_server_wake_ms": _avg(server_wake_values),
+            "server_cold_rate_pct": round((len(server_cold_rows) / len(load_logs)) * 100, 1) if load_logs else 0.0,        }
 
         return {
             "total_events": total_events,
