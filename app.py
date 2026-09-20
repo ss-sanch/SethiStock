@@ -300,6 +300,16 @@ class TelemetryPayload(BaseModel):
     ticker: Optional[str] = None
     visitor_id: Optional[str] = None # <-- NEW: Accept the anonymous ID
 
+class LoadTimingPayload(BaseModel):
+    ticker: str
+    quote_ms: Optional[int] = None
+    full_ms: Optional[int] = None
+    backend_ms: Optional[int] = None
+    cache_hit: Optional[bool] = None
+    status: str = "full"
+    visitor_id: Optional[str] = None
+    error_code: Optional[str] = None
+
 def log_telemetry_event(project: str, action: str, ticker: Optional[str] = None, visitor_id: Optional[str] = None):
     """Silently logs user interactions to Supabase without blocking requests."""
     if not SUPABASE_URL or not SUPABASE_KEY:
@@ -637,6 +647,10 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
                     pass
                 if should_refresh_analysis:
                     _schedule_cache_refresh(background_tasks, f"stock_analysis:{ticker}", "stock_analysis", get_stock_data, ticker, None, False)
+                meta = cached_analysis.get("_meta") if isinstance(cached_analysis.get("_meta"), dict) else {}
+                meta["served_from_cache"] = True
+                meta["request_ms"] = round((time.perf_counter() - analysis_started_at) * 1000)
+                cached_analysis["_meta"] = meta
                 return cached_analysis
         
         analysis_slot_acquired = False
@@ -650,6 +664,10 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
             queued_cached, _queued_state = _cache_get_swr("stock_analysis", ticker, CACHE_STALE_STOCK)
             if _analysis_cache_payload_valid(queued_cached):
                 queued_cached = copy.deepcopy(queued_cached)
+                meta = queued_cached.get("_meta") if isinstance(queued_cached.get("_meta"), dict) else {}
+                meta["served_from_cache"] = True
+                meta["request_ms"] = round((time.perf_counter() - analysis_started_at) * 1000)
+                queued_cached["_meta"] = meta
                 _stock_analysis_finished(ticker)
                 _STOCK_ANALYSIS_GATE.release()
                 analysis_slot_acquired = False
@@ -1091,6 +1109,8 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
             "sensitivity_matrix": sensitivity_matrix,
             "_meta": {
                 "analysis_ms": round((time.perf_counter() - analysis_started_at) * 1000),
+                "request_ms": round((time.perf_counter() - analysis_started_at) * 1000),
+                "served_from_cache": False,
                 "research_deferred": True,
             }
         }
@@ -1388,6 +1408,61 @@ def log_event(data: TelemetryPayload):
     log_telemetry_event(project=data.project, action=data.action, ticker=data.ticker, visitor_id=data.visitor_id)
     return {"status": "recorded"}
 
+@app.post("/api/telemetry/sethistock-load")
+def log_sethistock_load(data: LoadTimingPayload):
+    """Stores user-perceived SethiStock load timings for performance monitoring."""
+    if not SUPABASE_URL:
+        return {"status": "disabled"}
+
+    clean_status = str(data.status or "full").strip().lower()
+    if clean_status not in {"full", "partial", "error"}:
+        clean_status = "error"
+
+    def _bounded_ms(value):
+        if value is None:
+            return None
+        try:
+            numeric = int(value)
+            return max(0, min(numeric, 300000))
+        except Exception:
+            return None
+
+    ticker = str(data.ticker or "").strip().upper()[:20]
+    if not ticker:
+        raise HTTPException(status_code=400, detail="Ticker is required")
+
+    key = SUPABASE_SERVICE_KEY or SUPABASE_KEY
+    if not key:
+        return {"status": "disabled"}
+
+    try:
+        clean_url = SUPABASE_URL.replace("/rest/v1", "").rstrip("/")
+        headers = {
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "Prefer": "return=minimal",
+        }
+        payload = {
+            "ticker": ticker,
+            "quote_ms": _bounded_ms(data.quote_ms),
+            "full_ms": _bounded_ms(data.full_ms),
+            "backend_ms": _bounded_ms(data.backend_ms),
+            "cache_hit": data.cache_hit,
+            "status": clean_status,
+            "visitor_id": str(data.visitor_id)[:128] if data.visitor_id else None,
+            "error_code": str(data.error_code)[:80] if data.error_code else None,
+        }
+        response = requests.post(
+            f"{clean_url}/rest/v1/sethistock_load_telemetry",
+            headers=headers,
+            json=payload,
+            timeout=3,
+        )
+        return {"status": "recorded" if response.status_code < 400 else "ignored"}
+    except Exception:
+        return {"status": "ignored"}
+
 # --- SECURE ADMIN METRICS ENDPOINT ---
 @app.get("/api/admin/telemetry")
 def get_admin_metrics(secret: str):
@@ -1415,7 +1490,17 @@ def get_admin_metrics(secret: str):
         res_mkw = requests.get(url_mkw, headers=headers, timeout=5)
         mkw_logs = res_mkw.json() if res_mkw.status_code == 200 else []
 
-        # 3. Compute Traffic Metrics
+        # 3. Fetch SethiStock load-performance telemetry
+        admin_key = SUPABASE_SERVICE_KEY or SUPABASE_KEY
+        perf_headers = {
+            "apikey": admin_key,
+            "Authorization": f"Bearer {admin_key}",
+        }
+        url_loads = f"{clean_url}/rest/v1/sethistock_load_telemetry?select=*&order=created_at.desc&limit=500"
+        res_loads = requests.get(url_loads, headers=perf_headers, timeout=5)
+        load_logs = res_loads.json() if res_loads.status_code == 200 else []
+
+        # 4. Compute Traffic Metrics
         total_events = len(logs)
         project_counts = {}
         ticker_counts = {}
@@ -1435,13 +1520,85 @@ def get_admin_metrics(secret: str):
         sorted_tickers = sorted(ticker_counts.items(), key=lambda x: x[1], reverse=True)[:10]
         top_tickers = [{"ticker": k, "count": v} for k, v in sorted_tickers]
 
+        def _numeric_ms(rows, key):
+            values = []
+            for row in rows:
+                try:
+                    value = row.get(key)
+                    if value is not None:
+                        value = int(value)
+                        if value >= 0:
+                            values.append(value)
+                except Exception:
+                    pass
+            return values
+
+        def _avg(values):
+            return round(sum(values) / len(values)) if values else None
+
+        def _percentile(values, percentile):
+            if not values:
+                return None
+            ordered = sorted(values)
+            index = max(0, min(len(ordered) - 1, math.ceil((percentile / 100) * len(ordered)) - 1))
+            return ordered[index]
+
+        quote_values = _numeric_ms(load_logs, "quote_ms")
+        full_rows = [row for row in load_logs if row.get("status") == "full" and row.get("full_ms") is not None]
+        full_values = _numeric_ms(full_rows, "full_ms")
+        cached_rows = [row for row in full_rows if row.get("cache_hit") is True]
+        cold_rows = [row for row in full_rows if row.get("cache_hit") is False]
+        timeout_rows = [row for row in load_logs if row.get("status") == "partial"]
+
+        ticker_perf = {}
+        for row in load_logs:
+            symbol = str(row.get("ticker") or "").upper()
+            if not symbol:
+                continue
+            bucket = ticker_perf.setdefault(symbol, {"ticker": symbol, "loads": 0, "full_ms": [], "quote_ms": [], "timeouts": 0})
+            bucket["loads"] += 1
+            if row.get("status") == "partial":
+                bucket["timeouts"] += 1
+            try:
+                if row.get("full_ms") is not None:
+                    bucket["full_ms"].append(int(row["full_ms"]))
+                if row.get("quote_ms") is not None:
+                    bucket["quote_ms"].append(int(row["quote_ms"]))
+            except Exception:
+                pass
+
+        ticker_loads = []
+        for bucket in ticker_perf.values():
+            ticker_loads.append({
+                "ticker": bucket["ticker"],
+                "loads": bucket["loads"],
+                "avg_full_ms": _avg(bucket["full_ms"]),
+                "avg_quote_ms": _avg(bucket["quote_ms"]),
+                "timeouts": bucket["timeouts"],
+            })
+        ticker_loads.sort(key=lambda row: (-row["loads"], row["ticker"]))
+
+        load_performance = {
+            "samples": len(load_logs),
+            "avg_quote_ms": _avg(quote_values),
+            "avg_full_ms": _avg(full_values),
+            "p95_full_ms": _percentile(full_values, 95),
+            "timeout_rate_pct": round((len(timeout_rows) / len(load_logs)) * 100, 1) if load_logs else 0.0,
+            "cache_hit_rate_pct": round((len([r for r in load_logs if r.get("cache_hit") is True]) / len(load_logs)) * 100, 1) if load_logs else 0.0,
+            "avg_cached_full_ms": _avg(_numeric_ms(cached_rows, "full_ms")),
+            "avg_cold_full_ms": _avg(_numeric_ms(cold_rows, "full_ms")),
+        }
+
         return {
             "total_events": total_events,
             "project_breakdown": project_counts,
             "action_breakdown": action_counts,
             "top_tickers": top_tickers,
             "recent_logs": logs[:25],
-            "markowitz_logs": mkw_logs
+            "markowitz_logs": mkw_logs,
+            "load_performance": load_performance,
+            "recent_stock_loads": load_logs[:50],
+            "ticker_loads": ticker_loads[:50]
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
