@@ -677,7 +677,7 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
             except Exception: pass
             return local_fin, local_cf, local_bs, local_q_fin
 
-        def _fetch_info_bundle():
+        def _fetch_info_and_finviz():
             local_fast, local_info = None, {}
             try: local_fast = stock.fast_info
             except Exception: pass
@@ -686,7 +686,11 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
                 if fetched: local_info = fetched
             except Exception:
                 pass
-            return local_fast, local_info
+            try:
+                local_fv = scrape_finviz_data(ticker)
+            except Exception:
+                local_fv = ({}, [], "Company profile not currently available.")
+            return local_fast, local_info, local_fv
 
         def _fetch_history_bundle():
             try:
@@ -694,20 +698,23 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
             except Exception:
                 return pd.DataFrame()
 
-        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="sethistock-core") as executor:
+        # Three bounded network groups is deliberate: this keeps latency down without
+        # recreating the request burst that previously destabilised the small Render instance.
+        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="sethistock-core") as executor:
             statements_future = executor.submit(_fetch_statement_bundle)
-            info_future = executor.submit(_fetch_info_bundle)
+            info_future = executor.submit(_fetch_info_and_finviz)
             history_future = executor.submit(_fetch_history_bundle)
-            finviz_future = executor.submit(scrape_finviz_data, ticker)
 
             try: fin, cf, bs, q_fin = statements_future.result()
             except Exception: fin, cf, bs, q_fin = pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-            try: f_info, info = info_future.result()
-            except Exception: f_info, info = None, {}
+            try:
+                f_info, info, finviz_bundle = info_future.result()
+                fv_stats, fv_insiders, fv_summary = finviz_bundle
+            except Exception:
+                f_info, info = None, {}
+                fv_stats, fv_insiders, fv_summary = {}, [], "Company profile not currently available."
             try: shared_hist = history_future.result()
             except Exception: shared_hist = pd.DataFrame()
-            try: fv_stats, fv_insiders, fv_summary = finviz_future.result()
-            except Exception: fv_stats, fv_insiders, fv_summary = {}, [], "Company profile not currently available."
 
         # Yahoo can append an incomplete current-session row with a null Close.
         # Drop it before price, risk and technical calculations so bad rows cannot poison the 6h analysis cache.
