@@ -614,7 +614,8 @@ def _analysis_cache_payload_valid(payload):
 
 @app.get("/api/stock/{raw_ticker}")
 def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is_peer: bool = False):
-    try:        analysis_started_at = time.perf_counter()
+    try:
+        analysis_started_at = time.perf_counter()
 
         if not is_peer and not getattr(_CACHE_REFRESH_CONTEXT, "suppress_telemetry", False):
             log_telemetry_event(project="SethiStock", action="ticker_search", ticker=raw_ticker)
