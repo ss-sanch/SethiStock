@@ -679,6 +679,7 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
             if _analysis_cache_payload_valid(cached_analysis):
                 should_refresh_analysis = cache_state == "stale"
                 cached_analysis = copy.deepcopy(cached_analysis)
+                live_quote = None
                 try:
                     live_quote = get_stock_quote(ticker, background_tasks)
                     cached_analysis["ticker"] = str(live_quote.get("ticker", ticker)).upper()
@@ -695,7 +696,16 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
                 meta["served_from_cache"] = True
                 meta["request_ms"] = round((time.perf_counter() - analysis_started_at) * 1000)
                 cached_analysis["_meta"] = meta
-                _snapshot_upsert(ticker, analysis=cached_analysis)
+                snapshot_quote = live_quote if isinstance(live_quote, dict) else {
+                    "ticker": ticker.upper(),
+                    "current_price": cached_analysis.get("current_price", 0),
+                    "change": cached_analysis.get("change", 0),
+                    "pct_change": cached_analysis.get("pct_change", 0),
+                    "market_cap": (cached_analysis.get("stats") or {}).get("mkt_cap", "N/A"),
+                    "peers": cached_analysis.get("peers", []),
+                }
+                snapshot_chart = cached_analysis.get("chart_preview") if isinstance(cached_analysis.get("chart_preview"), dict) else None
+                _snapshot_upsert(ticker, analysis=cached_analysis, quote=snapshot_quote, chart=snapshot_chart)
                 return cached_analysis
         
         analysis_slot_acquired = False
@@ -713,7 +723,16 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
                 meta["served_from_cache"] = True
                 meta["request_ms"] = round((time.perf_counter() - analysis_started_at) * 1000)
                 queued_cached["_meta"] = meta
-                _snapshot_upsert(ticker, analysis=queued_cached)
+                queued_quote = {
+                    "ticker": ticker.upper(),
+                    "current_price": queued_cached.get("current_price", 0),
+                    "change": queued_cached.get("change", 0),
+                    "pct_change": queued_cached.get("pct_change", 0),
+                    "market_cap": (queued_cached.get("stats") or {}).get("mkt_cap", "N/A"),
+                    "peers": queued_cached.get("peers", []),
+                }
+                queued_chart = queued_cached.get("chart_preview") if isinstance(queued_cached.get("chart_preview"), dict) else None
+                _snapshot_upsert(ticker, analysis=queued_cached, quote=queued_quote, chart=queued_chart)
                 _stock_analysis_finished(ticker)
                 _STOCK_ANALYSIS_GATE.release()
                 analysis_slot_acquired = False
