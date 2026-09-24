@@ -13,7 +13,7 @@ on:
           - refresh
           - auto
       batch_size:
-        description: Number of tickers to process in this run
+        description: Number of companies to process in this run
         required: true
         default: "100"
         type: string
@@ -25,8 +25,8 @@ on:
       - "scripts/sethistock_snapshot_warmer.py"
       - ".github/workflows/sethistock-snapshot-warmer.yml"
   schedule:
-    # While coverage is incomplete, every run fills the next missing batch.
-    # Once fully seeded, only the 05:23 UTC run performs a refresh batch.
+    # While global top-600 coverage is incomplete, every run fills the next missing batch.
+    # Once complete, only the 05:23 UTC run refreshes the oldest 60 snapshots.
     - cron: "23 1,5,9,13,17,21 * * *"
 
 permissions:
@@ -45,7 +45,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Seed or refresh public SethiStock snapshots
+      - name: Seed or refresh global top-600 SethiStock snapshots
         env:
           SETHISTOCK_API: https://sethistock-api.onrender.com
           SETHISTOCK_SNAPSHOT_API: https://gqqftksplktxfrilltsx.supabase.co/rest/v1/sethistock_public_snapshots
@@ -65,4 +65,10 @@ jobs:
           fi
 
           echo "mode=$MODE batch_size=$BATCH"
-          python scripts/sethistock_snapshot_warmer.py             --mode "$MODE"             --batch-size "$BATCH"             --refresh-hour 5             --request-timeout 90             --delay-seconds 1.5
+          python scripts/sethistock_snapshot_warmer.py \
+            --mode "$MODE" \
+            --batch-size "$BATCH" \
+            --top-n 600 \
+            --refresh-hour 5 \
+            --request-timeout 90 \
+            --delay-seconds 1.5

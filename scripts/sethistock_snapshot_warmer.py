@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Progressively seed and refresh public SethiStock snapshots without keeping Render permanently awake."""
+"""Progressively seed/refresh the world's largest SethiStock snapshots without keeping Render permanently awake."""
 
 from __future__ import annotations
 
 import argparse
+import csv
 import datetime as dt
+import io
 import json
 import os
 import pathlib
@@ -16,19 +18,38 @@ import urllib.request
 
 DEFAULT_API = "https://sethistock-api.onrender.com"
 DEFAULT_SNAPSHOT_API = "https://gqqftksplktxfrilltsx.supabase.co/rest/v1/sethistock_public_snapshots"
+DEFAULT_GLOBAL_UNIVERSE_CSV = "https://companiesmarketcap.com/?download=csv"
+
+
+def _request(url: str, headers: dict[str, str], timeout: int = 90):
+    req = urllib.request.Request(url, headers=headers)
+    return urllib.request.urlopen(req, timeout=timeout)
 
 
 def get_json(url: str, headers: dict[str, str], timeout: int = 90, attempts: int = 2):
     last_error = None
     for attempt in range(1, attempts + 1):
         try:
-            req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=timeout) as response:
+            with _request(url, headers, timeout) as response:
                 return json.load(response)
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ConnectionError) as exc:
             last_error = exc
             if attempt < attempts:
                 time.sleep(5 * attempt)
+    raise RuntimeError(f"{url}: {last_error!r}")
+
+
+def get_text(url: str, headers: dict[str, str], timeout: int = 45, attempts: int = 3):
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        try:
+            with _request(url, headers, timeout) as response:
+                raw = response.read()
+                return raw.decode("utf-8-sig", errors="replace")
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ConnectionError) as exc:
+            last_error = exc
+            if attempt < attempts:
+                time.sleep(4 * attempt)
     raise RuntimeError(f"{url}: {last_error!r}")
 
 
@@ -41,17 +62,96 @@ def parse_timestamp(value):
         return None
 
 
-def load_universe(path: pathlib.Path):
+def load_fallback_universe(path: pathlib.Path):
     payload = json.loads(path.read_text(encoding="utf-8"))
     symbols = [str(symbol).strip().upper() for symbol in payload.get("symbols", [])]
     return [symbol for symbol in symbols if symbol]
+
+
+def _pick_column(fieldnames, candidates):
+    normalized = {
+        str(name or "").strip().lower().replace(" ", "").replace("_", ""): name
+        for name in fieldnames or []
+    }
+    for candidate in candidates:
+        key = candidate.lower().replace(" ", "").replace("_", "")
+        if key in normalized:
+            return normalized[key]
+    return None
+
+
+def load_global_universe(csv_url: str, top_n: int, fallback_path: pathlib.Path):
+    """Use CompaniesMarketCap's native CSV; fall back to the checked-in universe if unavailable."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; SethiStock snapshot warmer/2.0)",
+        "Accept": "text/csv,text/plain,*/*",
+    }
+
+    try:
+        text = get_text(csv_url, headers=headers, timeout=45, attempts=3)
+        reader = csv.DictReader(io.StringIO(text))
+        symbol_col = _pick_column(reader.fieldnames, ("Symbol", "Ticker", "Code"))
+        rank_col = _pick_column(reader.fieldnames, ("Rank",))
+        name_col = _pick_column(reader.fieldnames, ("Name", "Company"))
+        country_col = _pick_column(reader.fieldnames, ("Country",))
+
+        if not symbol_col:
+            raise RuntimeError(f"Global universe CSV missing symbol column: {reader.fieldnames!r}")
+
+        rows = []
+        for position, row in enumerate(reader, start=1):
+            symbol = str(row.get(symbol_col) or "").strip().upper()
+            if not symbol:
+                continue
+            try:
+                rank = int(float(str(row.get(rank_col) or position).replace(",", ""))) if rank_col else position
+            except Exception:
+                rank = position
+            rows.append({
+                "rank": rank,
+                "ticker": symbol,
+                "name": str(row.get(name_col) or "").strip() if name_col else "",
+                "country": str(row.get(country_col) or "").strip() if country_col else "",
+            })
+
+        rows.sort(key=lambda item: item["rank"])
+        unique = []
+        seen = set()
+        for row in rows:
+            ticker = row["ticker"]
+            if ticker in seen:
+                continue
+            seen.add(ticker)
+            unique.append(row)
+            if len(unique) >= top_n:
+                break
+
+        if len(unique) < min(top_n, 500):
+            raise RuntimeError(f"Global universe returned only {len(unique)} usable tickers")
+
+        return [row["ticker"] for row in unique], {
+            "source": "companiesmarketcap_csv",
+            "source_url": csv_url,
+            "requested_top_n": top_n,
+            "loaded": len(unique),
+            "sample": unique[:10],
+        }
+    except Exception as exc:
+        fallback = load_fallback_universe(fallback_path)
+        fallback = fallback[:top_n]
+        return fallback, {
+            "source": "checked_in_fallback",
+            "error": repr(exc),
+            "requested_top_n": top_n,
+            "loaded": len(fallback),
+        }
 
 
 def fetch_snapshot_rows(snapshot_api: str, anon_key: str):
     headers = {
         "apikey": anon_key,
         "Authorization": f"Bearer {anon_key}",
-        "User-Agent": "SethiStock snapshot warmer/1.0",
+        "User-Agent": "SethiStock snapshot warmer/2.0",
     }
     params = urllib.parse.urlencode({
         "select": "ticker,analysis_updated_at,quote_updated_at,chart_updated_at",
@@ -92,7 +192,7 @@ def choose_targets(symbols, rows, mode: str, batch_size: int, refresh_hour: int)
 
 
 def warm_ticker(api_url: str, ticker: str, timeout: int):
-    headers = {"User-Agent": "SethiStock snapshot warmer/1.0"}
+    headers = {"User-Agent": "SethiStock snapshot warmer/2.0"}
     encoded = urllib.parse.quote(ticker, safe="")
     payload = get_json(
         f"{api_url}/api/stock/{encoded}",
@@ -104,6 +204,7 @@ def warm_ticker(api_url: str, ticker: str, timeout: int):
         raise RuntimeError("invalid stock payload")
     meta = payload.get("_meta") if isinstance(payload.get("_meta"), dict) else {}
     return {
+        "requested_ticker": ticker,
         "ticker": str(payload.get("ticker") or ticker).upper(),
         "price": payload.get("current_price"),
         "cache_hit": meta.get("served_from_cache"),
@@ -119,8 +220,10 @@ def main():
     parser.add_argument("--refresh-hour", type=int, default=5)
     parser.add_argument("--request-timeout", type=int, default=90)
     parser.add_argument("--delay-seconds", type=float, default=1.5)
+    parser.add_argument("--top-n", type=int, default=600)
+    parser.add_argument("--global-universe-csv", default=DEFAULT_GLOBAL_UNIVERSE_CSV)
     parser.add_argument(
-        "--universe",
+        "--fallback-universe",
         default=str(pathlib.Path(__file__).resolve().parents[1] / "data" / "sethistock_seed_universe.json"),
     )
     args = parser.parse_args()
@@ -131,7 +234,13 @@ def main():
     if not anon_key:
         raise SystemExit("SETHISTOCK_SNAPSHOT_ANON_KEY is required")
 
-    symbols = load_universe(pathlib.Path(args.universe))
+    symbols, universe_meta = load_global_universe(
+        args.global_universe_csv,
+        max(1, args.top_n),
+        pathlib.Path(args.fallback_universe),
+    )
+    print("GLOBAL_UNIVERSE=" + json.dumps(universe_meta, separators=(",", ":")), flush=True)
+
     before_rows = fetch_snapshot_rows(snapshot_api, anon_key)
     targets, action, missing_before = choose_targets(
         symbols,
@@ -181,7 +290,6 @@ def main():
         if index < len(targets):
             time.sleep(max(0.0, args.delay_seconds))
 
-    # Give the final Supabase writes a moment to settle, then report actual coverage.
     time.sleep(2)
     after_rows = fetch_snapshot_rows(snapshot_api, anon_key)
     after_by_ticker = {
@@ -202,11 +310,10 @@ def main():
         "successes": len(successes),
         "degraded": len(degraded),
         "failures": len(failures),
+        "universe_source": universe_meta.get("source"),
     }
     print("SETHISTOCK_SNAPSHOT_WARMER_SUMMARY=" + json.dumps(summary, separators=(",", ":")), flush=True)
 
-    # Do not fail the entire progressive seeding run for a handful of transient Yahoo misses.
-    # A future scheduled batch will naturally retry any ticker that still lacks a snapshot.
     if len(failures) == len(targets):
         raise SystemExit("All snapshot warm attempts failed")
 
