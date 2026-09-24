@@ -263,6 +263,43 @@ def _cache_write(namespace: str, identity: str, payload, ttl_seconds: int, ticke
         return False
 
 
+def _snapshot_upsert(ticker: str, analysis=None, quote=None, chart=None):
+    """Writes the latest public-safe SethiStock snapshot for cache-first frontend rendering."""
+    base_url = _cache_base_url()
+    key = SUPABASE_SERVICE_KEY or SUPABASE_KEY
+    if not base_url or not key or not ticker:
+        return False
+
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        record = {"ticker": str(ticker).upper(), "updated_at": now}
+        if analysis is not None:
+            record["analysis_payload"] = _cache_json_safe(analysis)
+            record["analysis_updated_at"] = now
+        if quote is not None:
+            record["quote_payload"] = _cache_json_safe(quote)
+            record["quote_updated_at"] = now
+        if chart is not None:
+            record["chart_payload"] = _cache_json_safe(chart)
+            record["chart_updated_at"] = now
+
+        headers = {
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates,return=minimal",
+        }
+        response = requests.post(
+            f"{base_url}/rest/v1/sethistock_public_snapshots",
+            headers=headers,
+            params={"on_conflict": "ticker"},
+            json=record,
+            timeout=CACHE_HTTP_TIMEOUT,
+        )
+        return response.status_code < 400
+    except Exception:
+        return False
+
 def _refresh_ticker_resolution(normalized: str, identity: str):
     ticker = resolve_ticker(normalized)
     _cache_write("ticker_resolution", identity, {"ticker": ticker}, CACHE_TTL_TICKER, ticker=ticker)
@@ -1162,6 +1199,7 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
         }
         if not is_peer and not source_timeouts and not source_errors:
             _cache_write("stock_analysis", ticker, result, CACHE_TTL_STOCK, ticker=ticker)
+            _snapshot_upsert(ticker, analysis=result)
         if analysis_slot_acquired:
             _stock_analysis_finished(ticker)
             _STOCK_ANALYSIS_GATE.release()
@@ -1281,6 +1319,7 @@ def get_stock_quote(raw_ticker: str, background_tasks: BackgroundTasks = None):
             "peers": _default_peers_for_ticker(ticker),
         }
         _cache_write("quote", ticker, result, CACHE_TTL_QUOTE, ticker=ticker)
+        _snapshot_upsert(ticker, quote=result)
         return result
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
@@ -1443,6 +1482,8 @@ def get_chart_data(raw_ticker: str, period: str = "1y", interval: str = "1d", ba
         })
         if result["closes"]:
             _cache_write("chart", cache_identity, result, CACHE_TTL_CHART, ticker=ticker)
+            if str(period).lower() == "1y" and str(interval).lower() == "1d":
+                _snapshot_upsert(ticker, chart=result)
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
