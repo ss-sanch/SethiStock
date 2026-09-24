@@ -695,6 +695,7 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
                 meta["served_from_cache"] = True
                 meta["request_ms"] = round((time.perf_counter() - analysis_started_at) * 1000)
                 cached_analysis["_meta"] = meta
+                _snapshot_upsert(ticker, analysis=cached_analysis)
                 return cached_analysis
         
         analysis_slot_acquired = False
@@ -712,6 +713,7 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
                 meta["served_from_cache"] = True
                 meta["request_ms"] = round((time.perf_counter() - analysis_started_at) * 1000)
                 queued_cached["_meta"] = meta
+                _snapshot_upsert(ticker, analysis=queued_cached)
                 _stock_analysis_finished(ticker)
                 _STOCK_ANALYSIS_GATE.release()
                 analysis_slot_acquired = False
