@@ -1201,7 +1201,16 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
         }
         if not is_peer and not source_timeouts and not source_errors:
             _cache_write("stock_analysis", ticker, result, CACHE_TTL_STOCK, ticker=ticker)
-            _snapshot_upsert(ticker, analysis=result)
+            snapshot_quote = {
+                "ticker": ticker.upper(),
+                "current_price": result.get("current_price", 0),
+                "change": result.get("change", 0),
+                "pct_change": result.get("pct_change", 0),
+                "market_cap": (result.get("stats") or {}).get("mkt_cap", "N/A"),
+                "peers": result.get("peers", []),
+            }
+            snapshot_chart = result.get("chart_preview") if isinstance(result.get("chart_preview"), dict) else None
+            _snapshot_upsert(ticker, analysis=result, quote=snapshot_quote, chart=snapshot_chart)
         if analysis_slot_acquired:
             _stock_analysis_finished(ticker)
             _STOCK_ANALYSIS_GATE.release()
