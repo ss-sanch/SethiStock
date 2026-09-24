@@ -351,6 +351,8 @@ class LoadTimingPayload(BaseModel):
     server_wake_ms: Optional[int] = None
     server_uptime_s: Optional[int] = None
     server_state: Optional[str] = None
+    snapshot_hit: Optional[bool] = None
+    snapshot_ms: Optional[int] = None
 def log_telemetry_event(project: str, action: str, ticker: Optional[str] = None, visitor_id: Optional[str] = None):
     """Silently logs user interactions to Supabase without blocking requests."""
     if not SUPABASE_URL or not SUPABASE_KEY:
@@ -1545,6 +1547,8 @@ def log_sethistock_load(data: LoadTimingPayload):
             "server_wake_ms": _bounded_ms(data.server_wake_ms),
             "server_uptime_s": _bounded_ms(data.server_uptime_s),
             "server_state": clean_server_state,        }
+            "snapshot_hit": data.snapshot_hit,
+            "snapshot_ms": _bounded_ms(data.snapshot_ms),
         response = requests.post(
             f"{clean_url}/rest/v1/sethistock_load_telemetry",
             headers=headers,
@@ -1635,6 +1639,8 @@ def get_admin_metrics(secret: str):
             index = max(0, min(len(ordered) - 1, math.ceil((percentile / 100) * len(ordered)) - 1))
             return ordered[index]
 
+        snapshot_values = _numeric_ms([row for row in load_logs if row.get("snapshot_hit") is True], "snapshot_ms")
+        snapshot_hit_rows = [row for row in load_logs if row.get("snapshot_hit") is True]
         quote_values = _numeric_ms(load_logs, "quote_ms")
         full_rows = [row for row in load_logs if row.get("status") == "full" and row.get("full_ms") is not None]
         full_values = _numeric_ms(full_rows, "full_ms")
@@ -1680,6 +1686,8 @@ def get_admin_metrics(secret: str):
         load_performance = {
             "samples": len(load_logs),
             "avg_quote_ms": _avg(quote_values),
+            "avg_snapshot_ms": _avg(snapshot_values),
+            "snapshot_hit_rate_pct": round((len(snapshot_hit_rows) / len(load_logs)) * 100, 1) if load_logs else 0.0,
             "avg_full_ms": _avg(full_values),
             "p95_full_ms": _percentile(full_values, 95),
             "timeout_rate_pct": round((len(timeout_rows) / len(load_logs)) * 100, 1) if load_logs else 0.0,
