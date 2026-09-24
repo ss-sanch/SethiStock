@@ -1599,7 +1599,11 @@ def get_admin_metrics(secret: str):
         full_values = _numeric_ms(full_rows, "full_ms")
         cached_rows = [row for row in full_rows if row.get("cache_hit") is True]
         cold_rows = [row for row in full_rows if row.get("cache_hit") is False]
-        timeout_rows = [row for row in load_logs if row.get("status") == "partial"]
+        timeout_rows = [
+            row for row in load_logs
+            if row.get("status") == "partial"
+            or "TIMEOUT" in str(row.get("error_code") or "").upper()
+        ]
 
         ticker_perf = {}
         for row in load_logs:
@@ -1608,7 +1612,7 @@ def get_admin_metrics(secret: str):
                 continue
             bucket = ticker_perf.setdefault(symbol, {"ticker": symbol, "loads": 0, "full_ms": [], "quote_ms": [], "timeouts": 0})
             bucket["loads"] += 1
-            if row.get("status") == "partial":
+            if row.get("status") == "partial" or "TIMEOUT" in str(row.get("error_code") or "").upper():
                 bucket["timeouts"] += 1
             try:
                 if row.get("full_ms") is not None:
