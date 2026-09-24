@@ -263,6 +263,43 @@ def _cache_write(namespace: str, identity: str, payload, ttl_seconds: int, ticke
         return False
 
 
+def _snapshot_upsert(ticker: str, analysis=None, quote=None, chart=None):
+    """Writes the latest public-safe SethiStock snapshot for cache-first frontend rendering."""
+    base_url = _cache_base_url()
+    key = SUPABASE_SERVICE_KEY or SUPABASE_KEY
+    if not base_url or not key or not ticker:
+        return False
+
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        record = {"ticker": str(ticker).upper(), "updated_at": now}
+        if analysis is not None:
+            record["analysis_payload"] = _cache_json_safe(analysis)
+            record["analysis_updated_at"] = now
+        if quote is not None:
+            record["quote_payload"] = _cache_json_safe(quote)
+            record["quote_updated_at"] = now
+        if chart is not None:
+            record["chart_payload"] = _cache_json_safe(chart)
+            record["chart_updated_at"] = now
+
+        headers = {
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates,return=minimal",
+        }
+        response = requests.post(
+            f"{base_url}/rest/v1/sethistock_public_snapshots",
+            headers=headers,
+            params={"on_conflict": "ticker"},
+            json=record,
+            timeout=CACHE_HTTP_TIMEOUT,
+        )
+        return response.status_code < 400
+    except Exception:
+        return False
+
 def _refresh_ticker_resolution(normalized: str, identity: str):
     ticker = resolve_ticker(normalized)
     _cache_write("ticker_resolution", identity, {"ticker": ticker}, CACHE_TTL_TICKER, ticker=ticker)
@@ -314,6 +351,8 @@ class LoadTimingPayload(BaseModel):
     server_wake_ms: Optional[int] = None
     server_uptime_s: Optional[int] = None
     server_state: Optional[str] = None
+    snapshot_hit: Optional[bool] = None
+    snapshot_ms: Optional[int] = None
 def log_telemetry_event(project: str, action: str, ticker: Optional[str] = None, visitor_id: Optional[str] = None):
     """Silently logs user interactions to Supabase without blocking requests."""
     if not SUPABASE_URL or not SUPABASE_KEY:
@@ -640,6 +679,7 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
             if _analysis_cache_payload_valid(cached_analysis):
                 should_refresh_analysis = cache_state == "stale"
                 cached_analysis = copy.deepcopy(cached_analysis)
+                live_quote = None
                 try:
                     live_quote = get_stock_quote(ticker, background_tasks)
                     cached_analysis["ticker"] = str(live_quote.get("ticker", ticker)).upper()
@@ -656,6 +696,16 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
                 meta["served_from_cache"] = True
                 meta["request_ms"] = round((time.perf_counter() - analysis_started_at) * 1000)
                 cached_analysis["_meta"] = meta
+                snapshot_quote = live_quote if isinstance(live_quote, dict) else {
+                    "ticker": ticker.upper(),
+                    "current_price": cached_analysis.get("current_price", 0),
+                    "change": cached_analysis.get("change", 0),
+                    "pct_change": cached_analysis.get("pct_change", 0),
+                    "market_cap": (cached_analysis.get("stats") or {}).get("mkt_cap", "N/A"),
+                    "peers": cached_analysis.get("peers", []),
+                }
+                snapshot_chart = cached_analysis.get("chart_preview") if isinstance(cached_analysis.get("chart_preview"), dict) else None
+                _snapshot_upsert(ticker, analysis=cached_analysis, quote=snapshot_quote, chart=snapshot_chart)
                 return cached_analysis
         
         analysis_slot_acquired = False
@@ -673,6 +723,16 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
                 meta["served_from_cache"] = True
                 meta["request_ms"] = round((time.perf_counter() - analysis_started_at) * 1000)
                 queued_cached["_meta"] = meta
+                queued_quote = {
+                    "ticker": ticker.upper(),
+                    "current_price": queued_cached.get("current_price", 0),
+                    "change": queued_cached.get("change", 0),
+                    "pct_change": queued_cached.get("pct_change", 0),
+                    "market_cap": (queued_cached.get("stats") or {}).get("mkt_cap", "N/A"),
+                    "peers": queued_cached.get("peers", []),
+                }
+                queued_chart = queued_cached.get("chart_preview") if isinstance(queued_cached.get("chart_preview"), dict) else None
+                _snapshot_upsert(ticker, analysis=queued_cached, quote=queued_quote, chart=queued_chart)
                 _stock_analysis_finished(ticker)
                 _STOCK_ANALYSIS_GATE.release()
                 analysis_slot_acquired = False
@@ -1162,6 +1222,16 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
         }
         if not is_peer and not source_timeouts and not source_errors:
             _cache_write("stock_analysis", ticker, result, CACHE_TTL_STOCK, ticker=ticker)
+            snapshot_quote = {
+                "ticker": ticker.upper(),
+                "current_price": result.get("current_price", 0),
+                "change": result.get("change", 0),
+                "pct_change": result.get("pct_change", 0),
+                "market_cap": (result.get("stats") or {}).get("mkt_cap", "N/A"),
+                "peers": result.get("peers", []),
+            }
+            snapshot_chart = result.get("chart_preview") if isinstance(result.get("chart_preview"), dict) else None
+            _snapshot_upsert(ticker, analysis=result, quote=snapshot_quote, chart=snapshot_chart)
         if analysis_slot_acquired:
             _stock_analysis_finished(ticker)
             _STOCK_ANALYSIS_GATE.release()
@@ -1281,6 +1351,7 @@ def get_stock_quote(raw_ticker: str, background_tasks: BackgroundTasks = None):
             "peers": _default_peers_for_ticker(ticker),
         }
         _cache_write("quote", ticker, result, CACHE_TTL_QUOTE, ticker=ticker)
+        _snapshot_upsert(ticker, quote=result)
         return result
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
@@ -1443,6 +1514,8 @@ def get_chart_data(raw_ticker: str, period: str = "1y", interval: str = "1d", ba
         })
         if result["closes"]:
             _cache_write("chart", cache_identity, result, CACHE_TTL_CHART, ticker=ticker)
+            if str(period).lower() == "1y" and str(interval).lower() == "1d":
+                _snapshot_upsert(ticker, chart=result)
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1504,6 +1577,8 @@ def log_sethistock_load(data: LoadTimingPayload):
             "server_wake_ms": _bounded_ms(data.server_wake_ms),
             "server_uptime_s": _bounded_ms(data.server_uptime_s),
             "server_state": clean_server_state,        }
+            "snapshot_hit": data.snapshot_hit,
+            "snapshot_ms": _bounded_ms(data.snapshot_ms),
         response = requests.post(
             f"{clean_url}/rest/v1/sethistock_load_telemetry",
             headers=headers,
@@ -1594,6 +1669,8 @@ def get_admin_metrics(secret: str):
             index = max(0, min(len(ordered) - 1, math.ceil((percentile / 100) * len(ordered)) - 1))
             return ordered[index]
 
+        snapshot_values = _numeric_ms([row for row in load_logs if row.get("snapshot_hit") is True], "snapshot_ms")
+        snapshot_hit_rows = [row for row in load_logs if row.get("snapshot_hit") is True]
         quote_values = _numeric_ms(load_logs, "quote_ms")
         full_rows = [row for row in load_logs if row.get("status") == "full" and row.get("full_ms") is not None]
         full_values = _numeric_ms(full_rows, "full_ms")
@@ -1639,6 +1716,8 @@ def get_admin_metrics(secret: str):
         load_performance = {
             "samples": len(load_logs),
             "avg_quote_ms": _avg(quote_values),
+            "avg_snapshot_ms": _avg(snapshot_values),
+            "snapshot_hit_rate_pct": round((len(snapshot_hit_rows) / len(load_logs)) * 100, 1) if load_logs else 0.0,
             "avg_full_ms": _avg(full_values),
             "p95_full_ms": _percentile(full_values, 95),
             "timeout_rate_pct": round((len(timeout_rows) / len(load_logs)) * 100, 1) if load_logs else 0.0,

@@ -1,0 +1,68 @@
+name: SethiStock Snapshot Warmer
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Seed missing snapshots or refresh the oldest snapshots
+        required: true
+        default: seed
+        type: choice
+        options:
+          - seed
+          - refresh
+          - auto
+      batch_size:
+        description: Number of tickers to process in this run
+        required: true
+        default: "100"
+        type: string
+  push:
+    branches:
+      - main
+    paths:
+      - "data/sethistock_seed_universe.json"
+      - "scripts/sethistock_snapshot_warmer.py"
+      - ".github/workflows/sethistock-snapshot-warmer.yml"
+  schedule:
+    # While coverage is incomplete, every run fills the next missing batch.
+    # Once fully seeded, only the 05:23 UTC run performs a refresh batch.
+    - cron: "23 1,5,9,13,17,21 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sethistock-snapshot-warmer
+  cancel-in-progress: false
+
+jobs:
+  warm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Seed or refresh public SethiStock snapshots
+        env:
+          SETHISTOCK_API: https://sethistock-api.onrender.com
+          SETHISTOCK_SNAPSHOT_API: https://gqqftksplktxfrilltsx.supabase.co/rest/v1/sethistock_public_snapshots
+          # Supabase anon keys are intentionally public client credentials. RLS limits
+          # this key to SELECT access on the public snapshot table.
+          SETHISTOCK_SNAPSHOT_ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdxcWZ0a3NwbGt0eGZyaWxsdHN4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODcwODYxNzMsImV4cCI6MjEwMjY2MjE3M30.epJsKCdBGrfzuWQ8a55TgyCA2T5-FjDYm-l0_338djs
+        run: |
+          MODE="auto"
+          BATCH="60"
+
+          if [ "${{ github.event_name }}" = "push" ]; then
+            MODE="seed"
+            BATCH="90"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            MODE="${{ inputs.mode }}"
+            BATCH="${{ inputs.batch_size }}"
+          fi
+
+          echo "mode=$MODE batch_size=$BATCH"
+          python scripts/sethistock_snapshot_warmer.py             --mode "$MODE"             --batch-size "$BATCH"             --refresh-hour 5             --request-timeout 90             --delay-seconds 1.5
