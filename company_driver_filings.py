@@ -14,13 +14,14 @@ from __future__ import annotations
 
 import math
 import re
-import threading
 import time
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
 from bs4 import BeautifulSoup
 from fastapi import HTTPException
+
+from runtime_limits import BoundedTTLCache, serialise_filing_parse
 
 import sec_fundamentals
 
@@ -59,25 +60,16 @@ _METRIC_TOKEN_ALIASES = {
     "processed_transactions": ["processed", "transactions", "transaction"],
 }
 
-_CACHE_LOCK = threading.Lock()
-_CACHE: Dict[str, Dict[str, Any]] = {}
+_CACHE = BoundedTTLCache(max_bytes=16 * 1024 * 1024, max_entries=8,
+                         ttl=max(FILING_CACHE_TTL, HTML_CACHE_TTL))
 
 
 def _cache_get(key: str, ttl: int):
-    now = time.monotonic()
-    with _CACHE_LOCK:
-        entry = _CACHE.get(key)
-        if not entry or now - entry["at"] > ttl:
-            if entry:
-                _CACHE.pop(key, None)
-            return None
-        return entry["value"]
+    return _CACHE.get(key, ttl)
 
 
 def _cache_set(key: str, value: Any):
-    with _CACHE_LOCK:
-        _CACHE[key] = {"at": time.monotonic(), "value": value}
-    return value
+    return _CACHE.set(key, value)
 
 
 def _sec_get_text(url: str) -> str:
@@ -249,6 +241,7 @@ def _inline_fact_value(tag: Any) -> Tuple[Any, bool]:
     return value, True
 
 
+@serialise_filing_parse
 def parse_inline_xbrl(html: str, filing: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Parse Inline XBRL facts while preserving custom dimensions and filing provenance."""
     soup = BeautifulSoup(html, "html.parser")
@@ -296,6 +289,7 @@ def parse_inline_xbrl(html: str, filing: Optional[Dict[str, Any]] = None) -> Dic
             "extraction_method": "sec_inline_xbrl",
         })
 
+    soup.decompose()
     return {
         "fact_count": len(facts),
         "context_count": len(contexts),

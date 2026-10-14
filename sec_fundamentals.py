@@ -22,6 +22,8 @@ from typing import Any, Dict, Optional
 import requests
 from fastapi import APIRouter, HTTPException, Query
 
+from runtime_limits import BoundedTTLCache
+
 import fundamentals_store
 from fundamentals_periods import (
     PERIOD_ENGINE_VERSION,
@@ -53,8 +55,8 @@ _SEC_HEADERS = {
 }
 _SEC_RATE_LOCK = threading.Lock()
 _SEC_LAST_REQUEST_AT = 0.0
-_SEC_CACHE_LOCK = threading.Lock()
-_SEC_CACHE: Dict[str, Dict[str, Any]] = {}
+_SEC_CACHE = BoundedTTLCache(max_bytes=32 * 1024 * 1024, max_entries=8,
+                             ttl=max(SEC_TICKER_MAP_TTL, SEC_COMPANYFACTS_TTL))
 
 
 def _sec_user_agent_configured():
@@ -71,21 +73,11 @@ def _require_sec_user_agent():
 
 
 def _cache_get(key: str, ttl_seconds: int):
-    now = time.monotonic()
-    with _SEC_CACHE_LOCK:
-        entry = _SEC_CACHE.get(key)
-        if not entry:
-            return None
-        if now - entry["stored_at"] > ttl_seconds:
-            _SEC_CACHE.pop(key, None)
-            return None
-        return entry["value"]
+    return _SEC_CACHE.get(key, ttl_seconds)
 
 
 def _cache_set(key: str, value: Any):
-    with _SEC_CACHE_LOCK:
-        _SEC_CACHE[key] = {"stored_at": time.monotonic(), "value": value}
-    return value
+    return _SEC_CACHE.set(key, value)
 
 
 def _wait_for_rate_slot():
