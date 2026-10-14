@@ -14,7 +14,8 @@ from datetime import datetime, timezone, timedelta
 import math
 import copy
 import threading
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import wait
+from runtime_limits import BoundedSourcePool
 from scipy.stats import norm
 from scipy.optimize import minimize
 import market_risk_lab
@@ -52,6 +53,7 @@ _CACHE_REFRESH_INFLIGHT = set()
 _CACHE_REFRESH_CONTEXT = threading.local()
 STOCK_ANALYSIS_MAX_CONCURRENT = max(1, int(os.getenv("SETHISTOCK_MAX_STOCK_ANALYSES", "1")))
 STOCK_ANALYSIS_QUEUE_TIMEOUT = max(1.0, float(os.getenv("SETHISTOCK_ANALYSIS_QUEUE_TIMEOUT", "20")))
+_STOCK_SOURCE_POOL = BoundedSourcePool(workers=3)
 _STOCK_ANALYSIS_GATE = threading.BoundedSemaphore(STOCK_ANALYSIS_MAX_CONCURRENT)
 _STOCK_ANALYSIS_STATE_LOCK = threading.Lock()
 _STOCK_ANALYSIS_ACTIVE = 0
@@ -422,9 +424,10 @@ def autocomplete_ticker(q: str):
     try:
         import requests
         # Instantly taps Yahoo's global search engine
-        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={q}&quotesCount=5&newsCount=0"
+        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={urllib.parse.quote(q)}&quotesCount=5&newsCount=0"
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-        res = requests.get(url, headers=headers)
+        res = requests.get(url, headers=headers, timeout=3)
+        res.raise_for_status()
         quotes = res.json().get('quotes', [])
         
         # Filter for actual equities and clean up the data
@@ -625,6 +628,8 @@ def runtime_status():
         tickers = dict(_STOCK_ANALYSIS_ACTIVE_TICKERS)
     return {
         "rss_mb": _process_rss_mb(),
+        "sec_cache": sec_fundamentals._SEC_CACHE.stats(),
+        "research_cache": stock_research._RESEARCH_CACHE.stats(),
         "stock_analyses_active": active,
         "stock_analyses_peak": peak,
         "stock_analyses_total": total,
@@ -787,13 +792,12 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
 
         # A single slow Yahoo/Finviz source must never own the only analysis slot forever.
         # Collect what finishes inside one shared budget and continue with safe fallbacks.
-        source_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="sethistock-core")
         source_futures = {
-            "statements": source_executor.submit(_fetch_statement_bundle),
-            "profile": source_executor.submit(_fetch_info_and_finviz),
-            "history": source_executor.submit(_fetch_history_bundle),
+            "statements": _STOCK_SOURCE_POOL.submit(_fetch_statement_bundle),
+            "profile": _STOCK_SOURCE_POOL.submit(_fetch_info_and_finviz),
+            "history": _STOCK_SOURCE_POOL.submit(_fetch_history_bundle),
         }
-        done, _not_done = wait(source_futures.values(), timeout=STOCK_SOURCE_BUDGET_SECONDS)
+        done, _not_done = wait([future for future in source_futures.values() if future is not None], timeout=STOCK_SOURCE_BUDGET_SECONDS)
         source_results = {}
         for source_name, future in source_futures.items():
             if future in done:
@@ -803,10 +807,11 @@ def get_stock_data(raw_ticker: str, background_tasks: BackgroundTasks = None, is
                     source_errors[source_name] = type(exc).__name__
             else:
                 source_timeouts.append(source_name)
-                future.cancel()
+                if future is not None:
+                    future.cancel()
 
-        # Do not wait for a late network worker during request teardown.
-        source_executor.shutdown(wait=False, cancel_futures=True)
+        # The process-wide pool retains running workers until they actually finish.
+        # Later requests cannot create another pool behind a timed-out network call.
 
         fin, cf, bs, q_fin = source_results.get(
             "statements",
@@ -1576,9 +1581,10 @@ def log_sethistock_load(data: LoadTimingPayload):
             "error_code": str(data.error_code)[:80] if data.error_code else None,
             "server_wake_ms": _bounded_ms(data.server_wake_ms),
             "server_uptime_s": _bounded_ms(data.server_uptime_s),
-            "server_state": clean_server_state,        }
+            "server_state": clean_server_state,
             "snapshot_hit": data.snapshot_hit,
             "snapshot_ms": _bounded_ms(data.snapshot_ms),
+        }
         response = requests.post(
             f"{clean_url}/rest/v1/sethistock_load_telemetry",
             headers=headers,

@@ -6,17 +6,16 @@ Free-data research features built on yfinance:
    from reported quarterly EPS and compares today's P/E with its own history.
 """
 
-import time
-
 import numpy as np
 import pandas as pd
 import yfinance as yf
 from fastapi import APIRouter
+from runtime_limits import BoundedTTLCache
 
 router = APIRouter(prefix="/api/research", tags=["SethiStock Research"])
 
-_RESEARCH_CACHE = {}
 _CACHE_TTL_SECONDS = 21600  # 6 hours; earnings history changes slowly.
+_RESEARCH_CACHE = BoundedTTLCache(max_bytes=2 * 1024 * 1024, max_entries=64, ttl=_CACHE_TTL_SECONDS)
 
 
 def _safe_float(value):
@@ -297,10 +296,9 @@ def get_stock_research_payload(ticker, stock=None, prices=None, current_pe=None)
     if not ticker or len(ticker) > 20:
         return {"ticker": ticker, "earnings_reaction": {"available": False}, "valuation_bands": {"available": False}}
 
-    now = time.time()
     cached = _RESEARCH_CACHE.get(ticker)
-    if cached and now - cached[0] < _CACHE_TTL_SECONDS:
-        return cached[1]
+    if cached is not None:
+        return cached
 
     try:
         result = _calculate_stock_research(ticker, stock=stock, prices=prices, current_pe=current_pe)
@@ -312,7 +310,7 @@ def get_stock_research_payload(ticker, stock=None, prices=None, current_pe=None)
             "error": str(exc),
         }
 
-    _RESEARCH_CACHE[ticker] = (now, result)
+    _RESEARCH_CACHE.set(ticker, result)
     return result
 
 

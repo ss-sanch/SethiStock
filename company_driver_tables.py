@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 from bs4 import BeautifulSoup
+from runtime_limits import serialise_filing_parse
 from fastapi import HTTPException
 
 import company_driver_filings
@@ -359,6 +360,7 @@ _EXTRACTORS = {
 }
 
 
+@serialise_filing_parse
 def build_table_history(
     ticker: str,
     metric: Dict[str, Any],
@@ -391,7 +393,10 @@ def build_table_history(
                 if extractor is None:
                     raise ValueError(f"Unknown filing-table extractor: {extractor_name}")
                 soup = BeautifulSoup(html, "html.parser")
-                extracted = extractor(soup, filing)
+                try:
+                    extracted = extractor(soup, filing)
+                finally:
+                    soup.decompose()
         except HTTPException as exc:
             if exc.status_code != 413:
                 raise
