@@ -1576,9 +1576,10 @@ def log_sethistock_load(data: LoadTimingPayload):
             "error_code": str(data.error_code)[:80] if data.error_code else None,
             "server_wake_ms": _bounded_ms(data.server_wake_ms),
             "server_uptime_s": _bounded_ms(data.server_uptime_s),
-            "server_state": clean_server_state,        }
+            "server_state": clean_server_state,
             "snapshot_hit": data.snapshot_hit,
             "snapshot_ms": _bounded_ms(data.snapshot_ms),
+        }
         response = requests.post(
             f"{clean_url}/rest/v1/sethistock_load_telemetry",
             headers=headers,
