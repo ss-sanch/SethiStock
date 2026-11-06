@@ -33,6 +33,7 @@ _LOCKS_GUARD = threading.Lock()
 _LOCKS: Dict[str, threading.Lock] = {}
 _REFRESHING_GUARD = threading.Lock()
 _REFRESHING: set[str] = set()
+_MAX_BACKGROUND_REFRESHES = 2
 
 
 class DriverStoreError(RuntimeError):
@@ -510,7 +511,8 @@ def get_or_refresh_history(
 
     if cached:
         with _REFRESHING_GUARD:
-            should_start = cache_key not in _REFRESHING
+            already_refreshing = cache_key in _REFRESHING
+            should_start = not already_refreshing and len(_REFRESHING) < _MAX_BACKGROUND_REFRESHES
             if should_start:
                 _REFRESHING.add(cache_key)
         if should_start:
@@ -527,7 +529,7 @@ def get_or_refresh_history(
                 daemon=True,
                 name=f"driver-refresh-{symbol}-{metric_key}",
             ).start()
-        cached["cache_state"] = "stale_while_revalidate"
+        cached["cache_state"] = "stale_while_revalidate" if should_start or already_refreshing else "stale"
         return cached
 
     lock = _lock_for(cache_key)

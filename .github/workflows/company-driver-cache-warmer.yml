@@ -22,7 +22,6 @@ jobs:
           SETHISTOCK_API: https://sethistock-api.onrender.com
         run: |
           python - <<'PY'
-          import concurrent.futures
           import json
           import os
           import time
@@ -41,10 +40,17 @@ jobs:
                       req = urllib.request.Request(base + path, headers=headers)
                       with urllib.request.urlopen(req, timeout=timeout) as response:
                           return json.load(response)
-                  except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ConnectionError) as exc:
+                  except urllib.error.HTTPError as exc:
+                      if exc.code not in (429, 500, 502, 503, 504):
+                          raise
                       last = repr(exc)
-                      if attempt < attempts:
-                          time.sleep(4 * attempt)
+                      retry_after = exc.headers.get('Retry-After', '')
+                      delay = max(15 * attempt, int(retry_after)) if retry_after.isdecimal() else 15 * attempt
+                  except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+                      last = repr(exc)
+                      delay = 15 * attempt
+                  if attempt < attempts:
+                      time.sleep(delay)
               raise RuntimeError(f'{path}: {last}')
 
           companies_payload = get_json('/api/drivers/companies', timeout=60)
@@ -82,13 +88,16 @@ jobs:
               payload = get_json(path)
               state = payload.get('cache_state')
 
-              # Stale snapshots are already instant for users and start SWR refresh.
-              # Touch the key again after a short wait so the next user normally sees
-              # the refreshed snapshot rather than being the request that initiates it.
-              if state in {'stale_while_revalidate', 'stale', 'stale_refreshing', 'refreshing'}:
-                  time.sleep(5)
+              # A stale response can defer its refresh while the API is busy.
+              # Retry only deferred refreshes. An in-flight refresh already has the key.
+              for _ in range(4):
+                  if state != 'stale':
+                      break
+                  time.sleep(15)
                   payload = get_json(path, timeout=120, attempts=2)
                   state = payload.get('cache_state')
+              if state == 'stale':
+                  raise RuntimeError(f'{path}: refresh remained deferred')
 
               return {
                   'ticker': ticker,
@@ -103,17 +112,14 @@ jobs:
 
           results = []
           failures = []
-          with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
-              future_map = {pool.submit(warm_one, item): item for item in tasks}
-              for future in concurrent.futures.as_completed(future_map):
-                  item = future_map[future]
-                  try:
-                      result = future.result()
-                      results.append(result)
-                      print('WARM_OK=' + json.dumps(result, separators=(',', ':')), flush=True)
-                  except Exception as exc:
-                      failures.append({'ticker': item[0], 'metric': item[1], 'period': item[2], 'error': repr(exc)})
-                      print('WARM_FAIL=' + json.dumps(failures[-1], separators=(',', ':')), flush=True)
+          for item in tasks:
+              try:
+                  result = warm_one(item)
+                  results.append(result)
+                  print('WARM_OK=' + json.dumps(result, separators=(',', ':')), flush=True)
+              except Exception as exc:
+                  failures.append({'ticker': item[0], 'metric': item[1], 'period': item[2], 'error': repr(exc)})
+                  print('WARM_FAIL=' + json.dumps(failures[-1], separators=(',', ':')), flush=True)
 
           persistent = sum(1 for row in results if row.get('persistent') is True)
           verified = sum(1 for row in results if row.get('verified') is True)

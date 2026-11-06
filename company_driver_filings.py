@@ -12,10 +12,13 @@ histories without manufacturing continuity.
 
 from __future__ import annotations
 
+from collections import OrderedDict
+import json
 import math
 import re
 import threading
 import time
+import zlib
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
@@ -60,23 +63,42 @@ _METRIC_TOKEN_ALIASES = {
 }
 
 _CACHE_LOCK = threading.Lock()
-_CACHE: Dict[str, Dict[str, Any]] = {}
+# Store compact bytes so large parsed filing trees cannot accumulate in the API.
+_CACHE_MAX_BYTES = 16 * 1024 * 1024
+_CACHE_MAX_ENTRIES = 128
+_CACHE: OrderedDict[str, Tuple[float, bytes]] = OrderedDict()
+_CACHE_BYTES = 0
+_FILING_PARSE_LOCK = threading.Lock()
 
 
 def _cache_get(key: str, ttl: int):
-    now = time.monotonic()
+    global _CACHE_BYTES
     with _CACHE_LOCK:
         entry = _CACHE.get(key)
-        if not entry or now - entry["at"] > ttl:
-            if entry:
-                _CACHE.pop(key, None)
+        if entry is None:
             return None
-        return entry["value"]
+        stored_at, payload = entry
+        if time.monotonic() - stored_at > ttl:
+            del _CACHE[key]
+            _CACHE_BYTES -= len(payload)
+            return None
+        _CACHE.move_to_end(key)
+    return json.loads(zlib.decompress(payload))
 
 
 def _cache_set(key: str, value: Any):
+    global _CACHE_BYTES
+    payload = zlib.compress(json.dumps(value, separators=(",", ":")).encode("utf-8"), level=1)
     with _CACHE_LOCK:
-        _CACHE[key] = {"at": time.monotonic(), "value": value}
+        previous = _CACHE.pop(key, None)
+        if previous is not None:
+            _CACHE_BYTES -= len(previous[1])
+        if len(payload) <= _CACHE_MAX_BYTES:
+            while _CACHE_BYTES + len(payload) > _CACHE_MAX_BYTES or len(_CACHE) >= _CACHE_MAX_ENTRIES:
+                _, (_, evicted) = _CACHE.popitem(last=False)
+                _CACHE_BYTES -= len(evicted)
+            _CACHE[key] = (time.monotonic(), payload)
+            _CACHE_BYTES += len(payload)
     return value
 
 
@@ -251,7 +273,15 @@ def _inline_fact_value(tag: Any) -> Tuple[Any, bool]:
 
 def parse_inline_xbrl(html: str, filing: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Parse Inline XBRL facts while preserving custom dimensions and filing provenance."""
-    soup = BeautifulSoup(html, "html.parser")
+    with _FILING_PARSE_LOCK:
+        soup = BeautifulSoup(html, "html.parser")
+        try:
+            return _extract_inline_facts(soup, filing)
+        finally:
+            soup.decompose()
+
+
+def _extract_inline_facts(soup: BeautifulSoup, filing: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     contexts = _context_map(soup)
     facts: List[Dict[str, Any]] = []
     prefixes = set()

@@ -76,3 +76,53 @@ def test_unknown_ticker_is_not_silently_generalised():
         assert exc.args[0] == "AMD"
     else:
         raise AssertionError("Unsupported ticker should not receive a fabricated registry")
+
+
+def test_parsed_filing_cache_evicts_oldest_and_skips_oversize(monkeypatch):
+    from collections import OrderedDict
+    from random import Random
+
+    import company_driver_filings as filings
+
+    monkeypatch.setattr(filings, "_CACHE", OrderedDict())
+    monkeypatch.setattr(filings, "_CACHE_BYTES", 0)
+    monkeypatch.setattr(filings, "_CACHE_MAX_BYTES", 100)
+    first = {"facts": [Random(1).randbytes(20).hex()]}
+    second = {"facts": [Random(2).randbytes(20).hex()]}
+    oversized = {"facts": [Random(3).randbytes(200).hex()]}
+
+    assert filings._cache_set("first", first) == first
+    assert filings._cache_get("first", 60) == first
+    filings._cache_set("second", second)
+    assert filings._cache_get("first", 60) is None
+    assert filings._cache_get("second", 60) == second
+    assert filings._cache_set("oversized", oversized) == oversized
+    assert filings._cache_get("oversized", 60) is None
+    assert filings._CACHE_BYTES <= filings._CACHE_MAX_BYTES
+
+
+def test_stale_history_defers_new_refresh_at_capacity(monkeypatch):
+    import company_driver_store as store
+
+    class DeferredThread:
+        def __init__(self, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(store, "_REFRESHING", set())
+    monkeypatch.setattr(store, "_MAX_BACKGROUND_REFRESHES", 1)
+    monkeypatch.setattr(store.threading, "Thread", DeferredThread)
+    monkeypatch.setattr(store, "is_configured", lambda: True)
+    monkeypatch.setattr(store, "load_history", lambda **kwargs: {"cache_fresh": False, "observations": [1]})
+
+    def get(metric):
+        return store.get_or_refresh_history(
+            ticker="MSFT", metric={"key": metric}, filing_limit=16,
+            period="annual", observation_limit=40, builder=None,
+        )
+
+    assert get("first")["cache_state"] == "stale_while_revalidate"
+    assert get("first")["cache_state"] == "stale_while_revalidate"
+    assert get("second") == {"cache_fresh": False, "observations": [1], "cache_state": "stale"}

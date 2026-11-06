@@ -390,8 +390,12 @@ def build_table_history(
                 html = company_driver_filings._sec_get_text(filing["source_url"])
                 if extractor is None:
                     raise ValueError(f"Unknown filing-table extractor: {extractor_name}")
-                soup = BeautifulSoup(html, "html.parser")
-                extracted = extractor(soup, filing)
+                with company_driver_filings._FILING_PARSE_LOCK:
+                    soup = BeautifulSoup(html, "html.parser")
+                    try:
+                        extracted = extractor(soup, filing)
+                    finally:
+                        soup.decompose()
         except HTTPException as exc:
             if exc.status_code != 413:
                 raise
