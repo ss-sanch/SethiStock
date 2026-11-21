@@ -15,7 +15,7 @@ concurrency:
 jobs:
   warm:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 75
     steps:
       - name: Warm verified flagship Company Drivers
         env:
@@ -28,10 +28,20 @@ jobs:
           import urllib.error
           import urllib.parse
           import urllib.request
+          from collections import deque
 
           base = os.environ['SETHISTOCK_API'].rstrip('/')
           headers = {'User-Agent': 'SethiStock Company Driver cache warmer/1.1'}
           warm_periods = ('quarterly', 'annual')
+          # These verified rules currently return quarterly observations only.
+          quarterly_only = {
+              ('AMZN', 'advertising_services_revenue'),
+              ('JPM', 'cet1_ratio'),
+              ('NFLX', 'paid_memberships'),
+              ('V', 'processed_transactions'),
+          }
+          pending_states = {'stale', 'stale_while_revalidate'}
+          refresh_timeout = 12 * 60
 
           def get_json(path, timeout=180, attempts=4):
               last = None
@@ -70,56 +80,74 @@ jobs:
           for ticker in companies:
               coverage = get_json(f'/api/drivers/{urllib.parse.quote(ticker)}/coverage', timeout=90)
               verified = [row['key'] for row in coverage.get('metrics', []) if row.get('verified') is True]
+              assert verified, f'{ticker}: no verified Company Drivers'
               coverage_summary[ticker] = verified
               for metric in verified:
                   for period in warm_periods:
+                      if period == 'annual' and (ticker, metric) in quarterly_only:
+                          continue
                       tasks.append((ticker, metric, period))
 
           print('WARM_TARGETS=' + json.dumps({k: len(v) for k, v in coverage_summary.items()}, sort_keys=True), flush=True)
           print('WARM_PERIODS=' + ','.join(warm_periods), flush=True)
 
-          def warm_one(item):
+          def warm_one(item, started):
               ticker, metric, period = item
               path = (
                   f'/api/drivers/{urllib.parse.quote(ticker)}/history/{urllib.parse.quote(metric)}'
                   f'?filings=16&period={urllib.parse.quote(period)}&limit=40'
               )
-              started = time.time()
               payload = get_json(path)
               state = payload.get('cache_state')
-
-              # A stale response can defer its refresh while the API is busy.
-              # Retry only deferred refreshes. An in-flight refresh already has the key.
-              for _ in range(4):
-                  if state != 'stale':
-                      break
-                  time.sleep(15)
-                  payload = get_json(path, timeout=120, attempts=2)
-                  state = payload.get('cache_state')
-              if state == 'stale':
-                  raise RuntimeError(f'{path}: refresh remained deferred')
+              elapsed = time.monotonic() - started
+              if state in pending_states:
+                  if elapsed >= refresh_timeout:
+                      raise RuntimeError(f'{path}: refresh did not finish ({state})')
+                  return None
+              observations = payload.get('observation_count', len(payload.get('observations') or []))
+              if (payload.get('verified') is not True or payload.get('cache_persistent') is not True
+                      or payload.get('cache_fresh') is not True or not observations):
+                  raise RuntimeError(f'{path}: expected a fresh, persisted, verified history; '
+                                     f'got {state} with {observations} observations')
 
               return {
                   'ticker': ticker,
                   'metric': metric,
                   'period': period,
                   'verified': payload.get('verified'),
-                  'observations': payload.get('observation_count', len(payload.get('observations') or [])),
+                  'observations': observations,
                   'cache_state': state,
                   'persistent': payload.get('cache_persistent'),
-                  'seconds': round(time.time() - started, 3),
+                  'seconds': round(elapsed, 3),
               }
 
           results = []
           failures = []
-          for item in tasks:
+          remaining = deque(tasks)
+          pending = {}
+
+          def check_history(item, started):
               try:
-                  result = warm_one(item)
+                  result = warm_one(item, started)
+                  if result is None:
+                      pending[item] = started
+                      return
                   results.append(result)
                   print('WARM_OK=' + json.dumps(result, separators=(',', ':')), flush=True)
               except Exception as exc:
                   failures.append({'ticker': item[0], 'metric': item[1], 'period': item[2], 'error': repr(exc)})
                   print('WARM_FAIL=' + json.dumps(failures[-1], separators=(',', ':')), flush=True)
+              pending.pop(item, None)
+
+          while remaining or pending:
+              # The API allows two background refreshes. Poll those histories before
+              # asking it to take on more work, while still serving stale data to users.
+              for item, started in tuple(pending.items()):
+                  check_history(item, started)
+              while remaining and len(pending) < 2:
+                  check_history(remaining.popleft(), time.monotonic())
+              if pending:
+                  time.sleep(15)
 
           persistent = sum(1 for row in results if row.get('persistent') is True)
           verified = sum(1 for row in results if row.get('verified') is True)
@@ -143,10 +171,7 @@ jobs:
 
           if failures:
               raise AssertionError(f'Company Driver warmer failures: {failures}')
-          if verified != len(results) or persistent != len(results):
-              raise AssertionError(f'Unexpected non-persistent/non-verified histories: {summary}')
-          for period in warm_periods:
-              if by_period[period]['completed'] != len(tasks) // len(warm_periods):
-                  raise AssertionError(f'Incomplete {period} warmer coverage: {summary}')
+          if len(results) != len(tasks):
+              raise AssertionError(f'Incomplete warmer coverage: {summary}')
           print('COMPANY_DRIVER_CACHE_WARM_OK', flush=True)
           PY
