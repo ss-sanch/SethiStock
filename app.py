@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, Header, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 import yfinance as yf
 import pandas as pd
@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime, timezone, timedelta
 import math
+from hmac import compare_digest
 import copy
 import threading
 from concurrent.futures import ThreadPoolExecutor, wait
@@ -1591,22 +1592,48 @@ def log_sethistock_load(data: LoadTimingPayload):
         return {"status": "ignored"}
 
 # --- SECURE ADMIN METRICS ENDPOINT ---
-@app.get("/api/admin/telemetry")
-def get_admin_metrics(secret: str):
-    """Secured analytics data for the admin command center."""
-    if secret != ADMIN_SECRET:
+def _require_telemetry_owner(authorization, legacy_secret):
+    if authorization:
+        scheme, _, token = authorization.partition(" ")
+        if scheme.lower() != "bearer" or not token or not SUPABASE_URL or not SUPABASE_KEY:
+            raise HTTPException(status_code=401, detail="Owner sign-in required")
+        try:
+            result = requests.post(
+                f"{_cache_base_url()}/rest/v1/rpc/sethiway_is_owner",
+                headers={"apikey": SUPABASE_KEY, "Authorization": authorization},
+                json={},
+                timeout=5,
+            )
+            if result.status_code == 200 and result.json() is True:
+                return
+            if result.status_code not in (200, 401, 403):
+                raise HTTPException(status_code=503, detail="Owner access check unavailable")
+        except (requests.RequestException, ValueError) as exc:
+            raise HTTPException(status_code=503, detail="Owner access check unavailable") from exc
+        raise HTTPException(status_code=403, detail="Owner access required")
+    if not ADMIN_SECRET or not legacy_secret or not compare_digest(legacy_secret.encode(), ADMIN_SECRET.encode()):
         raise HTTPException(status_code=401, detail="Unauthorized: Invalid admin credentials")
-    
-    if not SUPABASE_URL or not SUPABASE_KEY:
+
+
+@app.get("/api/admin/telemetry")
+def get_admin_metrics(
+    secret: Optional[str] = None,
+    authorization: Optional[str] = Header(default=None),
+    x_admin_secret: Optional[str] = Header(default=None),
+):
+    """Secured analytics data for the admin command centre."""
+    _require_telemetry_owner(authorization, x_admin_secret or secret)
+    admin_key = SUPABASE_SERVICE_KEY or SUPABASE_KEY
+    if not SUPABASE_URL or not admin_key:
         raise HTTPException(status_code=500, detail="Supabase environment variables not configured")
 
     try:
-        clean_url = SUPABASE_URL.replace("/rest/v1", "").rstrip("/")
+        clean_url = _cache_base_url()
         headers = {
-            "apikey": SUPABASE_KEY,
-            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "apikey": admin_key,
+            "Authorization": f"Bearer {admin_key}",
         }
-        
+
         # 1. Fetch Traffic Logs
         url_traffic = f"{clean_url}/rest/v1/traffic_logs?select=*&order=created_at.desc&limit=1000"
         res_traffic = requests.get(url_traffic, headers=headers, timeout=5)
@@ -1618,13 +1645,8 @@ def get_admin_metrics(secret: str):
         mkw_logs = res_mkw.json() if res_mkw.status_code == 200 else []
 
         # 3. Fetch SethiStock load-performance telemetry
-        admin_key = SUPABASE_SERVICE_KEY or SUPABASE_KEY
-        perf_headers = {
-            "apikey": admin_key,
-            "Authorization": f"Bearer {admin_key}",
-        }
         url_loads = f"{clean_url}/rest/v1/sethistock_load_telemetry?select=*&order=created_at.desc&limit=500"
-        res_loads = requests.get(url_loads, headers=perf_headers, timeout=5)
+        res_loads = requests.get(url_loads, headers=headers, timeout=5)
         load_logs = res_loads.json() if res_loads.status_code == 200 else []
 
         # 4. Compute Traffic Metrics
